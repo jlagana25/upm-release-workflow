@@ -1,0 +1,28 @@
+# UPM Release Workflow — Python Dependencies
+# Install with:  pip install -r requirements.txt
+
+# Core
+python-docx>=1.1.0          # DOCX read/write (Step 4 album list, folder setup)
+pandas>=2.0.0               # CSV/XLSX tracklists & metadata (Steps 1, 6-9, 15)
+openpyxl>=3.1.0             # XLSX engine for pandas read_excel/to_excel AND
+                            #   direct workbook editing.  Required by the Domo
+                            #   xlsx exports (Japan JMD/TSS, SoundExchange) and
+                            #   the ISRC ingest-form splitter.
+numpy>=1.24.0               # array ops for UniSync screen matching
+requests>=2.31.0            # Cover art download (Step 6)
+
+# Domo export automation (Step 1)
+playwright>=1.43.0          # Browser automation
+# After install, also run:  playwright install chromium
+python-dateutil>=2.9.0      # date handling (also a pandas dep; pinned explicit)
+
+# macOS UI automation (Step 5 UniSync, Step 12 Soundminer)
+pyautogui>=0.9.54
+Pillow>=10.0.0
+opencv-python>=4.8.0        # enables confidence= matching in pyautogui.locateOnScreen()
+
+# ---------------------------------------------------------------------------
+# Legacy / no longer imported by the pipeline (kept commented for reference):
+#   tqdm          — progress bars; not used by any current module
+#   ttkbootstrap  — GUI for the retired Album_Cover_Manager.py (now covers.py)
+# ---------------------------------------------------------------------------

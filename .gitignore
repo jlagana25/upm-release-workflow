@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+Icon?
+
+# Workflow run artifacts (regenerated every run; never source)
+_logs/
+*.log
+unisync_debug_steps/
+soundminer_debug/
+*_debug_steps/
+
+# Playwright / browser session state
+.auth/
+playwright/.cache/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# NOTE: requirements.lock IS committed (it pins the known-good versions).
+#       The Pegasus volumes and _Exports live OUTSIDE this repo and are
+#       never tracked - only the code under files/ belongs in git.
