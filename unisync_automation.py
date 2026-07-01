@@ -64,11 +64,12 @@ from config import ReleaseContext
 # (/Users/hdfuser/Documents/Scripts/Python/…).  Deriving from __file__ avoids
 # that whole class of path bugs.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_FILES_DIR = Path(__file__).resolve().parent
 
-SCREENSHOTS_DIR = _REPO_ROOT / "screenshots"
+# Reference crops are versioned in git alongside the code (inside files/).
+SCREENSHOTS_DIR = _FILES_DIR / "screenshots"
 
-# Where to save full-screen captures whenever a job fails — invaluable for
-# diagnosing what state UniSync was in when the locator timed out.
+# Diagnostics stay outside the repo (writable, machine-local, not versioned).
 DEBUG_STEP_DIR = _REPO_ROOT / "_logs" / "unisync_debug_steps"
 
 FAILURE_SCREENSHOTS_DIR = _REPO_ROOT / "_logs" / "unisync_failures"
