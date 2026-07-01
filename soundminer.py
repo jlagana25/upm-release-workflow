@@ -103,14 +103,15 @@ SOUNDMINER_APP = "Soundminer v5Pro"
 # so the module works wherever the repo lives — critical here because it
 # runs on the REMOTE Soundminer Mac, whose layout
 # (/Volumes/hdfuser/Documents/Scripts/Python/…) differs from the pipeline
-# machine's.  soundminer.py sits at <repo>/files/soundminer.py, so the repo
-# root is two parents up and the screenshots folder is its sibling.
+# machine's.  soundminer.py sits at <repo>/files/soundminer.py.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_FILES_DIR = Path(__file__).resolve().parent
 
-SCREENSHOTS_DIR = _REPO_ROOT / "screenshots"
+# Reference crops live INSIDE the code folder so they're versioned in git and a
+# fresh clone already has them (a new machine isn't missing GUI assets).
+SCREENSHOTS_DIR = _FILES_DIR / "screenshots"
 
-# Diagnostics live under the repo too, so they're writable on whichever
-# machine runs this and easy to find next to the code.
+# Diagnostics stay OUTSIDE the repo (writable, machine-local, not versioned).
 DEBUG_STEP_DIR = _REPO_ROOT / "_logs" / "soundminer_debug_steps"
 
 FAILURE_SCREENSHOTS_DIR = _REPO_ROOT / "_logs" / "soundminer_failures"
@@ -199,7 +200,8 @@ def verify_screenshots(logger: logging.Logger) -> bool:
         logger.error(
             f"Screenshots directory not found:\n"
             f"  {SCREENSHOTS_DIR}\n"
-            f"  Create it and add the four PNG crops listed in the module docstring."
+            f"  Capture the reference crops on this machine with:\n"
+            f"    python3 make_soundminer_crops.py"
         )
         return False
 
@@ -214,9 +216,10 @@ def verify_screenshots(logger: logging.Logger) -> bool:
 
     if not all_ok:
         logger.error(
-            "\n  Crop the missing screenshots from the Soundminer reference images\n"
-            "  (Soundminer_nbc.png, Soundminer_dbselect.png, Soundminer_mirror.png)\n"
-            f"  and save them to:\n  {SCREENSHOTS_DIR}"
+            "\n  (Re)capture the missing crops on this machine with:\n"
+            "    python3 make_soundminer_crops.py\n"
+            "  It walks you through each one and saves them to:\n"
+            f"  {SCREENSHOTS_DIR}"
         )
     return all_ok
 
