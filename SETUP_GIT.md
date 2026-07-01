@@ -86,6 +86,53 @@ git pull
 
 ---
 
+## Editing with Claude Code (optional)
+
+Claude Code is Anthropic's terminal coding agent. It edits the real files in
+`files/` directly, can run the smoke test / dry-runs itself, and makes git
+commits — so code changes skip the download-and-verify round trip. It works on
+top of the git setup above: its edits are normal `git diff`s you review before
+committing.
+
+**Install** (on the machine you edit from — the native installer needs no Node.js):
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Docs: https://docs.claude.com/en/docs/claude-code/overview
+It signs in with your Claude subscription (Pro/Max) or an API key on first launch.
+
+**Use it** — run it from inside the repo and talk to it in plain English:
+
+```bash
+cd "/Users/hdfuser/Documents/Python/UPM Release WorkFlow Automation/files"
+claude
+```
+
+Example asks: "add a `--skip-...` flag for X", "make this error message clearer",
+"run the smoke test and fix whatever breaks". It reads the files, edits them, and
+can run `python3 smoke_test.py` / `make verify` itself and iterate until green.
+
+**The loop with Claude Code:**
+
+```bash
+git pull                        # start current
+claude                          # make changes by asking; review its diffs
+make smoke                      # (it can run this for you)
+git add -A && git commit -m "what changed" && git push
+# other machine:  git pull
+```
+
+**Boundaries:**
+- It edits code on the machine it runs on — it will **not** drive the Soundminer
+  GUI, mount the Pegasus volumes, or execute a real release. Those are unchanged.
+- Review its diffs before committing; `git restore <file>` discards a change you
+  don't want.
+- It's tied to your paid Claude plan / API billing.
+
+---
+
 ## Notes
 
 - This versions the **code only**. Release runs, Soundminer GUI automation, and
