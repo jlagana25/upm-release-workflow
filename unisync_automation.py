@@ -51,7 +51,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from config import ReleaseContext
+from config import ReleaseContext, current_hostname
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -66,8 +66,9 @@ from config import ReleaseContext
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FILES_DIR = Path(__file__).resolve().parent
 
-# Reference crops are versioned in git alongside the code (inside files/).
-SCREENSHOTS_DIR = _FILES_DIR / "screenshots"
+# Reference crops are versioned in git, split per-machine by hostname (a pixel
+# crop only matches the screen it was captured on).  Each Mac reads its own set.
+SCREENSHOTS_DIR = _FILES_DIR / "screenshots" / current_hostname()
 
 # Diagnostics stay outside the repo (writable, machine-local, not versioned).
 DEBUG_STEP_DIR = _REPO_ROOT / "_logs" / "unisync_debug_steps"

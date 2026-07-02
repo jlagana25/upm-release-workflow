@@ -165,24 +165,40 @@ map.
 
 ## Reference screenshots (crops)
 
-The GUI automation (Soundminer, UniSync) finds on-screen buttons by matching
-against tight PNG **crops** in `files/screenshots/` — now versioned in git, so a
-clone has them. They're captured from a specific Mac's display; on very different
-hardware/resolution some may need re-capturing. `soundminer.py` fails loudly
-naming any missing required crop.
+The GUI automation (Soundminer, UniSync) finds on-screen controls by matching
+tight PNG **crops**. Because a pixel crop only matches the screen it was captured
+on, crops are stored **per machine, by hostname**:
 
-**Soundminer — required** (run `python3 make_soundminer_crops.py`, which walks you
-through these):
+```
+files/screenshots/
+    USMPSMDHDF1/   ← crops captured on the Soundminer machine
+    USMPSMDHDF2/   ← crops captured on the pipeline machine
+```
+
+The code picks the subfolder for whatever machine it's running on automatically
+(`SCREENSHOTS_DIR = files/screenshots/<HOSTNAME>`), so both sets live in git
+together and neither overwrites the other. A new machine gets its own subfolder
+the first time you capture crops there.
+
+**What each machine needs** (the crops for the GUI steps *it* runs):
+- **USMPSMDHDF1** (runs the full workflow inline): both the UniSync crops **and**
+  the Soundminer crops.
+- **USMPSMDHDF2** (hands the Soundminer steps off to HDF1): the UniSync crops.
+
+`soundminer.py` / `unisync_automation.py` fail loudly naming any crop missing for
+the current machine.
+
+**Soundminer — required** (run `python3 make_soundminer_crops.py` on that machine;
+it saves into the correct per-machine folder automatically):
 - `soundminer_db_nbc_selected.png`, `soundminer_mirror_title.png`,
   `soundminer_mirror_ok.png`
 
-**Soundminer — optional dialogs** (only auto-dismissed if present; crop tightly
-around the distinctive text/button):
+**Soundminer — optional dialogs** (auto-dismissed only if present):
 - `soundminer_importing_text.png`, `soundminer_unmatched_fields.png`,
   `soundminer_dupes_warning.png`, `soundminer_log_window.png`
 
-**UniSync** (no capture helper yet — crop each tightly around the named UI
-element and save with the exact filename into `files/screenshots/`):
+**UniSync** (no capture helper — crop each by hand and save into
+`files/screenshots/<HOSTNAME>/` with the exact filename):
 - `unisync_hamburger_btn.png`, `unisync_choose_csv.png`,
   `unisync_cache_btn.png`, `unisync_client_btn.png`,
   `unisync_territory_dropdown.png`, `unisync_terr_united_states.png`,
@@ -190,8 +206,8 @@ element and save with the exact filename into `files/screenshots/`):
   `unisync_terr_rest_of_world_mp3.png`, `unisync_terr_japan.png`
 
 To capture a crop by hand: press ⌘⇧4, drag a tight box around just the element,
-and rename the resulting Desktop PNG to the exact filename above. Keep crops
-small and distinctive (the button/label only, no surrounding chrome).
+and move the resulting Desktop PNG into your machine's subfolder under the exact
+filename above. Keep crops small and distinctive (the control only, no chrome).
 
 ---
 
