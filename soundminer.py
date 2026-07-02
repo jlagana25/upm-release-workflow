@@ -91,7 +91,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from config import ReleaseContext
+from config import ReleaseContext, current_hostname
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -108,8 +108,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FILES_DIR = Path(__file__).resolve().parent
 
 # Reference crops live INSIDE the code folder so they're versioned in git and a
-# fresh clone already has them (a new machine isn't missing GUI assets).
-SCREENSHOTS_DIR = _FILES_DIR / "screenshots"
+# fresh clone already has them.  They're split into a per-machine subfolder
+# (by hostname) because a pixel crop only matches the screen it was captured on —
+# so each Mac reads its own set and both sets coexist in git without conflict.
+SCREENSHOTS_DIR = _FILES_DIR / "screenshots" / current_hostname()
 
 # Diagnostics stay OUTSIDE the repo (writable, machine-local, not versioned).
 DEBUG_STEP_DIR = _REPO_ROOT / "_logs" / "soundminer_debug_steps"
