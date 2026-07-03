@@ -635,7 +635,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                 )
                 set_capture_steps(getattr(args, "capture_steps", False))
                 set_supervised(getattr(args, "unisync_supervised", False))
-                set_xml_setup(getattr(args, "unisync_xml_setup", False))
+                set_xml_setup(getattr(args, "unisync_xml_setup", True))
                 job_results = run_all_unisync_jobs(
                     ctx, args.dry_run, logger, overwrite=args.overwrite
                 )
@@ -1245,13 +1245,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--unisync-xml-setup",
-        action="store_true",
-        help="Step 5: configure each UniSync job by writing its "
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Step 5 (DEFAULT ON): configure each UniSync job by writing its "
              "Territory/Cache/Client into UniSync.xml and relaunching UniSync, "
-             "instead of driving the path-entry UI. Eliminates the folder-icon "
-             "clicks and Cmd+Shift+G path typing. Quits/relaunches UniSync on "
-             "the first pass of each file type; same-type retries reuse the "
-             "running app.",
+             "instead of driving the path-entry UI. Eliminates the territory "
+             "dropdown, folder-icon clicks, and Cmd+Shift+G path typing. Pass "
+             "--no-unisync-xml-setup to fall back to the old on-screen UI. "
+             "Quits/relaunches UniSync on the first pass of each file type; "
+             "same-type retries reuse the running app.",
     )
 
     # Auto-remediation (Step 9b) flags

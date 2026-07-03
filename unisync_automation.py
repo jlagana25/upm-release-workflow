@@ -124,14 +124,16 @@ POST_CSV_SETTLE    = 5.0    # seconds after CSV load before watching output
 # job and leftovers after the cap are deferred to verification.
 SUPERVISED         = False
 
-# When True (set via --unisync-xml-setup), configure each job by writing its
-# Territory/Cache/Client into UniSync.xml and relaunching UniSync, instead of
-# driving the macOS path-entry UI (folder icons + Cmd+Shift+G).  UniSync reads
-# these prefs only at launch — it does NOT pick up live edits — so this mode
-# QUITS and RELAUNCHES UniSync on the first pass of each file type.  Same-type
-# retries reuse the already-running app (no relaunch).  The UI path-entry
-# remains the default/fallback.
-XML_SETUP          = False
+# DEFAULT ON: configure each job by writing its Territory/Cache/Client into
+# UniSync.xml and relaunching UniSync, instead of driving the macOS path-entry
+# UI (territory dropdown + folder icons + Cmd+Shift+G).  This avoids the
+# on-screen crop-matching that breaks when a control shows variable text (the
+# territory dropdown displays its current selection).  UniSync reads these prefs
+# only at launch — it does NOT pick up live edits — so this mode QUITS and
+# RELAUNCHES UniSync on the first pass of each file type.  Same-type retries
+# reuse the already-running app (no relaunch).  Pass --no-unisync-xml-setup to
+# fall back to the on-screen UI path-entry.
+XML_SETUP          = True
 # Location of UniSync's preferences file (holds the userPrefs cache/client).
 UNISYNC_XML_PATH   = "/Users/hdfuser/Library/SMUniSync/UniSync.xml"
 
@@ -1864,6 +1866,13 @@ if __name__ == "__main__":
                         "is already done (consistent with the rest of the "
                         "pipeline's --overwrite semantics).")
     p.add_argument("--debug",   action="store_true")
+    p.add_argument(
+        "--unisync-xml-setup",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Configure jobs via UniSync.xml + relaunch (DEFAULT ON). "
+             "Pass --no-unisync-xml-setup to drive the on-screen path-entry UI.",
+    )
     p.add_argument("--capture-steps", action="store_true",
                    help="Save a screenshot at every step of path entry.  "
                         "Use this when paths aren't actually changing in "
@@ -1890,5 +1899,7 @@ if __name__ == "__main__":
     # the running module's globals — which IS the function's __globals__.
     if args.capture_steps:
         CAPTURE_STEPS = True
+
+    set_xml_setup(args.unisync_xml_setup)
 
     _run_test(args)
