@@ -882,46 +882,130 @@ class _LocateError(RuntimeError):
     """Raised when a UI element cannot be found after all retries."""
 
 
-def _locate_safe(image_path: str):
-    """
-    Wrapper around pyautogui.locateOnScreen() that returns None on any
-    failure — including the ImageNotFoundException raised by newer
-    pyautogui versions when no match is found.
-
-    Older pyautogui returned None for misses; newer versions raise.
-    Catching everything makes the rest of the code version-agnostic.
-    """
-    import pyautogui
+def _resized_temp(image_path: str, factor: float):
+    """Save a scaled copy of the crop to a temp file; return its path or None."""
+    import tempfile
+    from PIL import Image
     try:
-        return pyautogui.locateOnScreen(image_path, confidence=LOCATE_CONFIDENCE)
+        LANCZOS = Image.Resampling.LANCZOS
+    except AttributeError:
+        LANCZOS = Image.LANCZOS
+    try:
+        im = Image.open(image_path)
+        w, h = im.size
+        out = Path(tempfile.gettempdir()) / (
+            f"usync_{Path(image_path).stem}_{factor:.3f}.png"
+        )
+        im.resize((max(1, round(w * factor)), max(1, round(h * factor))),
+                  LANCZOS).save(out)
+        return str(out)
     except Exception:
         return None
 
 
-def _locate_all_safe(image_path: str) -> list:
+# Cache the scale that first produced a match on THIS machine's display, so
+# every later locate tries it first instead of re-sweeping.  On a display where
+# the 1:1 crops match (e.g. the machine they were shot on) this stays None and
+# adds no overhead.
+_MATCH_SCALE_CACHE: float | None = None
+
+# Scale factors tried when the 1:1 crop doesn't match — covers the common
+# Retina / scaled-4K capture ratios in both directions.
+_SCALE_FACTORS = (1.5, 0.6667, 1.3333, 0.75, 2.0, 0.5, 1.25, 0.8)
+
+# (confidence, grayscale) attempts, best-first.  grayscale=True cancels the
+# colour-profile / gamma differences between a ⌘⇧4 crop and pyautogui's live
+# capture on wide-gamut / HDR displays — a common cause of "matches nothing".
+_MATCH_MODES = (
+    (LOCATE_CONFIDENCE, False),
+    (LOCATE_CONFIDENCE, True),
+    (0.78, True),
+    (0.70, True),
+)
+
+
+def _locate_multi(image_path: str, want_all: bool, logger: logging.Logger | None):
     """
-    Return on-screen matches as Box objects, sorted top-to-bottom then
-    left-to-right, with sub-pixel duplicate matches collapsed.
+    Robust locate used by both _locate_safe and _locate_all_safe.
 
-    pyautogui's image search reports the same UI element multiple times
-    when there are anti-aliasing / sub-pixel variations in how it renders
-    (10+ near-identical Box hits for a single icon is common).  Without
-    deduplication, "click match #2" still clicks the same icon as #1 —
-    just a pixel offset to the right.
+    Strategy (stops at first hit):
+      1. Original crop, sweeping grayscale + descending confidence.
+      2. If still nothing, scaled copies of the crop (cached factor first,
+         then the common ratios), grayscale, at moderate confidence.
 
-    Deduplication keeps only the first match in each cluster of boxes
-    whose top-left corners fall within DEDUP_PX of each other.
+    Returns a Box (want_all=False) / list of Boxes (want_all=True), or
+    None / [] on total failure.  Scale is handled by resizing the TEMPLATE,
+    so the returned Box is already in true screen coordinates and its centre
+    is the correct click point.
     """
     import pyautogui
+    global _MATCH_SCALE_CACHE
+
+    def _run(path, conf, gray):
+        try:
+            if want_all:
+                res = list(pyautogui.locateAllOnScreen(path, confidence=conf,
+                                                        grayscale=gray))
+                return res or None
+            return pyautogui.locateOnScreen(path, confidence=conf, grayscale=gray)
+        except Exception:
+            return None
+
+    # 1) Original scale.
+    for conf, gray in _MATCH_MODES:
+        hit = _run(image_path, conf, gray)
+        if hit:
+            return hit
+
+    # 2) Scaled templates — cached winning factor first.
+    factors = ([_MATCH_SCALE_CACHE] if _MATCH_SCALE_CACHE else []) + \
+              [f for f in _SCALE_FACTORS if f != _MATCH_SCALE_CACHE]
+    for factor in factors:
+        tmp = _resized_temp(image_path, factor)
+        if not tmp:
+            continue
+        for conf, gray in ((0.80, True), (0.72, True)):
+            hit = _run(tmp, conf, gray)
+            if hit:
+                if _MATCH_SCALE_CACHE != factor and logger:
+                    logger.info(
+                        f"    (matched {Path(image_path).name} at scale "
+                        f"{factor:.3f}, grayscale, conf {conf:.2f} — "
+                        f"display-scale compensation)"
+                    )
+                _MATCH_SCALE_CACHE = factor
+                return hit
+    return None
+
+
+def _locate_safe(image_path: str, logger: logging.Logger | None = None):
+    """
+    Locate a single UI element, tolerant of the wide-gamut colour-profile and
+    display-scaling differences that make a ⌘⇧4 crop fail to match a live
+    pyautogui capture.  Returns a Box or None.
+    """
+    return _locate_multi(image_path, want_all=False, logger=logger)
+
+
+def _locate_all_safe(image_path: str, logger: logging.Logger | None = None) -> list:
+    """
+    Return on-screen matches as Box objects, sorted top-to-bottom then
+    left-to-right, with sub-pixel duplicate matches collapsed.  Same
+    grayscale/scale tolerance as _locate_safe.
+
+    pyautogui's image search reports the same UI element multiple times when
+    there are anti-aliasing / sub-pixel variations in how it renders (10+
+    near-identical Box hits for one icon is common).  Deduplication keeps only
+    the first match in each cluster of boxes whose top-left corners fall within
+    DEDUP_PX of each other.
+    """
     DEDUP_PX = 10  # pixels — boxes closer than this are the same icon
 
-    try:
-        matches = list(
-            pyautogui.locateAllOnScreen(image_path, confidence=LOCATE_CONFIDENCE)
-        )
-    except Exception:
+    result = _locate_multi(image_path, want_all=True, logger=logger)
+    if not result:
         return []
 
+    matches = list(result)
     matches.sort(key=lambda b: (int(b.top), int(b.left)))
 
     deduped = []
@@ -960,7 +1044,7 @@ def _locate_nth_and_click(
     import pyautogui
 
     for attempt in range(1, LOCATE_RETRIES + 1):
-        matches = _locate_all_safe(_img(filename))
+        matches = _locate_all_safe(_img(filename), logger)
         if matches and len(matches) > nth:
             target = matches[nth]
             center = pyautogui.center(target)
@@ -1006,7 +1090,7 @@ def _locate_and_click(filename: str, logger: logging.Logger) -> None:
     import pyautogui
 
     for attempt in range(1, LOCATE_RETRIES + 1):
-        loc = _locate_safe(_img(filename))
+        loc = _locate_safe(_img(filename), logger)
         if loc:
             center = pyautogui.center(loc)
             logger.info(
