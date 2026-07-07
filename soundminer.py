@@ -89,7 +89,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 from config import ReleaseContext, current_hostname
 
@@ -129,9 +129,22 @@ ALERT_DISMISS_WAIT      = 0.8
 IMPORT_TIMEOUT          = 7200     # 2h ceiling for "Import text into database"
 EMBED_TIMEOUT           = 14400    # 4h ceiling for "Embed selected records"
 MIRROR_TIMEOUT          = 21600    # 6h ceiling for the actual mirror
-MIRROR_STABILITY_WINDOW = 180      # seconds with no new files ⇒ mirror is done
+MIRROR_STABILITY_WINDOW = 60       # seconds with no new files ⇒ mirror is done.
+                                   # Lowered from 180: a several-thousand-file
+                                   # mirror writes steadily, so ~1 min with no
+                                   # new file reliably means done, and we stop
+                                   # idling ~2 min sooner after the count settles.
 MIRROR_STARTUP_GRACE    = 600      # seconds to see the FIRST output file before
                                    # concluding the mirror never started
+
+# Screen-idle detection — the automated equivalent of an operator watching the
+# Soundminer status bar settle before pressing Enter.  Used for the phases we
+# can't poll on the filesystem (scan / import / embed) when running unattended:
+# we sample a small grayscale snapshot of the screen and treat the phase as
+# finished once the picture stops changing for SCREEN_IDLE_STABILITY seconds.
+SCREEN_IDLE_STABILITY   = 20       # s of no on-screen change ⇒ phase complete
+SCREEN_IDLE_DIFF        = 2.0      # mean |Δ| (0-255 grayscale) counted as motion
+SCREEN_IDLE_POLL        = 3.0      # s between idle-detection snapshots
 
 # Polling
 LOCATE_CONFIDENCE       = 0.85     # pyautogui confidence threshold
@@ -262,12 +275,16 @@ def run_soundminer_nbc_workflow(
     ctx                  : Release context (paths, dates).
     dry_run              : Log the plan and return True without touching UI.
     logger               : Where to write step logs and warnings.
-    unattended           : If True, skip all "Press ENTER to continue" prompts
-                           and trust that Soundminer's persistent settings are
-                           correct.  Use only after a fully-attended run has
-                           confirmed the Mirror Settings dialog is configured
-                           per spec; otherwise the operator can't catch a
-                           settings drift between releases.
+    unattended           : If True (the DEFAULT when driven by the workflow),
+                           run without any "press Enter" prompts: scan/import/
+                           embed completion is detected by watching the
+                           Soundminer UI settle, the blocking dupes / unmatched-
+                           fields dialogs are auto-OK'd, and the Mirror Settings
+                           dialog is auto-accepted (its settings persist between
+                           releases).  Pass attended (orchestrator:
+                           --soundminer-attended, soundminer.py: --attended) to
+                           restore the supervised pauses — useful for a first
+                           run on a new machine to eyeball the mirror settings.
     skip_*               : Individual phase skips for restart/recovery.
     manual_verify_mirror_settings :
                            Override the default (which is `not unattended`).
@@ -365,6 +382,7 @@ def run_soundminer_nbc_workflow(
             logger.info("  ✓  Step 12 partial — mirror skipped per flag.")
             return True
 
+        _select_all_records(logger)
         _open_mirror_dialog(logger)
         _verify_mirror_settings_dialog(
             logger,
@@ -516,6 +534,7 @@ def _scan_sounds_into_database(
         hard_timeout = IMPORT_TIMEOUT,
         unattended   = unattended,
         logger       = logger,
+        on_poll      = lambda: _dismiss_import_dialogs_once(logger),
     )
     logger.info("        ✓ Scan into database complete.")
 
@@ -539,9 +558,12 @@ def run_soundminer_sourceaudio_workflow(
       2. 2-STAGING/SME WAV ExUS/MEDIA  → …Release - SourceAudio Ex-US/Music
 
     The mirror uses the SourceAudio settings (AIFF, Build Using Library then
-    Volume, Filename:1, etc.).  Soundminer persists ONE set of mirror
-    settings, so an attended verification pause lets the operator confirm /
-    set them before OK on the first pass (and they carry to the second).
+    Volume, Filename:1, etc.).  Soundminer persists ONE set of mirror settings
+    between releases, so by default (unattended) we auto-accept the Mirror
+    Settings dialog; the settings from the first pass carry to the second.
+    Before each mirror we ⌘A select-all so the whole scanned database is
+    mirrored.  This step runs inline on the Soundminer machine and, in a full
+    run, is followed immediately by Step 12 (NBC) with no hand-off.
 
     Returns True on full success; False on any hard failure.
     """
@@ -615,6 +637,7 @@ def run_soundminer_sourceaudio_workflow(
             _delete_all_records(logger)
             _scan_sounds_into_database(src, logger, unattended=unattended)
 
+            _select_all_records(logger)
             _open_mirror_dialog(logger)
             _verify_mirror_settings_dialog(
                 logger,
@@ -808,15 +831,17 @@ def _import_metadata(
     # Auto-dismiss them (best-effort; operator handles any during the wait).
     _watch_and_dismiss_import_dialogs(logger)
 
-    # Wait for the import to complete.  This is the noisiest part of the
-    # workflow because we have no signal from Soundminer; we just have to
-    # wait long enough for the indexing to finish.
+    # Wait for the import to complete.  Soundminer gives no external "done"
+    # signal, so we watch the UI settle — and keep auto-OK'ing the blocking
+    # "Unmatched Fields" / "Check for Dupes Warning" dialogs the whole time,
+    # since they can appear a little after the panels rather than instantly.
     _wait_with_manual_handshake(
         phase_label  = "import",
         soft_minutes = 2,                   # log "still importing…" after this
         hard_timeout = IMPORT_TIMEOUT,
         unattended   = unattended,
         logger       = logger,
+        on_poll      = lambda: _dismiss_import_dialogs_once(logger),
     )
     logger.info("        ✓ Import complete.")
 
@@ -962,8 +987,10 @@ def _verify_mirror_settings_dialog(
 
     if not manual_verify:
         logger.info(
-            "        --unattended: skipping settings-verification pause.  "
-            "Trusting Soundminer's persistent settings."
+            "        Unattended (default): auto-accepting the Mirror Settings "
+            "dialog and clicking OK.  Soundminer persists these settings "
+            "between releases; run with --soundminer-attended (orchestrator) or "
+            "--attended (soundminer.py) to review them by hand."
         )
         return
 
@@ -1183,6 +1210,75 @@ def _menu_click(
     logger.debug(f"  Menu: {menu_title} → {item_title}")
 
 
+def _click_dialog_ok_applescript(logger: logging.Logger) -> bool:
+    """
+    Deterministically click the confirm button of a Soundminer modal via
+    AppleScript System Events — no image matching.
+
+    Soundminer's blocking "Unmatched Fields" and "Check for Dupes Warning"
+    dialogs both have a confirm button (OK / Continue / Yes) as their default.
+    Image-matching those crops is unreliable on a HiDPI/4K display, so we ask
+    System Events to find a button by NAME in any Soundminer window or its
+    attached sheet and click it.  This is safe: it's a no-op unless such a
+    button actually exists on screen, and during import/scan the only modals
+    that appear are these proceed-to-continue confirmations.
+
+    Returns True if a button was clicked, False otherwise.
+    """
+    script = (
+        f'tell application "System Events"\n'
+        f'  tell process "{SOUNDMINER_APP}"\n'
+        f'    repeat with theName in {{"OK", "Continue", "Yes"}}\n'
+        f'      repeat with w in windows\n'
+        f'        if exists (button (theName as string) of w) then\n'
+        f'          click button (theName as string) of w\n'
+        f'          return "clicked"\n'
+        f'        end if\n'
+        f'        if (count of sheets of w) > 0 then\n'
+        f'          if exists (button (theName as string) of sheet 1 of w) then\n'
+        f'            click button (theName as string) of sheet 1 of w\n'
+        f'            return "clicked"\n'
+        f'          end if\n'
+        f'        end if\n'
+        f'      end repeat\n'
+        f'    end repeat\n'
+        f'  end tell\n'
+        f'end tell\n'
+        f'return "none"'
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as exc:
+        logger.debug(f"        (dialog OK AppleScript failed: {exc})")
+        return False
+    if result.stdout.strip() == "clicked":
+        logger.info("        ↳ Clicked OK on a Soundminer dialog (dupes / unmatched fields).")
+        time.sleep(0.6)
+        _save_step_screenshot("dialog_ok_clicked", logger)
+        return True
+    return False
+
+
+def _dismiss_import_dialogs_once(logger: logging.Logger) -> bool:
+    """
+    One pass at clearing the blocking dialogs that gate an import / scan:
+    the "Unmatched Fields" and "Check for Dupes Warning" prompts.  Tries the
+    precise image-match dismissers first, then the AppleScript OK-clicker as
+    a HiDPI-proof fallback.  Returns True if anything was dismissed.
+    """
+    hit = False
+    if _dismiss_dialog_if_present("unmatched_fields", "Unmatched Fields", logger):
+        hit = True
+    if _dismiss_dialog_if_present("dupes_warning", "Check for Dupes Warning", logger):
+        hit = True
+    if _click_dialog_ok_applescript(logger):
+        hit = True
+    return hit
+
+
 def _dismiss_dialog_if_present(
     crop_key:  str,
     label:     str,
@@ -1367,6 +1463,147 @@ def _set_clipboard(text: str, logger: logging.Logger) -> bool:
 # Manual handshake for operations we can't programmatically detect
 # ---------------------------------------------------------------------------
 
+def _screen_fingerprint():
+    """
+    Small grayscale snapshot of the whole screen, for change-detection.
+
+    Downscaled hard so it's cheap to capture and compare and so trivial
+    sub-pixel noise doesn't register as movement.  Returned as an int16 array
+    (not uint8) so pixel subtraction can't wrap around.
+    """
+    import numpy as np
+    import pyautogui
+    img = pyautogui.screenshot().convert("L").resize((80, 45))
+    return np.asarray(img, dtype="int16")
+
+
+def _wait_for_screen_idle(
+    *,
+    phase_label:          str,
+    stability:            int,
+    hard_timeout:         int,
+    no_activity_fallback: int,
+    logger:               logging.Logger,
+    on_poll:              "Optional[Callable[[], bool]]" = None,
+) -> None:
+    """
+    Block until the Soundminer UI stops changing — the automated stand-in for
+    an operator watching the status bar settle and then pressing Enter.
+
+    While a phase (scan / import / embed) runs, Soundminer animates a progress
+    bar / status text, so the screen fingerprint keeps changing.  When the
+    phase finishes the picture goes static; once it's been static for
+    ``stability`` seconds we treat the phase as complete.
+
+    ``on_poll`` is an optional callback run once per poll (used to dismiss the
+    blocking dupes / unmatched-fields dialogs during an import or scan).  If it
+    reports it did something (returns True), that counts as activity — so a
+    modal that we just cleared can't be mistaken for "the phase finished."
+
+    Safeguards:
+      • We only accept "idle ⇒ done" AFTER we've seen the screen change at
+        least once (``saw_activity``) — so a brief static moment right after
+        launching the phase, or a modal dialog sitting there BEFORE the work
+        starts, can't be mistaken for completion.
+      • If we never see any visible activity (a silent phase with no on-screen
+        progress), we fall back to the proven fixed wait ``no_activity_fallback``
+        and proceed, rather than blocking on the hours-long hard ceiling.
+      • ``hard_timeout`` is an absolute safety ceiling.
+    """
+    import numpy as np
+
+    logger.info(
+        f"        Waiting for {phase_label} to finish — watching the Soundminer "
+        f"UI settle (no Enter needed)…"
+    )
+    start        = time.monotonic()
+    last_fp      = None
+    last_change  = start
+    saw_activity = False
+    next_log     = start + PROGRESS_DOT_INTERVAL
+
+    while True:
+        now     = time.monotonic()
+        elapsed = now - start
+
+        if elapsed > hard_timeout:
+            raise _SoundminerError(
+                f"{phase_label} exceeded the hard timeout of {hard_timeout}s "
+                f"with the UI never settling.  Check Soundminer for a stalled "
+                f"job or an error dialog."
+            )
+
+        # Clear any blocking modal (dupes / unmatched fields) so the phase can
+        # actually run; a dismissal counts as activity so we keep waiting for
+        # the REAL completion rather than treating the frozen dialog as "done".
+        if on_poll is not None:
+            try:
+                if on_poll():
+                    last_change  = now
+                    saw_activity = True
+            except Exception as exc:
+                logger.debug(f"        (dialog dismiss on_poll failed: {exc})")
+
+        try:
+            fp = _screen_fingerprint()
+            if last_fp is not None:
+                diff = float(np.mean(np.abs(fp - last_fp)))
+                if diff > SCREEN_IDLE_DIFF:
+                    last_change  = now
+                    saw_activity = True
+            last_fp = fp
+        except Exception as exc:
+            logger.debug(f"        (idle-detect snapshot failed: {exc})")
+
+        idle_for = now - last_change
+
+        # Normal completion: we saw the phase run, and it's now been still.
+        if saw_activity and idle_for >= stability:
+            logger.info(
+                f"        {phase_label} finished — UI idle {int(stability)}s "
+                f"({int(elapsed)}s total)."
+            )
+            return
+
+        # Fallback: no visible progress ever seen → after the proven soft wait,
+        # proceed instead of blocking on the hours-long ceiling.
+        if not saw_activity and elapsed >= no_activity_fallback:
+            logger.info(
+                f"        {phase_label}: no visible UI activity after "
+                f"{int(elapsed)}s — proceeding (soft-wait fallback)."
+            )
+            return
+
+        if now >= next_log:
+            state = (
+                f"UI idle {int(idle_for)}s/{int(stability)}s"
+                if saw_activity
+                else f"awaiting first activity ({int(elapsed)}s)"
+            )
+            logger.info(f"        … {phase_label} running ({int(elapsed)}s; {state})")
+            next_log = now + PROGRESS_DOT_INTERVAL
+
+        time.sleep(SCREEN_IDLE_POLL)
+
+
+def _select_all_records(logger: logging.Logger) -> None:
+    """
+    ⌘A in the Soundminer record list so the Mirror operates on EVERY record,
+    not just whatever row happened to be selected after a scan or import.
+
+    Mirrors the focus-then-keystroke pattern used by _select_all_and_embed:
+    bring Soundminer to the front, then send ⌘A.  Called immediately before
+    opening the Mirror Settings dialog in both the NBC and SourceAudio flows.
+    """
+    import pyautogui
+    logger.info("  Selecting all records (⌘A) before Mirror…")
+    _activate_soundminer(logger)   # ensure the record list has focus
+    time.sleep(0.4)
+    pyautogui.hotkey("command", "a")
+    time.sleep(0.8)
+    _save_step_screenshot("select_all_before_mirror", logger)
+
+
 def _wait_with_manual_handshake(
     *,
     phase_label:  str,
@@ -1374,45 +1611,40 @@ def _wait_with_manual_handshake(
     hard_timeout: int,
     unattended:   bool,
     logger:       logging.Logger,
+    on_poll:      "Optional[Callable[[], bool]]" = None,
 ) -> None:
     """
-    Block for a phase whose completion we can't poll (import, embed).
+    Block for a phase whose completion we can't poll (scan, import, embed).
 
     Behaviour:
-      unattended=True  → log progress every PROGRESS_DOT_INTERVAL seconds,
-                         return after `soft_minutes` minutes (operator
-                         has confirmed previously that this is enough).
+      unattended=True  → watch the Soundminer UI settle and return when it's
+                         been idle (the automated equivalent of the operator
+                         watching the status bar settle), clearing any blocking
+                         dialogs via ``on_poll`` while it waits.
       unattended=False → log progress dots, then prompt the operator to
                          press Enter when the phase completes.
+
+    `on_poll` (unattended only) runs once per poll — used to auto-OK the
+    dupes / unmatched-fields dialogs that gate an import or scan.
 
     `hard_timeout` is a safety ceiling — even in unattended mode we won't
     block longer than this; if hit, _SoundminerError is raised.
     """
     start = time.monotonic()
     if unattended:
-        soft_seconds = soft_minutes * 60
-        logger.info(
-            f"        --unattended: waiting up to {soft_seconds}s for "
-            f"{phase_label} to settle…"
+        # Automated equivalent of "watch the status bar settle, then Enter":
+        # wait until the Soundminer UI stops changing.  If the phase shows no
+        # visible progress at all, fall back to the old fixed soft wait so we
+        # still proceed (never block on the hours-long hard ceiling).
+        _wait_for_screen_idle(
+            phase_label          = phase_label,
+            stability            = SCREEN_IDLE_STABILITY,
+            hard_timeout         = hard_timeout,
+            no_activity_fallback = soft_minutes * 60,
+            logger               = logger,
+            on_poll              = on_poll,
         )
-        next_log = start + PROGRESS_DOT_INTERVAL
-        while True:
-            now = time.monotonic()
-            elapsed = now - start
-            if elapsed >= soft_seconds:
-                logger.info(
-                    f"        Soft wait complete ({int(elapsed)}s).  "
-                    f"Continuing."
-                )
-                return
-            if elapsed > hard_timeout:
-                raise _SoundminerError(
-                    f"{phase_label} exceeded hard timeout of {hard_timeout}s."
-                )
-            if now >= next_log:
-                logger.info(f"        … still waiting for {phase_label} ({int(elapsed)}s)")
-                next_log = now + PROGRESS_DOT_INTERVAL
-            time.sleep(POLL_INTERVAL)
+        return
     else:
         # Interactive — print a clear handshake prompt
         print("")
@@ -1535,17 +1767,24 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
 
     p = argparse.ArgumentParser(
         description=(
-            "Drive Soundminer v5Pro: the NBC embed + mirror workflow (Step 12, "
-            "default) or the SourceAudio scan + AIFF mirror (Step 11, "
-            "--sourceaudio).  Use --dry-run to preview without touching the UI."
+            "Drive Soundminer v5Pro for the release's Soundminer steps.  With "
+            "no step flag it runs BOTH Step 11 (SourceAudio scan + AIFF mirror) "
+            "and Step 12 (NBC embed + mirror), in that order, exactly as the "
+            "full workflow does on the Soundminer machine.  Pass --sourceaudio "
+            "or --nbc to run just one.  Runs UNATTENDED by default (no Enter "
+            "prompts); use --attended for a supervised first run.  --dry-run "
+            "previews without touching the UI."
         ),
     )
+    # Which step(s) to run — symmetric flags; none given ⇒ both, chained.
     p.add_argument("--sourceaudio", action="store_true",
-                   help="Run the SourceAudio scan + AIFF mirror workflow "
-                        "(Step 11) instead of the NBC embed + mirror (Step 12).")
+                   help="Run only Step 11 (SourceAudio scan + AIFF mirror).")
+    p.add_argument("--nbc", action="store_true",
+                   help="Run only Step 12 (NBC embed + mirror).")
+
     p.add_argument("--sourceaudio-db-shortcut", default="8", metavar="KEY",
                    help="Database shortcut digit for the SourceAudio DB "
-                        "(default '8' = ⌘8). Only used with --sourceaudio.")
+                        "(default '8' = ⌘8). Only used for Step 11.")
     p.add_argument("--previous-month", action="store_true",
                    help="Full-month (previous-month) run.  --year/--month "
                         "optional: omit both to target the month before today, "
@@ -1559,17 +1798,24 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--skip-soundminer", action="store_true",
                    help="No-op for parity with the orchestrator's flag.")
 
+    p.add_argument("--attended", action="store_true",
+                   help="Run ATTENDED: pause for Enter after each scan/import/"
+                        "embed and to confirm the Mirror Settings dialog before "
+                        "OK.  Default is fully unattended.  Use for a first run "
+                        "on a new machine to confirm the mirror settings persist.")
     p.add_argument("--unattended", action="store_true",
-                   help="Skip operator-handshake prompts (import, embed, "
-                        "mirror settings).  Use only after a confirmed run.")
+                   help="Deprecated / no-op: unattended is the default now. "
+                        "Kept for backward compatibility (use --attended to "
+                        "force the supervised prompts).")
+    # Step 12 phase skips (restart/recovery)
     p.add_argument("--skip-delete-records", action="store_true",
-                   help="Skip 12.3 — assume the DB is already empty.")
+                   help="Step 12: skip 12.3 — assume the DB is already empty.")
     p.add_argument("--skip-import", action="store_true",
-                   help="Skip 12.4 — assume metadata is already imported.")
+                   help="Step 12: skip 12.4 — assume metadata is already imported.")
     p.add_argument("--skip-embed", action="store_true",
-                   help="Skip 12.5 — assume metadata is already embedded.")
+                   help="Step 12: skip 12.5 — assume metadata is already embedded.")
     p.add_argument("--skip-mirror", action="store_true",
-                   help="Skip 12.6 / 12.7 — stop after embed.")
+                   help="Step 12: skip 12.6 / 12.7 — stop after embed.")
     p.add_argument("--capture-steps", action="store_true",
                    help="Save numbered step screenshots to "
                         f"{DEBUG_STEP_DIR}.")
@@ -1600,27 +1846,55 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
         return 2
     logger.info(f"Release context: {ctx}")
 
-    if args.sourceaudio:
-        ok = run_soundminer_sourceaudio_workflow(
+    # Unattended is the default; --attended opts into the supervised prompts.
+    unattended = not args.attended
+
+    # Decide which steps to run.  Neither flag ⇒ both (11 then 12), chained.
+    run_sa  = args.sourceaudio or not (args.sourceaudio or args.nbc)
+    run_nbc = args.nbc         or not (args.sourceaudio or args.nbc)
+
+    if run_sa and run_nbc:
+        logger.info(
+            "Running BOTH Soundminer steps in sequence: Step 11 (SourceAudio) "
+            "→ Step 12 (NBC).  No hand-off, no prompts (unattended)."
+            if unattended else
+            "Running BOTH Soundminer steps in sequence: Step 11 (SourceAudio) "
+            "→ Step 12 (NBC), attended."
+        )
+
+    overall_ok = True
+
+    if run_sa:
+        ok_sa = run_soundminer_sourceaudio_workflow(
             ctx,
             dry_run=args.dry_run,
             logger=logger,
-            unattended=args.unattended,
+            unattended=unattended,
             db_shortcut=args.sourceaudio_db_shortcut,
         )
-        return 0 if ok else 1
+        overall_ok = overall_ok and ok_sa
+        if not ok_sa and run_nbc:
+            logger.error(
+                "  ✗  Step 11 (SourceAudio) failed — not continuing to Step 12. "
+                "Fix the cause and re-run (add --nbc to run only Step 12 once "
+                "Step 11 is done)."
+            )
+            return 1
 
-    ok = run_soundminer_nbc_workflow(
-        ctx,
-        dry_run=args.dry_run,
-        logger=logger,
-        unattended=args.unattended,
-        skip_delete_records=args.skip_delete_records,
-        skip_import=args.skip_import,
-        skip_embed=args.skip_embed,
-        skip_mirror=args.skip_mirror,
-    )
-    return 0 if ok else 1
+    if run_nbc:
+        ok_nbc = run_soundminer_nbc_workflow(
+            ctx,
+            dry_run=args.dry_run,
+            logger=logger,
+            unattended=unattended,
+            skip_delete_records=args.skip_delete_records,
+            skip_import=args.skip_import,
+            skip_embed=args.skip_embed,
+            skip_mirror=args.skip_mirror,
+        )
+        overall_ok = overall_ok and ok_nbc
+
+    return 0 if overall_ok else 1
 
 
 if __name__ == "__main__":

@@ -97,13 +97,17 @@ DIALOG_OPEN_WAIT   = 1.5    # seconds for NSOpenPanel to animate open
 POST_CLICK_WAIT    = 0.6    # seconds after most button clicks
 
 # CSV picker open-verification.  Clicking "Choose a csv of workaudioids" can
-# fail to open the file dialog (the hamburger menu is occasionally flaky,
-# and the menu-item crop is large so a center-click can miss the row).
-# After clicking, we compare a small screenshot against the pre-menu
+# fail to open the file dialog because macOS dismisses the hamburger menu on
+# the slightest focus blip — so a single click-then-search can end up hunting
+# for the menu row on a screen where the menu has already closed.  We therefore
+# RE-OPEN the menu fresh on every attempt and search with the non-raising
+# locate, so a closed/late menu just triggers another open instead of failing
+# the job.  After clicking the row we compare a screenshot against the pre-menu
 # baseline: an open dialog is a big bright overlay → large mean pixel
-# difference; "menu just closed, no dialog" looks ~identical to the main
-# window → small difference → retry.
-CSV_PICKER_MAX_ATTEMPTS = 3
+# difference; "menu closed, no dialog" looks ~identical → reopen and retry.
+CSV_PICKER_MAX_ATTEMPTS = 6        # full reopen-the-menu cycles before giving up
+MENU_ITEM_PROBES        = 3        # quick locate passes per freshly-opened menu
+MENU_ITEM_PROBE_DELAY   = 0.8      # seconds between those passes
 DIALOG_OPEN_DIFF_THRESHOLD = 10.0  # mean abs grayscale diff (0-255)
 PATH_ENTRY_ATTEMPTS = 3            # retries for entering a path into a Go-to sheet
 
@@ -910,8 +914,9 @@ def _resized_temp(image_path: str, factor: float):
 _MATCH_SCALE_CACHE: float | None = None
 
 # Scale factors tried when the 1:1 crop doesn't match — covers the common
-# Retina / scaled-4K capture ratios in both directions.
-_SCALE_FACTORS = (1.5, 0.6667, 1.3333, 0.75, 2.0, 0.5, 1.25, 0.8)
+# Retina / scaled-4K capture ratios.  2.0 and 0.5 are first because a 4K/HiDPI
+# panel (like HDF1's) matches at those, so the very first scaled attempt hits.
+_SCALE_FACTORS = (2.0, 0.5, 1.5, 0.6667, 1.3333, 0.75, 1.25, 0.8)
 
 # (confidence, grayscale) attempts, best-first.  grayscale=True cancels the
 # colour-profile / gamma differences between a ⌘⇧4 crop and pyautogui's live
@@ -1294,16 +1299,25 @@ def _screen_fingerprint():
 def _open_csv_picker(logger: logging.Logger) -> bool:
     """
     Open UniSync's 'Choose a csv of workaudioids' file picker, VERIFYING that a
-    dialog actually appeared.  Retries the hamburger-menu → menu-item
-    sequence until a dialog is detected or attempts are exhausted.
+    dialog actually appeared.
+
+    Why this is a reopen-each-time loop (this is the fix for the HDF1 failure):
+    macOS dismisses the hamburger menu on the slightest focus change, so a
+    single "click hamburger once, then search for the row" can end up searching
+    a screen where the menu has already closed.  The row is then never found,
+    and — critically — the previous implementation searched with the *raising*
+    locate, so that miss killed the whole job instead of retrying.  Here we
+    RE-OPEN the menu fresh on every attempt and search with the NON-raising
+    locate (_locate_safe → None on miss), so a closed or late menu simply
+    triggers another open.  On a display where the row matches immediately
+    (HDF2) the first attempt succeeds and the extra robustness costs nothing.
+
+    Detection: fingerprint the screen BEFORE opening the menu (plain main
+    window).  After clicking the row, an open NSOpenPanel is a large overlay →
+    big mean-pixel difference from that baseline; a closed menu with no dialog
+    looks ~identical → small difference → reopen and retry.
 
     Returns True once the picker is open, False if it never opened.
-
-    Detection: snapshot the screen BEFORE opening the menu (the plain main
-    window), then after clicking the menu item.  An open file dialog is a
-    large overlay → big mean-pixel difference from the main window; if the
-    menu merely closed without opening a dialog the screen looks ~identical
-    to the baseline → small difference → retry.
     """
     import numpy as np
     import pyautogui
@@ -1314,12 +1328,39 @@ def _open_csv_picker(logger: logging.Logger) -> bool:
         logger.info(
             f"  Opening menu (attempt {attempt}/{CSV_PICKER_MAX_ATTEMPTS})…"
         )
+
+        # (Re-)open the hamburger menu FRESH.  Bring UniSync to the front first
+        # so the click lands on it and the menu isn't dismissed by a stray
+        # focus change (the root cause of the row-not-found failures).
+        _activate_unisync(logger)
         _locate_and_click("unisync_hamburger_btn.png", logger)
         time.sleep(POST_CLICK_WAIT)
 
-        logger.info("  Selecting 'Choose a csv of workaudioids'…")
-        _locate_and_click("unisync_choose_csv.png", logger)
-        time.sleep(max(DIALOG_OPEN_WAIT, 2.0))
+        # Look for the 'Choose a csv…' row on the now-open menu.  A few quick,
+        # NON-raising passes catch it while the menu is fresh; if none hit, the
+        # menu closed or never opened → reopen on the next attempt (no raise).
+        loc = None
+        for _probe in range(1, MENU_ITEM_PROBES + 1):
+            loc = _locate_safe(_img("unisync_choose_csv.png"), logger)
+            if loc:
+                break
+            time.sleep(MENU_ITEM_PROBE_DELAY)
+
+        if loc is None:
+            logger.warning(
+                "    'Choose a csv' row not visible — the menu didn't open or "
+                "closed before it could be clicked.  Reopening and retrying."
+            )
+            pyautogui.press("escape")   # clear any half-open menu state
+            time.sleep(0.6)
+            continue
+
+        center = pyautogui.center(loc)
+        logger.info(
+            f"    Clicking 'Choose a csv' @ ({center.x}, {center.y})  box={loc}"
+        )
+        pyautogui.click(center.x, center.y)
+        time.sleep(max(DIALOG_OPEN_WAIT, 2.5))  # let the NSOpenPanel animate in
 
         after = _screen_fingerprint()
         diff = float(np.mean(np.abs(after - baseline)))
@@ -1332,10 +1373,10 @@ def _open_csv_picker(logger: logging.Logger) -> bool:
             return True
 
         logger.warning(
-            "    No dialog detected — the menu didn't open or the menu-item "
-            "click missed the row.  Pressing Escape and retrying."
+            "    Clicked the row but no file dialog appeared — the click may "
+            "have missed or the menu had already closed.  Reopening and retrying."
         )
-        pyautogui.press("escape")  # clear any half-open menu state
+        pyautogui.press("escape")
         time.sleep(0.6)
 
     return False
@@ -1366,19 +1407,21 @@ def _open_panel_go_to_path(path: str, logger: logging.Logger) -> None:
     _save_step_screenshot("01_dialog_open", logger)
 
     # 2. Cmd+Shift+G — opens the Go to Folder sheet inside the panel.
+    logger.info("    Dialog: opening 'Go to Folder' (⌘⇧G)…")
     pyautogui.hotkey("command", "shift", "g")
-    time.sleep(1.2)
+    time.sleep(1.6)
     _save_step_screenshot("02_after_cmd_shift_g", logger)
 
     # 3. Cmd+A — select any pre-filled text in the path field so the paste
     #    replaces it (the field can open holding the current location).
     pyautogui.hotkey("command", "a")
-    time.sleep(0.2)
+    time.sleep(0.3)
 
     # 4. Deliver the path via clipboard paste (immune to Shift-timing and
     #    dropped characters).  Fall back to typing only if pbcopy fails.
+    logger.info("    Dialog: pasting CSV path…")
     if _set_clipboard(path, logger):
-        time.sleep(0.15)  # let the pasteboard settle
+        time.sleep(0.2)  # let the pasteboard settle
         pyautogui.hotkey("command", "v")
     else:
         logger.warning(
@@ -1386,20 +1429,25 @@ def _open_panel_go_to_path(path: str, logger: logging.Logger) -> None:
             "(special characters may be unreliable)."
         )
         pyautogui.write(path, interval=0.04)
-    time.sleep(0.5)
+    time.sleep(1.0)
     _save_step_screenshot("03_after_typing_path", logger)
 
-    # 5. First Enter — navigates the panel to the pasted path.
+    # 5. First Enter — confirms 'Go to Folder': navigates the panel to the
+    #    file's folder AND selects the file.  Give it real time to settle —
+    #    firing the next Enter too early is the classic "nothing opened" bug.
+    logger.info("    Dialog: confirming path (Enter), letting it settle…")
     pyautogui.press("enter")
-    time.sleep(0.9)
+    time.sleep(2.0)
     _save_step_screenshot("04_after_first_enter", logger)
 
-    # 6. Second Enter — clicks the Open button, closing the panel.
+    # 6. Second Enter — clicks the panel's default 'Open' button on the now-
+    #    selected file, closing the panel and handing the CSV to UniSync.
+    logger.info("    Dialog: opening the selected file (Enter)…")
     pyautogui.press("enter")
-    time.sleep(0.9)
+    time.sleep(1.2)
     _save_step_screenshot("05_after_second_enter", logger)
 
-    logger.debug(f"    NSOpenPanel → {path}")
+    logger.info(f"    Dialog: submitted → {path}")
 
 
 def _set_path_field(
