@@ -3,7 +3,7 @@ cleanup.py — Steps 13 & 14: Non-MainTrack Removal and NBC File Rename
 ======================================================================
 Refactors:
   6-Remove_Non-MainTracks.py  (Step 13 — implemented)
-  7-RenameFilenames.py        (Step 14 — stub, pending Soundminer Step 12)
+  7-RenameFilenames.py        (Step 14 — implemented)
 
 Step 13 — Remove Non-MainTracks
 -------------------------------
@@ -231,47 +231,56 @@ def _remove_empty_dirs(
 # ---------------------------------------------------------------------------
 
 def _build_source_index(
-    source_root: Path, logger: logging.Logger
+    source_roots: list[Path], logger: logging.Logger
 ) -> dict[str, Path]:
     """
-    Walk ``source_root`` recursively and build a basename → full-path index
-    of every MP3 it contains.  The basename key uses the same normalization
-    as the keeper-matching code (``_basename_key``: extension stripped,
-    lowercased) so a missing keeper from the CSV can be looked up directly.
+    Walk one or more ``source_roots`` recursively and build a
+    basename → full-path index of every MP3 they contain.  The basename key
+    uses the same normalization as the keeper-matching code (``_basename_key``:
+    extension stripped, lowercased) so a missing keeper from the CSV can be
+    looked up directly.
 
-    If a basename collides (rare, but possible across different albums),
-    the first walk-order match wins; we log a warning so the user can
-    investigate if it ever matters in practice.
+    The Tunesat folder holds US MP3 *plus* Ex-US eligible MP3, so a keeper that
+    is missing from the target can legitimately live in EITHER the US delivery
+    (``1-ORIGINAL/Music/MP3/MEDIA``) or the Ex-US delivery
+    (``1-ORIGINAL/Music/Ex-US (MP3)/MEDIA``) — hence a list of roots.
+
+    If a basename collides (across albums or across the two deliveries), the
+    first walk-order match wins; we log a warning so the user can investigate
+    if it ever matters in practice.  A root that doesn't exist is skipped with
+    a warning rather than aborting.
     """
     index: dict[str, Path] = {}
-    if not source_root.exists():
-        logger.warning(
-            f"  Source folder for auto-fill does not exist: {source_root}\n"
-            f"  Any missing keepers will be reported as unrecoverable."
-        )
-        return index
-
     collisions = 0
-    for p in source_root.rglob("*"):
-        if p.is_file() and p.suffix.lower() == ".mp3":
-            key = _basename_key(p.name)
-            if key in index:
-                collisions += 1
-            else:
-                index[key] = p
+    for source_root in source_roots:
+        if not source_root.exists():
+            logger.warning(f"  Auto-fill source not found (skipping): {source_root}")
+            continue
+        n_before = len(index)
+        for p in source_root.rglob("*"):
+            if p.is_file() and p.suffix.lower() == ".mp3":
+                key = _basename_key(p.name)
+                if key in index:
+                    collisions += 1
+                else:
+                    index[key] = p
+        logger.info(f"  Indexed {len(index) - n_before} MP3(s) under {source_root}")
 
-    logger.info(f"  Source index built: {len(index)} unique MP3(s) under {source_root}")
+    logger.info(
+        f"  Source index: {len(index)} unique MP3(s) across "
+        f"{len(source_roots)} source root(s)."
+    )
     if collisions:
         logger.warning(
-            f"  {collisions} duplicate basename(s) in source — only the "
-            f"first occurrence of each is indexed.  Run with --debug to "
-            f"see the source walk if this matters."
+            f"  {collisions} duplicate basename(s) across sources — only the "
+            f"first occurrence of each is indexed.  Run with --debug if this "
+            f"matters."
         )
     return index
 
 
 def _copy_missing_keepers(
-    source_root:  Path,
+    source_roots: list[Path],
     target_root:  Path,
     source_index: dict[str, Path],
     missing_keys: set[str],
@@ -280,8 +289,8 @@ def _copy_missing_keepers(
 ) -> tuple[int, int, list[str]]:
     """
     For every keeper not currently in the target, look it up in
-    ``source_index`` and copy it (preserving the source's relative path)
-    into ``target_root``.
+    ``source_index`` and copy it (preserving its relative path under whichever
+    of ``source_roots`` it came from) into ``target_root``.
 
     Returns ``(copied, failed, unrecoverable_keys)``:
       copied              — files copied (or, in dry-run, files that WOULD
@@ -302,14 +311,20 @@ def _copy_missing_keepers(
             unrecoverable.append(key)
             continue
 
-        # Mirror the source's structure so target ends up looking exactly
-        # like a fresh Step 10 delivery: source_root/{Label}/{Album}/{file}.mp3
-        # → target_root/{Label}/{Album}/{file}.mp3.
-        try:
-            rel = src.relative_to(source_root)
-        except ValueError:
+        # Mirror the source's structure so target ends up looking like a
+        # delivery: <root>/{Label}/{Album}/{file}.mp3 → target/{Label}/…
+        # `src` may be under any of the source roots (US or Ex-US MP3), so
+        # find the one it lives under to compute its relative path.
+        rel = None
+        for root in source_roots:
+            try:
+                rel = src.relative_to(root)
+                break
+            except ValueError:
+                continue
+        if rel is None:
             logger.error(
-                f"  [COPY ERROR] {src} is not under {source_root}; skipping."
+                f"  [COPY ERROR] {src} is not under any source root; skipping."
             )
             failed += 1
             continue
@@ -379,13 +394,24 @@ def remove_non_maintracks(
     """
     csv_path = metadata_csv  or ctx.cleanup_metadata_csv
     target   = target_folder or ctx.cleanup_target_folder
-    source   = source_folder or (
-        ctx.specials_dir / "1-ORIGINAL" / "Music" / "MP3" / "MEDIA"
-    )
+    # Auto-fill source(s): the Tunesat Music folder holds the US MP3 delivery
+    # PLUS the Tunesat-eligible Ex-US MP3 labels, so a missing keeper can live
+    # in either delivery — search BOTH.  An explicit --source override collapses
+    # to that single root (backward-compatible).
+    _music = ctx.specials_dir / "1-ORIGINAL" / "Music"
+    if source_folder is not None:
+        source_roots = [source_folder]
+    else:
+        source_roots = [
+            _music / "MP3"         / "MEDIA",   # US MP3 (Step 5 delivery)
+            _music / "Ex-US (MP3)" / "MEDIA",   # Ex-US MP3 (BTV/Bruton/Kosinus…)
+        ]
 
     logger.info(f"  Metadata CSV:  {csv_path}")
     logger.info(f"  Target folder: {target}")
-    logger.info(f"  Source folder: {source}  (auto-fill source)")
+    logger.info(f"  Auto-fill source(s):")
+    for s in source_roots:
+        logger.info(f"     {s}")
 
     if not csv_path.exists():
         msg = (
@@ -412,13 +438,14 @@ def remove_non_maintracks(
             return True
         logger.error(f"  ✗  Target folder not found: {target}")
         return False
-    if not source.exists():
+    existing_sources = [s for s in source_roots if s.exists()]
+    if not existing_sources:
         msg = (
-            f"  Source folder for auto-fill not found: {source}\n"
-            f"     This step needs a source to copy any missing keepers from.\n"
-            f"     The default is the Step 5 UniSync delivery at\n"
-            f"     `<specials_dir>/1-ORIGINAL/Music/MP3/MEDIA`.  Run Step 5\n"
-            f"     first or pass --source PATH to point at the right source."
+            f"  No auto-fill source folder exists.  Searched:\n"
+            + "".join(f"       {s}\n" for s in source_roots)
+            + f"     This step needs a source to copy any missing keepers from.\n"
+            f"     The defaults are the Step 5 UniSync deliveries; run Step 5\n"
+            f"     first, or pass --source PATH to point at the right source."
         )
         if dry_run:
             logger.warning("  ⚠ " + msg.strip())
@@ -472,7 +499,7 @@ def remove_non_maintracks(
     # recoverable_total == len(present_in_target) == len(keep_keys), so
     # the safety ratio is 1.0 and the trivial-success branch fires.
     if missing_keys:
-        source_index          = _build_source_index(source, logger)
+        source_index          = _build_source_index(existing_sources, logger)
         recoverable_missing   = missing_keys & source_index.keys()
         unrecoverable_missing = missing_keys - source_index.keys()
         logger.info(f"  Missing — recoverable from source: {len(recoverable_missing)}")
@@ -534,7 +561,7 @@ def remove_non_maintracks(
             f"from source ──"
         )
         _copy_missing_keepers(
-            source, target, source_index, recoverable_missing,
+            existing_sources, target, source_index, recoverable_missing,
             dry_run=True, logger=logger,
         )
 
@@ -634,7 +661,7 @@ def remove_non_maintracks(
             f"from source…"
         )
         copied_count, failed_copies, _ = _copy_missing_keepers(
-            source, target, source_index, recoverable_missing,
+            existing_sources, target, source_index, recoverable_missing,
             dry_run=False, logger=logger,
         )
         if failed_copies:
@@ -689,7 +716,7 @@ def remove_non_maintracks(
 
 
 # ---------------------------------------------------------------------------
-# Step 14 — Rename NBC Music Files  (still a stub; depends on Soundminer)
+# Step 14 — Rename NBC Music Files  (refactored from 7-RenameFilenames.py)
 # ---------------------------------------------------------------------------
 
 # Characters allowed in final filenames (besides the extension dot)

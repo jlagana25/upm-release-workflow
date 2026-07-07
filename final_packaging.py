@@ -156,14 +156,18 @@ def _copy_tree_files(
         rel_parts: tuple[str, ...] = () if rel == "." else Path(rel).parts
 
         # Label filter — only walk into allowed top-level label folders.
+        # Match on the whitespace-stripped folder name: source deliveries
+        # occasionally carry a stray leading/trailing space (e.g. "BTV " with
+        # a sub-"pitch" folder), and an exact match would silently skip that
+        # whole label — dropping contractually-eligible tracks from Tunesat.
         if label_filter is not None:
             if not rel_parts:
                 # At src root: prune dirs to those that are allowed.
-                dirs[:] = sorted(d for d in dirs if d in label_filter)
+                dirs[:] = sorted(d for d in dirs if d.strip() in label_filter)
                 # Files at the root have no label parent, so they can't
                 # be Tunesat-eligible — skip them in filtered mode.
                 continue
-            if rel_parts[0] not in label_filter:
+            if rel_parts[0].strip() not in label_filter:
                 # Defensive: a pruned subtree shouldn't appear, but bail
                 # if it somehow does.
                 dirs[:] = []
