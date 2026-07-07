@@ -273,7 +273,7 @@ def _soundminer_handoff(
     # it would resolve to a different month than the pipeline targeted.)
     if sm_cmd is None:
         sm_cmd = (
-            f"python3 soundminer.py "
+            f"python3 soundminer.py --nbc "
             f"--year {ctx.year} --month {ctx.month} --part {ctx.part}"
         )
 
@@ -817,7 +817,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                     from soundminer import run_soundminer_sourceaudio_workflow
                     ok_sa = run_soundminer_sourceaudio_workflow(
                         ctx, args.dry_run, logger,
-                        unattended=args.sourceaudio_unattended,
+                        unattended=(not args.soundminer_attended),
                         db_shortcut=args.sourceaudio_db_shortcut,
                     )
                 else:
@@ -833,9 +833,13 @@ def run_workflow(args: argparse.Namespace) -> int:
                         )
                     sa_cmd = (
                         f"python3 soundminer.py --sourceaudio "
-                        f"--year {ctx.year} --month {ctx.month} --part {ctx.part} "
-                        f"--sourceaudio-db-shortcut {args.sourceaudio_db_shortcut}"
+                        f"--year {ctx.year} --month {ctx.month} --part {ctx.part}"
                     )
+                    if str(args.sourceaudio_db_shortcut) != "8":
+                        sa_cmd += (
+                            f" --sourceaudio-db-shortcut "
+                            f"{args.sourceaudio_db_shortcut}"
+                        )
                     ok_sa = _soundminer_handoff(
                         ctx, args, logger, REMOTE_SOUNDMINER,
                         step_no=11,
@@ -904,7 +908,10 @@ def run_workflow(args: argparse.Namespace) -> int:
                         "inline (no hand-off)."
                     )
                     from soundminer import run_soundminer_nbc_workflow
-                    ok_nbc = run_soundminer_nbc_workflow(ctx, args.dry_run, logger)
+                    ok_nbc = run_soundminer_nbc_workflow(
+                        ctx, args.dry_run, logger,
+                        unattended=(not args.soundminer_attended),
+                    )
                 else:
                     # Hand-off mode.  We're on the pipeline Mac; Soundminer runs on a
                     # separate, managed Mac that cannot be driven over SSH (no screen
@@ -1213,12 +1220,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Behaviour flags
     p.add_argument(
+        "--soundminer-attended",
+        action="store_true",
+        help="Steps 11 & 12: run the Soundminer SourceAudio and NBC workflows "
+             "ATTENDED — pause for you to press Enter after each scan/import/"
+             "embed and to confirm the Mirror Settings dialog before OK. The "
+             "DEFAULT is fully unattended (no Enter prompts): scan/import/embed "
+             "completion is detected by watching the Soundminer UI settle, and "
+             "the Mirror Settings dialog is auto-accepted (its settings persist "
+             "between releases). Use this flag for a first run on a new machine "
+             "to eyeball that the persisted mirror settings are correct.",
+    )
+    p.add_argument(
         "--sourceaudio-unattended",
         action="store_true",
-        help="Step 11: run the SourceAudio Soundminer mirror without the "
-             "attended database-confirmation and Mirror-Settings pauses. Use "
-             "only after an attended run has confirmed the SourceAudio database "
-             "and AIFF mirror settings persist correctly.",
+        help="Deprecated / no-op: Step 11 is unattended by default now. Kept "
+             "for backward compatibility. Use --soundminer-attended to force "
+             "the attended pauses instead.",
     )
     p.add_argument(
         "--sourceaudio-db-shortcut",
