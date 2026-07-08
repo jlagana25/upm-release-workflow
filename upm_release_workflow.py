@@ -412,6 +412,7 @@ def _render_final_summary(
         ("Verification",           _status_label(results.status("9 Verification"))),
         ("Missing report",         str(ctx.missing_report_csv)),
         ("Final packaging",        _status_label(results.status("10 Final packaging"))),
+        ("SoundExchange forms",    _status_label(results.status("10 SoundExchange forms"))),
         ("SourceAudio",            _status_label(results.status("11 SourceAudio"))),
         ("Soundminer",             _status_label(results.status("12 Soundminer"))),
         ("NBC MP3 conversion",     _status_label(results.status("12 NBC WAV→MP3"))),
@@ -788,6 +789,30 @@ def run_workflow(args: argparse.Namespace) -> int:
                     _ok(args.dry_run) if ok10 else _STEP_RESULT_STUB
                 )
 
+            # ---- Step 10 (cont.): SoundExchange ISRC Ingest Forms ----------------
+            # A metadata-only final deliverable produced from the Step-1
+            # SoundExchange exports into 3-FINAL PACKAGING/…- SoundExchange.
+            # It belongs to the final-packaging phase, so it shares Step 10's
+            # verification gate and is skipped by --skip-final-packaging; a
+            # dedicated --skip-soundexchange skips just this without skipping
+            # the audio/cover copy above.
+            if finalize_blocked:
+                log_step_skipped(logger, 10, "SoundExchange Ingest Forms")
+                results["10 SoundExchange forms"] = "blocked — verification failed"
+            elif args.skip_final_packaging or args.skip_soundexchange:
+                log_step_skipped(logger, 10, "SoundExchange Ingest Forms")
+                results["10 SoundExchange forms"] = _STEP_RESULT_SKIPPED
+            else:
+                log_step_start(logger, 10, "SoundExchange Ingest Forms")
+                from split_se_ingest_forms import run_soundexchange_split
+                ok_se = run_soundexchange_split(
+                    ctx, dry_run=args.dry_run, logger=logger
+                )
+                log_step_end(logger, 10, "SoundExchange Ingest Forms", ok_se)
+                results["10 SoundExchange forms"] = (
+                    _ok(args.dry_run) if ok_se else _STEP_RESULT_STUB
+                )
+
             # ---- Step 11: SourceAudio (Soundminer scan → AIFF mirror) -------------
             log_section(logger, "Step 11 — SourceAudio (AIFF) Mirror")
             if finalize_blocked:
@@ -1052,7 +1077,7 @@ _STEP_UNITS = [
     ("5",    5.0,  "skip_unisync",               "UniSync"),
     ("6",    6.0,  "skip_covers",                "Covers (download/distribute, 6-8)"),
     ("9",    9.0,  "skip_verify",                "Verification (gate)"),
-    ("10",   10.0, "skip_final_packaging",       "Final packaging"),
+    ("10",   10.0, "skip_final_packaging",       "Final packaging (+ SoundExchange forms)"),
     ("11",   11.0, "skip_sourceaudio",           "SourceAudio (AIFF mirror)"),
     ("12",   12.0, "skip_soundminer",            "Soundminer NBC"),
     ("12.7", 12.7, None,                         "NBC WAV->MP3 (within step 12)"),
@@ -1078,9 +1103,9 @@ def format_step_list() -> str:
     return "\n".join(lines)
 _ALL_SKIP_ATTRS = [
     "skip_domo", "skip_folder_setup", "skip_album_list_doc", "skip_unisync",
-    "skip_covers", "skip_verify", "skip_final_packaging", "skip_sourceaudio",
-    "skip_soundminer", "skip_nbc_mirror", "skip_non_maintrack_cleanup",
-    "skip_rename", "skip_final_metadata_check",
+    "skip_covers", "skip_verify", "skip_final_packaging", "skip_soundexchange",
+    "skip_sourceaudio", "skip_soundminer", "skip_nbc_mirror",
+    "skip_non_maintrack_cleanup", "skip_rename", "skip_final_metadata_check",
 ]
 
 
@@ -1129,6 +1154,10 @@ def _apply_step_selectors(args, logger) -> None:
             attr = next(a for (t, _, a, _) in _STEP_UNITS if t == token)
             if attr:
                 _set(attr, False)
+            if token == "10":
+                # SoundExchange is a Step 10 sub-phase with its own skip flag
+                # but no token of its own — un-skip it so `--only 10` runs it.
+                _set("skip_soundexchange", False)
         logger.info(f"  --only {token}: running step {token} only; all other "
                     "steps skipped.")
 
@@ -1182,6 +1211,10 @@ def build_parser() -> argparse.ArgumentParser:
     skips.add_argument("--skip-covers",                 action="store_true")
     skips.add_argument("--skip-verify",                 action="store_true")
     skips.add_argument("--skip-final-packaging",        action="store_true")
+    skips.add_argument("--skip-soundexchange",          action="store_true",
+        help="Step 10: skip only the SoundExchange ISRC Ingest Form generation "
+             "(the audio/cover copy still runs). --skip-final-packaging skips "
+             "both.")
     skips.add_argument("--skip-sourceaudio",            action="store_true")
     skips.add_argument("--skip-non-maintrack-cleanup",  action="store_true")
     skips.add_argument("--skip-soundminer",             action="store_true")
