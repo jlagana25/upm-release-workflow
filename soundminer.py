@@ -9,8 +9,8 @@ Substeps (matching the workflow spec):
         module runs.
 
   12.2  Launch / activate Soundminer v5Pro and switch the toolbar database
-        dropdown to "NBCUniversal" via keyboard shortcut ⌘5 (visible in the
-        Soundminer_nbc.png reference: NBCUniversal has shortcut "⌘5").
+        dropdown to "NBCUniversal" via keyboard shortcut ⌘5 (in the toolbar
+        database menu, NBCUniversal is bound to "⌘5").
 
   12.3  Database → Delete all records (AppleScript menu click).  If a
         confirmation alert appears, dismiss with Enter.
@@ -33,7 +33,7 @@ Substeps (matching the workflow spec):
         skipped and Enter is sent to accept whatever Soundminer currently
         shows.
 
-        Required settings (per Soundminer_mirror.png reference):
+        Required settings for the NBC (Broadcast Wave) mirror:
           Final File Type: Broadcast Wave
           Interleaved: ON
           Sum to Mono: OFF
@@ -421,7 +421,7 @@ def run_soundminer_nbc_workflow(
 # Step 11 — SourceAudio: scan folder → AIFF mirror (two source/dest pairs)
 # ---------------------------------------------------------------------------
 
-# Mirror Settings required for SourceAudio (per Soundminer_mirror_sa.png).
+# Mirror Settings required for the SourceAudio (AIFF) mirror.
 SOURCEAUDIO_MIRROR_SETTINGS = (
     "        Required SourceAudio Mirror Settings (verify all match before OK):\n"
     "          Final File Type:                    AIFF\n"
@@ -715,7 +715,7 @@ def _activate_soundminer(logger: logging.Logger) -> None:
 def _switch_to_nbcuniversal(logger: logging.Logger) -> None:
     """
     Switch the active database to NBCUniversal via the ⌘5 keyboard shortcut
-    (visible in the Soundminer_nbc.png reference: NBCUniversal = "⌘5").
+    (in Soundminer's toolbar database menu, NBCUniversal is bound to "⌘5").
 
     ⌘5 is a deterministic, idempotent global hotkey in Soundminer — it
     switches to NBCUniversal from any other database and is a no-op if

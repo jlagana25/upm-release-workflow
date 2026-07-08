@@ -13,9 +13,11 @@ setting up a new machine, work through Part 2 top to bottom.
 
 ## Conventions used below
 
-- All commands assume you are in the project's `files/` directory:
-  - **Pipeline machine (USMPSMDHDF2):** `cd "/Users/hdfuser/Documents/Python/UPM Release WorkFlow Automation/files"`
-  - **Soundminer machine (USMPSMDHDF1), console/Screen Sharing:** `cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"`
+- All commands assume you are in the project's `files/` directory. **Both
+  machines now use the same path:**
+  `cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"`
+  (On **USMPSMDHDF1**, run it in a console / Screen Sharing Terminal with an
+  active GUI session for the Soundminer and UniSync steps.)
 - Examples use **May 2026, Part 1** (`--year 2026 --month 5 --part 1`). Swap in your real release.
 - `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05`
 - `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Release - NBC`
