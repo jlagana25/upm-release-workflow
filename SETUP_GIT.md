@@ -9,7 +9,7 @@ with `git push` / `git pull`.
 
 | Machine | Role | Project path |
 |---------|------|--------------|
-| **USMPSMDHDF2** | Pipeline machine | `~/Documents/Python/UPM Release WorkFlow Automation/files` |
+| **USMPSMDHDF2** | Pipeline machine | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
 | **USMPSMDHDF1** | Soundminer machine | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
 
 Only the code under `files/` is tracked. The Pegasus volumes, `_Exports`, logs,
@@ -106,7 +106,7 @@ It signs in with your Claude subscription (Pro/Max) or an API key on first launc
 **Use it** — run it from inside the repo and talk to it in plain English:
 
 ```bash
-cd "/Users/hdfuser/Documents/Python/UPM Release WorkFlow Automation/files"
+cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
 claude
 ```
 

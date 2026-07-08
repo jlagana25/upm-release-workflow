@@ -8,8 +8,12 @@ single orchestrator (`upm_release_workflow.py`).
 
 | Host | Role | Project path |
 |------|------|--------------|
-| **USMPSMDHDF2** | Pipeline machine (run the orchestrator here) | `~/Documents/Python/UPM Release WorkFlow Automation/files` |
+| **USMPSMDHDF2** | Pipeline machine (run the orchestrator here) | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
 | **USMPSMDHDF1** | Soundminer machine (Steps 11 & 12 run here) | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
+
+Both machines now use the **same** project path (`~/Documents/Scripts/Python/UPM
+Release WorkFlow Automation/files`), so any `cd` / git command is identical on
+either one.
 
 The full pipeline can run end-to-end on either; on USMPSMDHDF2 it pauses to hand
 off the Soundminer steps. Shared storage is the two Pegasus volumes
