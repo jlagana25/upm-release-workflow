@@ -25,8 +25,10 @@ style copy, template-row formatting) is unchanged from the originals.
 from __future__ import annotations
 
 import argparse
+import logging
 from copy import copy
 from pathlib import Path
+from typing import Optional
 
 from openpyxl import load_workbook
 
@@ -124,23 +126,38 @@ def apply_template_row_format(ws, row_num, max_col) -> None:
 # ---------------------------------------------------------------------------
 
 def split_one(
-    export_path: Path, base_name: str, template_path: Path, output_dir: Path
+    export_path: Path,
+    base_name:   str,
+    template_path: Path,
+    output_dir:  Path,
+    *,
+    dry_run: bool = False,
+    logger:  "Optional[logging.Logger]" = None,
 ) -> int:
     """Split a single SoundExchange export into ingest-form workbooks.
 
-    Returns the number of part files written.
+    Returns the number of part files written (or, in dry-run, would write).
     """
+    emit = logger.info if logger else print
+
     export_wb = load_workbook(export_path, data_only=False)
     export_ws = export_wb.active
 
     rows = list(export_ws.iter_rows(min_row=2))   # skip export header
     max_col = export_ws.max_column
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     part = 1
     for start in range(0, len(rows), MAX_ROWS_PER_WORKBOOK):
         chunk = rows[start:start + MAX_ROWS_PER_WORKBOOK]
+        output_path = output_dir / f"{base_name} - Part {part}.xlsx"
+
+        if dry_run:
+            emit(f"    [WOULD WRITE] {output_path.name} — {len(chunk)} data row(s)")
+            part += 1
+            continue
 
         template_wb = load_workbook(template_path)
         form_ws = template_wb[FORM_SHEET]
@@ -153,14 +170,89 @@ def split_one(
                 target_cell = form_ws.cell(row=target_row_num, column=col_idx)
                 copy_cell(source_cell, target_cell)
 
-        output_path = output_dir / f"{base_name} - Part {part}.xlsx"
         template_wb.save(output_path)
-        print(f"  Saved {output_path.name} with {len(chunk)} data rows")
+        emit(f"    Saved {output_path.name} — {len(chunk)} data row(s)")
         part += 1
 
     if not rows:
-        print(f"  ⚠ {export_path.name} has no data rows — nothing written.")
+        emit(f"    ⚠ {export_path.name} has no data rows — nothing written.")
     return part - 1
+
+
+def run_soundexchange_split(
+    ctx,
+    *,
+    dry_run: bool = False,
+    logger:  "Optional[logging.Logger]" = None,
+    only:    "Optional[str]" = None,
+) -> bool:
+    """
+    Generate the SoundExchange ISRC Ingest Form workbooks for this release.
+
+    Orchestrator-friendly entry point (driven as a Step 10 / final-packaging
+    sub-phase): takes a ReleaseContext directly, logs via ``logger``, and
+    honours ``dry_run``.  Reads the SoundExchange metadata sheets exported by
+    Step 1 plus the ISRC Ingest Form template, and writes
+    ``<base name> - Part N.xlsx`` workbooks into the FINAL PACKAGING
+    SoundExchange folder (``ctx.soundexchange_final_dir``).
+
+    Returns True on success.  Returns False if the template or any requested
+    source sheet is missing — a real gap (run the Step 1 Domo export first).
+    In ``dry_run`` a missing input is a warning, not a failure, so a preview
+    never blocks.
+    """
+    emit  = logger.info    if logger else print
+    warn  = logger.warning if logger else print
+    error = logger.error   if logger else print
+
+    only = (only or "").strip().lower()
+    template   = _resolve_template(ctx)
+    output_dir = ctx.soundexchange_final_dir
+    emit(f"  Template: {template}")
+    emit(f"  Output:   {output_dir}")
+
+    if not template.exists():
+        msg = (
+            f"SoundExchange ISRC Ingest Form template not found: {template}  "
+            f"(expected in 2-STAGING/SoundExchange, from the Specials baseline)."
+        )
+        if dry_run:
+            warn("  ⚠ " + msg)
+            emit("  [DRY RUN] Skipping SoundExchange preview (template absent).")
+            return True
+        error("  ✗ " + msg)
+        return False
+
+    total_files    = 0
+    missing_sheets: list[str] = []
+    for key, base_name, token in ENTITIES:
+        if only and only != token:
+            continue
+        sheet = ctx.partner_metadata[key]
+        emit(f"\n  {base_name}")
+        emit(f"    source: {sheet}")
+        if not sheet.exists():
+            warn(
+                "    ⚠ Source sheet not found — run the Step 1 Domo export "
+                "for SoundExchange first."
+            )
+            missing_sheets.append(base_name)
+            continue
+        total_files += split_one(
+            sheet, base_name, template, output_dir,
+            dry_run=dry_run, logger=logger,
+        )
+
+    verb = "would write" if dry_run else "wrote"
+    emit(f"\n  SoundExchange: {verb} {total_files} part file(s) → {output_dir}")
+
+    if missing_sheets and not dry_run:
+        error(
+            "  ✗ SoundExchange incomplete — missing source sheet(s): "
+            + ", ".join(missing_sheets)
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +264,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Split the SoundExchange final-packaging metadata sheets into "
             "ISRC Ingest Form workbooks (≤ "
-            f"{MAX_ROWS_PER_WORKBOOK} rows each)."
+            f"{MAX_ROWS_PER_WORKBOOK} rows each).  In a full pipeline run this "
+            "also runs automatically as part of Step 10 (final packaging)."
         )
     )
     p.add_argument("--year",  type=int)
@@ -182,35 +275,22 @@ def main(argv: list[str] | None = None) -> int:
                    help="Use the previous month's release (full-month run).")
     p.add_argument("--only", default=None,
                    help="Process only one entity: 'mgb' or 'ztunes'.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Report what would be written without creating files.")
     args = p.parse_args(argv)
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logger = logging.getLogger("soundexchange")
+
     ctx = context_from_cli_args(args)
-    only = (args.only or "").strip().lower()
-
-    template = _resolve_template(ctx)
-    if not template.exists():
-        print(f"✗ Template not found: {template}")
-        return 1
-    output_dir = ctx.soundexchange_final_dir
-    print(f"Template: {template}")
-    print(f"Output:   {output_dir}")
-
-    total_files = 0
-    for key, base_name, token in ENTITIES:
-        if only and only != token:
-            continue
-        sheet = ctx.partner_metadata[key]
-        print(f"\n{base_name}")
-        print(f"  source: {sheet}")
-        if not sheet.exists():
-            print(f"  ✗ Source sheet not found — run the Domo export first: "
-                  f"python3 domo_exports.py --test --previous-month "
-                  f"--only soundexchange")
-            continue
-        total_files += split_one(sheet, base_name, template, output_dir)
-
-    print(f"\nDone — {total_files} part file(s) written to {output_dir}")
-    return 0
+    ok = run_soundexchange_split(
+        ctx, dry_run=args.dry_run, logger=logger, only=args.only,
+    )
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
