@@ -107,5 +107,9 @@ Then the other machine installs with `pip install -r requirements.lock`.
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`.
 - `split_se_ingest_forms.py` — SoundExchange metadata → ISRC ingest-form workbooks.
+  Runs **automatically as the second phase of Step 10** (final packaging) in a
+  full pipeline run; also runnable standalone (`python3 split_se_ingest_forms.py
+  --previous-month`, `--dry-run` supported). `--skip-soundexchange` skips just
+  this phase; `--skip-final-packaging` skips the whole of Step 10.
 - `smoke_test.py` — fast offline sanity check.
 - `TESTING_CHECKLIST.md` — operating + per-step testing guide.

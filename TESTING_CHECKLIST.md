@@ -55,7 +55,7 @@ setting up a new machine, work through Part 2 top to bottom.
 ## What runs, and in what order
 
 Preflight → 1 Domo exports → 2/3 Folder setup → 4 Album list DOCX/PDF →
-5 UniSync → 6–8 Covers → 9 Verification → 10 Final packaging →
+5 UniSync → 6–8 Covers → 9 Verification → 10 Final packaging (+ SoundExchange forms) →
 11 SourceAudio AIFF → 12 Soundminer → 12.7 NBC WAV→MP3 →
 13 Non-maintrack cleanup → 14 NBC rename → 15 Final metadata cross-check →
 Final summary.
@@ -137,8 +137,9 @@ To recover:
 
 Per-step skips: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
 `--skip-unisync`, `--skip-covers`, `--skip-verify`, `--skip-final-packaging`,
-`--skip-sourceaudio`, `--skip-soundminer`, `--skip-nbc-mirror`,
-`--skip-non-maintrack-cleanup`, `--skip-rename`, `--skip-final-metadata-check`.
+`--skip-soundexchange`, `--skip-sourceaudio`, `--skip-soundminer`,
+`--skip-nbc-mirror`, `--skip-non-maintrack-cleanup`, `--skip-rename`,
+`--skip-final-metadata-check`.
 
 Step selectors (mutually exclusive): `--start-at STEP` resumes at a step and runs
 to the end; `--only STEP` runs just that step. Valid STEP tokens:
@@ -349,6 +350,11 @@ Validates Step 9 (compare expected vs. present files; write the missing report).
 
 Validates Step 10 (copy originals into the final delivery package structure).
 
+> **Step 10 now has two phases:** this test covers the audio/cover copy
+> (`final_packaging.py`). The SoundExchange ISRC Ingest Form generation is the
+> second phase of Step 10 and is covered by **Test 15** below. In a full run
+> both happen under Step 10; `--skip-soundexchange` skips only the second phase.
+
 - **Command:**
   ```bash
   python3 final_packaging.py --test --year 2026 --month 5 --part 1 --dry-run
@@ -375,17 +381,21 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
 - `{specials}/1-ORIGINAL/Music/WAV w COVERS/MEDIA/` (US source)
 - `{specials}/2-STAGING/SME WAV ExUS/MEDIA/` (Ex-US source)
 
-- **Command (dry-run first, then attended real run):**
+- **Command (dry-run first, then a supervised first run):**
   ```bash
   # Plan only — confirms the source→dest pairs and settings, touches nothing:
   python3 soundminer.py --sourceaudio --year 2026 --month 5 --part 1 --dry-run
 
-  # Attended real run (pauses so you can confirm the AIFF mirror settings on the
-  # first pass; they persist to the second).  --sourceaudio-db-shortcut defaults
-  # to "8" (⌘8); pass a different number if your SourceAudio DB is elsewhere:
+  # Supervised first run: --attended pauses at the Mirror Settings dialog so you
+  # can confirm the AIFF settings before OK (Soundminer persists them afterward):
+  python3 soundminer.py --sourceaudio --attended --year 2026 --month 5 --part 1
+
+  # Normal run: UNATTENDED is the default (no pauses) once you trust the
+  # persisted mirror settings:
   python3 soundminer.py --sourceaudio --year 2026 --month 5 --part 1
   ```
-  - Add `--unattended` to skip the settings-confirmation pause (only once you trust the persisted mirror settings).
+  - Runs **unattended by default**; add `--attended` for the supervised pause above. (`--unattended` still exists but is a deprecated no-op.)
+  - `--sourceaudio-db-shortcut` defaults to `"8"` (⌘8); pass a different number only if your SourceAudio DB is on another slot.
   - Add `--capture-steps` for per-step screenshots.
 - **What it does:** for each (source → destination) pair it deletes all records → Scan Sounds into Database → Mirror to AIFF:
   1. `WAV w COVERS/MEDIA` → `…Release - SourceAudio/Music`
@@ -528,18 +538,21 @@ Validates Step 15: cross-references each partner deliverable's metadata sheet (o
 
 Validates the SoundExchange export → ISRC ingest-form split (`split_se_ingest_forms.py`). Consolidates the two retired per-entity scripts.
 
+> **Runs automatically in Step 10.** In a full pipeline run this same logic runs as the *second phase of Step 10* (final packaging) via `run_soundexchange_split()` — see the note in Test 9. This standalone test exercises the tool on its own (handy for re-generating the forms without re-running packaging). `--skip-soundexchange` skips this phase inside a full run.
+
 - **Prereqs:**
   - `{specials}/2-STAGING/SoundExchange/Metadata/SoundExchange Universal Music - *.xlsx` present (from Test 4's `--only soundexchange`).
   - `{specials}/2-STAGING/SoundExchange/ISRC Ingest Form.xlsx` template present (or in the baseline `2-STAGING/SoundExchange/`).
 - **Command:**
   ```bash
+  python3 split_se_ingest_forms.py --previous-month --dry-run   # preview only, writes nothing
   python3 split_se_ingest_forms.py --previous-month             # both entities
   python3 split_se_ingest_forms.py --previous-month --only mgb  # one entity
   ```
 - **Expected output:**
   - Prints `Template: …` (resolved from 2-STAGING, else baseline) and `Output: …` (the 3-FINAL PACKAGING SoundExchange folder) before writing anything.
-  - Per entity: `Saved ISRC Ingest Form - {MGB NA LLC|Z TUNES LLC} - Part N.xlsx with K data rows` (≤9990 rows/part).
-  - If the export is missing: `Source sheet not found — run the Domo export first` — run Test 4's `--only soundexchange` and retry.
+  - Per entity: `Saved ISRC Ingest Form - {MGB NA LLC|Z TUNES LLC} - Part N.xlsx — K data row(s)` (≤9990 rows/part). In `--dry-run`, `[WOULD WRITE] … — K data row(s)` and no files created.
+  - If an export sheet is missing: `⚠ Source sheet not found — run the Step 1 Domo export for SoundExchange first` — the run reports the missing entity and exits non-zero (a dry-run only warns). Run Test 4's `--only soundexchange` and retry.
 - **Inspect:**
   - Open `… - Part 1.xlsx`: data begins at row 11 of the `Form` sheet, columns aligned with the template.
   - Files land in `{specials}/3-FINAL PACKAGING/Universal Production Music {Month} Release - SoundExchange/`.
