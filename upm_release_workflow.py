@@ -405,6 +405,7 @@ def _render_final_summary(
 
     # (label, value) rows — value is either a plain string or a status label.
     rows: list[tuple[str, str]] = [
+        ("Release ID",             ctx.release_id),
         ("Year",                   str(ctx.year)),
         ("Month",                  f"{ctx.month_name} {ctx.year_str}"),
         ("Release type",           "Full" if ctx.is_full_month else f"Part {ctx.part}"),
@@ -506,7 +507,7 @@ def run_workflow(args: argparse.Namespace) -> int:
         ctx.month,
         ctx.part,
         write_file=not args.dry_run,
-        release_label="Full" if ctx.is_full_month else None,
+        release_label=ctx.release_variant,
     )
 
     log_section(logger, "UPM Release Workflow")

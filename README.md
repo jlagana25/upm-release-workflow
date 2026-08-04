@@ -45,10 +45,11 @@ python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --start-at 12.7
 
 Release names always describe the content period, not the day the workflow is
 run or delivered. A full July run started in August is named
-`Universal Production Music July 2026 Full Release` and uses the internal root
-`UPM-2026-07_FULL`. July Part 2 remains `July 2026 Part 2` even when it is
-delivered in August. `--previous-month` remains the simplest full-month command;
-use explicit `--year`, `--month`, and `--part` for split releases.
+`Universal Production Music July 2026 Full Release`. Every run has one canonical
+internal ID: `UPM-2026-07-P1`, `UPM-2026-07-P2`, or `UPM-2026-07-FULL`.
+July Part 2 remains `July 2026 Part 2` even when it is delivered in August.
+`--previous-month` remains the simplest full-month command; use explicit
+`--year`, `--month`, and `--part` for split releases.
 
 Step 10 materializes Tunesat directly from its metadata keep-list; Step 13 is a
 repair-only compatibility alias. Steps 10–15 are gated behind Step 9 verification

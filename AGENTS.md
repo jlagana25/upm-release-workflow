@@ -194,12 +194,12 @@ python3 upm_release_workflow.py --previous-month --only 10
 python3 upm_release_workflow.py ... --dry-run
 ```
 
-`--previous-month` is the simple full-month shortcut. Full-month outputs are
-named explicitly (for example `UPM-2026-07_FULL` and
-`Universal Production Music July 2026 Full Release`) so they cannot collide
-with Part 1. Names follow the release/content month even when processing or
-delivery occurs in the following month. Use explicit `--year/--month/--part`
-for Part 1 or Part 2.
+`--previous-month` is the simple full-month shortcut. Every run has a canonical
+internal ID: `UPM-2026-07-P1`, `UPM-2026-07-P2`, or `UPM-2026-07-FULL`.
+Partner-facing names are explicit too (for example
+`Universal Production Music July 2026 Full Release`). Names follow the
+release/content month even when processing or delivery occurs in the following
+month. Use explicit `--year/--month/--part` for Part 1 or Part 2.
 
 - **Selectors** (mutually exclusive): `--start-at <token>`, `--only <token>`.
   Tokens come from `_STEP_UNITS` (e.g. `1,2,4,5,6,9,10,11,12,12.7,13,14,15,16`).

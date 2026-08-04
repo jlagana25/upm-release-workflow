@@ -19,8 +19,8 @@ setting up a new machine, work through Part 2 top to bottom.
   (On **USMPSMDHDF1**, run it in a console / Screen Sharing Terminal with an
   active GUI session for the Soundminer and UniSync steps.)
 - Examples use **May 2026, Part 1** (`--year 2026 --month 5 --part 1`). Swap in your real release.
-- `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05`
-- `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Release - NBC`
+- `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05-P1`
+- `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Part 1 Release - NBC`
 - The workflow can be launched from **either machine**. Step 12 (Soundminer) is
   the only machine-specific step: it runs **inline** (automatically) when you
   launch on the **Soundminer machine (USMPSMDHDF1)**, and switches to a
@@ -352,7 +352,7 @@ Validates Step 9 (compare expected vs. present files; write the missing report).
   - Step status `✓ completed` when nothing is missing; reports the missing count otherwise.
 - **Inspect:**
   - Open the missing report:
-    `"/Users/hdfuser/Documents/Scripts/Python/_Exports/_New Releases/UPM May 2026_Missing_<date>.csv"`
+    `"/Users/hdfuser/Documents/Scripts/Python/_Exports/_New Releases/UPM May 2026 Part 1_Missing_<date>.csv"`
   - Empty (header only) = clean. Rows = genuinely missing files to chase (often via re-running UniSync/covers).
 - **Rollback/cleanup:**
   - The missing-report CSV is a read-only artifact; delete it if test-only. Verification changes nothing else.
@@ -661,7 +661,7 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
   Confirm the header shows the correct prior month and a `2026-05-01 → 2026-05-31`
   full-month range, folders use the explicit "Month YYYY Full" form, and
   Domo uses its "Previous Month" preset. Inspect the same deliverables as below,
-  under the full-release folders (e.g. `UPM-2026-05_FULL`,
+  under the full-release folders (e.g. `UPM-2026-05-FULL`,
   `… May 2026 Full Release - NBC`).
 - **Expected output:**
   - Each step logs start → end with a status; no `✗ FAILED` lines.
