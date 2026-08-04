@@ -28,7 +28,7 @@ _FORMATTER = logging.Formatter(
 )
 
 # Registry so we don't add duplicate handlers if called more than once
-_ACTIVE_LOGGERS: dict[str, tuple[logging.Logger, Path]] = {}
+_ACTIVE_LOGGERS: dict[str, tuple[logging.Logger, Path | None]] = {}
 
 
 def get_logger(
@@ -36,47 +36,54 @@ def get_logger(
     month: int,
     part: int,
     log_dir: Path | None = None,
-) -> tuple[logging.Logger, Path]:
+    *,
+    write_file: bool = True,
+) -> tuple[logging.Logger, Path | None]:
     """
     Create (or retrieve) the logger for one workflow run.
 
     Returns
     -------
     logger   : logging.Logger  — write to this throughout the run
-    log_path : Path            — path to the created log file
+    log_path : Path | None     — created log file, or None for console-only
     """
     if log_dir is None:
         log_dir = _DEFAULT_LOG_DIR
 
-    key = f"{year}-{month:02d}-p{part}"
+    key = f"{year}-{month:02d}-p{part}-{'file' if write_file else 'console'}"
     if key in _ACTIVE_LOGGERS:
         return _ACTIVE_LOGGERS[key]
 
-    log_dir.mkdir(parents=True, exist_ok=True)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_filename = f"UPM_Workflow_{year}-{month:02d}_Part{part}_{timestamp}.log"
-    log_path = log_dir / log_filename
+    log_path = (log_dir / log_filename) if write_file else None
 
-    logger = logging.getLogger(f"upm_workflow.{year}.{month:02d}.{part}")
+    logger = logging.getLogger(
+        f"upm_workflow.{year}.{month:02d}.{part}."
+        f"{'file' if write_file else 'console'}"
+    )
     logger.setLevel(logging.DEBUG)
 
-    # --- file handler: everything ---
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(_FORMATTER)
+    if write_file:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(_FORMATTER)
+        logger.addHandler(fh)
 
     # --- console handler: INFO and above ---
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     ch.setFormatter(_FORMATTER)
 
-    logger.addHandler(fh)
     logger.addHandler(ch)
 
     _ACTIVE_LOGGERS[key] = (logger, log_path)
 
-    logger.info(f"Log file: {log_path}")
+    if log_path is not None:
+        logger.info(f"Log file: {log_path}")
+    else:
+        logger.info("Dry-run logging: console only (no log file written).")
     return logger, log_path
 
 

@@ -10,9 +10,9 @@ the hard-won invariants that are easy to break.
 ## 1. What this project is
 
 A modular Python automation for Universal Production Music's **twice-monthly
-release workflow** on macOS. One orchestrator (`upm_release_workflow.py`) runs
-**16 ordered steps** from Domo metadata exports through final partner packaging
-and the independent SoundMouse delivery.
+release workflow** on macOS. One orchestrator (`upm_release_workflow.py`) exposes
+16 backward-compatible step tokens while executing dependency-aware phases from
+folder setup through the independent SoundMouse delivery.
 
 - **Part 1** of a month = releases dated the **1st–14th**.
 - **Part 2** = the **15th–end** of the month.
@@ -20,9 +20,9 @@ and the independent SoundMouse delivery.
   **no month/year is ever hardcoded**. Naming tokens and destination paths are all
   derived in `config.py`.
 
-The canonical list of steps and their skip flags lives in one place:
-`_STEP_UNITS` in `upm_release_workflow.py`. Treat it as the source of truth — the
-`--only` / `--start-at` selectors and every `--skip-*` flag are derived from it.
+The canonical compatibility tokens and skip flags live in `_STEP_UNITS`; runtime
+prerequisites live in `_STEP_DEPENDENCIES`, both in `upm_release_workflow.py`.
+Treat them as the paired source of truth for selectors and execution blocking.
 
 ---
 
@@ -35,14 +35,16 @@ pipeline here — it will fail, and that failure means nothing about your code.*
 Specifically, these **cannot run in the sandbox** and must not be used as a
 validation signal:
 
-- **GUI automation** — Steps 5 and 16 (UniSync) and Steps 11–12 (Soundminer) drive
+- **GUI automation** — Step 5 (including SoundMouse WAV jobs in a full run) and
+  Steps 11–12 (Soundminer) drive
   desktop apps via `pyautogui` + `opencv` screen-matching. They need a real macOS
   GUI session, the apps installed, and per-machine reference screenshots. None
   exist here.
 - **Mounted storage** — every real input/output path is on two Thunderbolt
   volumes, `/Volumes/Pegasus32 R8 - 1` (Specials) and `/Volumes/Pegasus32 R8 - 2`
   (Hard Drive Updates). They are not present in the sandbox.
-- **Domo exports** — Steps 1 and 16 drive an authenticated Domo browser session via
+- **Domo exports** — Step 1 also acquires SoundMouse exports in a full run;
+  standalone Step 16 drives an authenticated Domo browser session via
   Playwright. Needs credentials and interactive login.
 - **DOCX→PDF** — Step 4 shells out to LibreOffice/Word.
 
@@ -92,7 +94,8 @@ Use these three, in order of speed:
    If you add a new `--skip-*` flag, it **must** be registered in `_ALL_SKIP_ATTRS`
    or the smoke test fails by design.
 
-3. **Synthetic-filesystem unit tests** — the real pipeline touches Pegasus
+3. **Synthetic-filesystem unit tests** — run all offline regression tests with
+   `python3 -m unittest -v` (or `make test`). The real pipeline touches Pegasus
    volumes, so to test file-moving/filtering logic you build a throwaway tree in
    `tempfile.mkdtemp()`, run the function against it, and assert on the result.
    This is the established pattern in this project. Example shape:
@@ -125,12 +128,12 @@ with the three tools above.
 | 5 | UniSync music export | `unisync_automation.py` | No (GUI) |
 | 6–8 | Album covers (download → flatten → into WAV w COVERS) | `covers.py` | Logic testable |
 | 9 | Verification (**gate** for 10–15) | `verification.py`, `remediation.py` | Logic testable |
-| 10 | Final packaging **+ SoundExchange ingest forms** | `final_packaging.py`, `split_se_ingest_forms.py` | Logic testable |
+| 10 | Final packaging, filtered Tunesat materialization **+ SoundExchange forms** | `final_packaging.py`, `cleanup.py`, `split_se_ingest_forms.py` | Logic testable |
 | 11 | SourceAudio AIFF mirror | `soundminer.py` | No (GUI) |
 | 12 | Soundminer NBC (12.7 = NBC WAV→MP3) | `soundminer.py`, `audio_conversion.py` | Convert logic testable; mirror = GUI |
-| 13 | Non-main-track cleanup | `cleanup.py` | Logic testable |
-| 14 | Rename NBC files | `cleanup.py` | Logic testable |
-| 15 | Final metadata cross-check | `final_metadata_verification.py` | Logic testable |
+| 13 | Tunesat reconciliation repair alias (normally integrated into 10) | `cleanup.py` | Logic testable |
+| 14 | NBC rename repair alias (normally integrated into 12.7) | `cleanup.py` | Logic testable |
+| 15 | Final package cross-check (normally before Soundminer) | `final_metadata_verification.py` | Logic testable |
 | 16 | SoundMouse delivery | `soundmouse.py` | Data/filesystem logic testable; Domo + UniSync cannot run |
 
 Steps **10–15 are gated behind Step 9**: if verification fails on a real run
@@ -138,9 +141,10 @@ Steps **10–15 are gated behind Step 9**: if verification fails on a real run
 is skipped entirely (e.g. `--start-at 13`), `verify_failed` defaults to `False`,
 so the finalization steps are **not** blocked.
 
-Step **16 is independent of the Step 9 gate**. It exports the SoundMouse
-tracklist and bucket, builds each safe `ActivationRange` directory, runs a WAV
-UniSync job into `MEDIA`, downloads flat covers, and exports only metadata
+Step **16 is independent of the Step 9 gate**. In a full run its Domo work shares
+Step 1's authenticated browser session and its WAV jobs share Step 5's UniSync
+batch. It builds each safe `ActivationRange` directory, downloads/reuses flat
+covers, and retains only metadata
 workbooks selected by bucket codes 01–10. Those metadata exports remain XLSX,
 but Step 16 removes their Domo workbook formatting after download while keeping
 cell values, formulas, worksheet names, and workbook structure. Its final gate
@@ -156,7 +160,10 @@ It's also runnable standalone (`python3 split_se_ingest_forms.py --previous-mont
 
 Supporting modules: `config.py` (release context + **all** paths + partner
 destinations), `tracklist_columns.py` (shared CSV/XLSX column-name detection — the
-single source; don't reinvent per module), `logging_utils.py` (step logging
+single source; don't reinvent per module), `filesystem_names.py` (shared
+whitespace/case-normalized label-folder lookup), `release_manifest.py` (shared
+auto-invalidated table reads), `cover_downloads.py` (atomic validated image
+downloads/cache reuse), `logging_utils.py` (step logging
 helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 (hands the Soundminer steps from the pipeline machine to the Soundminer machine),
 `prune.py` (removes files from prior months the current tracklist no longer
@@ -194,14 +201,13 @@ python3 upm_release_workflow.py ... --dry-run
   `--skip-soundexchange`, `--skip-sourceaudio`, `--skip-soundminer`,
   `--skip-nbc-mirror`, `--skip-non-maintrack-cleanup`, `--skip-rename`,
   `--skip-final-metadata-check`, `--skip-soundmouse`.
-- **Step 13 deletes by default on real runs**: non-main-track cleanup passes
-  `actually_delete = not args.dry_run`, so `--dry-run` is the preview/safety
-  guard. `--delete-non-maintracks` is deprecated and ignored; it remains only
-  so older commands do not error. Folder overwrite still requires `--overwrite`.
+- **Tunesat is filtered during Step 10** from its authoritative metadata CSV and
+  the US + Ex-US MP3 sources. Step 13 remains a standalone repair alias for an
+  existing delivery. `--delete-non-maintracks` remains deprecated and ignored.
 - Soundminer steps run **unattended by default**; `--soundminer-attended` re-adds
   the settings-confirmation pauses.
 
-When adding a step: update `_STEP_UNITS`, add the block in the orchestrator, set a
+When adding a step: update `_STEP_UNITS` and `_STEP_DEPENDENCIES`, add the block in the orchestrator, set a
 `results[...]` status in every branch (run/skip/blocked), add a summary row in
 `_render_final_summary`, and register any new skip flag in `_ALL_SKIP_ATTRS`.
 
@@ -239,9 +245,10 @@ inline or are handed off.
 
 - **Whitespace in source folder names.** Real deliveries occasionally carry a
   stray leading/trailing space in a label folder (e.g. `"BTV "` with a `pitch`
-  sub-folder). Label matching in `final_packaging.py` and index/keeper logic in
-  `cleanup.py` compare on the **whitespace-stripped** name. An exact match silently
-  drops a whole album. Keep the `.strip()` comparisons.
+  sub-folder). All filesystem-facing label lookup/comparison goes through
+  `filesystem_names.py`; direct exact matching can silently drop or prune a whole
+  album. Keep this normalization in packaging, verification, pruning, cleanup,
+  and cover distribution.
 - **The Tunesat keep-list spans two deliveries.** `cleanup.py`'s auto-fill for
   missing keepers searches **both** `1-ORIGINAL/Music/MP3/MEDIA` (US) **and**
   `1-ORIGINAL/Music/Ex-US (MP3)/MEDIA` (Ex-US), because the Tunesat folder holds
@@ -252,6 +259,14 @@ inline or are handed off.
   the 10 UniSync crops; the Soundminer machine (HDF1) needs those plus 3 required
   + 4 optional Soundminer crops. There are no root-level shared crops.
 - **Lazy GUI/browser imports** (see §2) — never move them to module top level.
+- **Generated workbook cleanup is narrowly scoped.** SoundExchange removes only
+  stale `ISRC Ingest Form - ... - Part N.xlsx` outputs after current parts save;
+  SoundMouse removes only unselected `SoundMouseMetadata *.xlsx` files after the
+  selected exports succeed. Do not broaden either deletion pattern.
+- **Dry-run writes nothing.** The orchestrator uses console-only logging and
+  verification/prune reports are described but not written.
+- **SoundMouse stays independent even when acquisition is shared.** Failures in
+  its Step-1/Step-5 work are retried by Step 16 and do not fail the main phase.
 - **Every `--skip-*` flag** must appear in `_ALL_SKIP_ATTRS` (enforced by
   `smoke_test.py`). Sub-phase flags without their own step token (like
   `--skip-soundexchange`) may need special handling in `_apply_step_selectors`

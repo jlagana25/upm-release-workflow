@@ -351,8 +351,22 @@ def remediate_from_report(
     logger.info(f"  Dry-run:     {dry_run}")
 
     rows = _load_missing_report(report_path, logger)
+    return remediate_from_rows(
+        ctx, rows, dry_run, overwrite, run_unisync, logger
+    )
+
+
+def remediate_from_rows(
+    ctx: ReleaseContext,
+    rows: list[dict[str, str]],
+    dry_run: bool,
+    overwrite: bool,
+    run_unisync: bool,
+    logger: logging.Logger,
+) -> bool:
+    """Remediate in-memory verification findings; reports remain audit-only."""
     if not rows:
-        logger.info("  Nothing to remediate (report empty or not found).")
+        logger.info("  Nothing to remediate.")
         return True
 
     audio_by_job, cover_rows, structural = _classify(rows, logger)
@@ -484,21 +498,6 @@ def _reexport_domo_for_jobs(
     return ok
 
 
-def _count_report_rows(report_path: Path) -> int:
-    """Count non-structural miss rows in a report (0 if file absent)."""
-    if not report_path.is_file():
-        return 0
-    try:
-        with report_path.open("r", encoding="utf-8", newline="") as f:
-            return sum(
-                1
-                for r in csv.DictReader(f)
-                if (r.get("Type") or "") not in ("MISSING_CSV", "MISSING_COLUMN")
-            )
-    except Exception:
-        return 0
-
-
 def verify_and_remediate_loop(
     ctx: ReleaseContext,
     max_attempts: int,
@@ -522,8 +521,9 @@ def verify_and_remediate_loop(
       3. If it still can't be cleared by max_attempts, give up and report
          (these are tracks genuinely absent upstream).
 
-    Each verify pass rewrites the report, so each remediation acts only on
-    what is *still* missing.  In --dry-run the loop runs once (a preview).
+    Each verification pass returns its findings in memory, so remediation acts
+    only on what is *still* missing; the CSV is an audit artifact rather than an
+    internal hand-off. In --dry-run the loop runs once as a write-free preview.
     """
     from verification import verify_all_files
 
@@ -540,12 +540,30 @@ def verify_and_remediate_loop(
         logger.info("─" * 56)
 
         # --- Verify (writes the report when anything is missing) ----------
-        clean = verify_all_files(ctx, dry_run, logger)
+        current_rows: list[dict[str, str]] = []
+        clean = verify_all_files(
+            ctx, dry_run, logger, findings_out=current_rows
+        )
         if clean:
             logger.info(f"  ✓  No missing files on attempt {attempt}. Done.")
             return True, 0
 
-        count = _count_report_rows(ctx.missing_report_csv)
+        # A global dry-run is write-free, so verification deliberately did not
+        # create/replace the report that normally drives remediation. Never read
+        # a stale report from an earlier real run and pretend it describes this
+        # preview.
+        if dry_run:
+            logger.info(
+                "  (dry-run) Previewing remediation directly from in-memory "
+                "findings; the audit report remains unwritten."
+            )
+            remediate_from_rows(
+                ctx, current_rows, dry_run=True, overwrite=overwrite,
+                run_unisync=run_unisync, logger=logger,
+            )
+            return False, len(current_rows)
+
+        count = len(current_rows)
         logger.info(f"  Attempt {attempt}: {count} missing file row(s).")
 
         prev_count = last_count   # what was still-missing before this attempt
@@ -563,15 +581,6 @@ def verify_and_remediate_loop(
                 )
         last_count = count
 
-        # --- Dry-run: preview remediation once, then stop -----------------
-        if dry_run:
-            logger.info("  (dry-run) previewing remediation, not looping.")
-            remediate_from_report(
-                ctx, dry_run=True, overwrite=overwrite,
-                run_unisync=run_unisync, logger=logger,
-            )
-            return False, count
-
         # --- Last attempt: don't remediate again, just report -------------
         if attempt == max_attempts:
             logger.warning(
@@ -587,8 +596,9 @@ def verify_and_remediate_loop(
         # pass requests the current set.  Done at most once per stall.
         stalled = (prev_count is not None) and (count >= prev_count)
         if run_domo and stalled and not domo_reexported:
-            rows = _load_missing_report(ctx.missing_report_csv, logger)
-            audio_by_job, _covers, _structural = _classify(rows, logger)
+            audio_by_job, _covers, _structural = _classify(
+                current_rows, logger
+            )
             if audio_by_job:
                 ok_reexport = _reexport_domo_for_jobs(
                     ctx, set(audio_by_job.keys()), dry_run, logger
@@ -611,12 +621,12 @@ def verify_and_remediate_loop(
                 )
 
         # --- Remediate, then loop back to verify --------------------------
-        remediate_from_report(
-            ctx, dry_run=False, overwrite=overwrite,
+        remediate_from_rows(
+            ctx, current_rows, dry_run=False, overwrite=overwrite,
             run_unisync=run_unisync, logger=logger,
         )
 
-    final_count = _count_report_rows(ctx.missing_report_csv)
+    final_count = last_count or 0
     if final_count == 0:
         logger.info("  ✓  All files present after remediation.")
         return True, 0

@@ -24,7 +24,9 @@ import sys
 # Every first-party module — importing all of them catches broken cross-imports
 # (e.g. a helper that moved modules) before they fail mid-run.
 MODULES = [
-    "config", "tracklist_columns", "logging_utils",
+    "config", "tracklist_columns", "filesystem_names", "release_manifest",
+    "cover_downloads",
+    "logging_utils",
     "covers", "verification", "final_metadata_verification", "remediation",
     "final_packaging", "cleanup", "audio_conversion", "domo_exports",
     "split_se_ingest_forms", "folder_setup", "album_list_doc", "soundminer",
@@ -116,6 +118,10 @@ def main() -> int:
               all(t in wf.format_step_list() for t in wf._STEP_TOKENS))
     except Exception as exc:                           # noqa: BLE001
         check("format_step_list() renders all tokens", False, repr(exc))
+    check(
+        "dependency graph references known step tokens",
+        set(wf._STEP_DEPENDENCIES).issubset(set(wf._STEP_TOKENS)),
+    )
 
     # 5) Shared column matcher is actually shared (today's consolidation).
     print("\nShared column helpers:")

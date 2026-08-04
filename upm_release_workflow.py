@@ -23,8 +23,8 @@ Optional flags:
     --skip-sourceaudio            Skip Step 11 (SourceAudio AIFF build)
     --skip-soundminer             Skip Step 12 (Soundminer NBC workflow)
     --skip-nbc-mirror             Step 12: skip the embed+mirror, resume at 12.7
-    --skip-non-maintrack-cleanup  Skip Step 13 (non-maintrack removal)
-    --skip-rename                 Skip Step 14 (NBC filename rename)
+    --skip-non-maintrack-cleanup  Skip Step 13 repair alias
+    --skip-rename                 Skip NBC filename sanitization / Step 14 alias
     --skip-final-metadata-check   Skip Step 15 (final metadata cross-check)
     --skip-soundmouse             Skip Step 16 (SoundMouse delivery)
     --start-at STEP / --only STEP Resume at / run only one step (see step list)
@@ -175,6 +175,7 @@ def run_preflight(ctx: ReleaseContext, logger) -> bool:
 STATUS_COMPLETED = "completed"
 STATUS_SKIPPED   = "skipped"
 STATUS_FAILED    = "failed"
+STATUS_BLOCKED   = "blocked"
 
 # Back-compat aliases used by older code paths in this module.  They all map
 # onto the three canonical statuses above so the summary stays consistent.
@@ -219,7 +220,10 @@ class StepResults:
         return f"{status} — {detail}" if detail else status
 
     def any_failed(self) -> bool:
-        return any(s == STATUS_FAILED for s, _ in self._items.values())
+        return any(
+            s in (STATUS_FAILED, STATUS_BLOCKED)
+            for s, _ in self._items.values()
+        )
 
     def __contains__(self, key: str) -> bool:
         return key in self._items
@@ -362,6 +366,7 @@ def _status_label(status: str) -> str:
         STATUS_COMPLETED: "✓ completed",
         STATUS_SKIPPED:   "— skipped",
         STATUS_FAILED:    "✗ FAILED",
+        STATUS_BLOCKED:   "⊘ blocked",
     }.get(status, status or "— not run")
 
 
@@ -372,6 +377,8 @@ def _agg_status(*statuses: str) -> str:
         return ""
     if any(s == STATUS_FAILED for s in present):
         return STATUS_FAILED
+    if any(s == STATUS_BLOCKED for s in present):
+        return STATUS_BLOCKED
     if all(s == STATUS_SKIPPED for s in present):
         return STATUS_SKIPPED
     return STATUS_COMPLETED
@@ -409,6 +416,7 @@ def _render_final_summary(
         ("HD folder",              _status_label(results.status("3 HD folders"))),
         ("Album list PDF",         _status_label(results.status("4 Album list doc"))),
         ("UniSync jobs",           _status_label(results.status("5 UniSync jobs"))),
+        ("WAV w COVERS build",     _status_label(results.status("5 WAV w COVERS build"))),
         ("Covers",                 _status_label(covers)),
         ("Verification",           _status_label(results.status("9 Verification"))),
         ("Missing report",         str(ctx.missing_report_csv)),
@@ -422,7 +430,7 @@ def _render_final_summary(
         ("Final metadata check",   _status_label(results.status("15 Final metadata check"))),
         ("SoundMouse",             _status_label(results.status("16 SoundMouse"))),
         ("SoundMouse missing report", str(ctx.soundmouse_validation_report)),
-        ("Log file",               str(log_path)),
+        ("Log file",               str(log_path) if log_path else "not written (dry-run)"),
         ("Overall status",         _status_label(overall)),
     ]
 
@@ -439,7 +447,8 @@ def _render_final_summary(
     if results.any_failed():
         # Failed step names for the restart hint.
         failed_keys = [
-            k for k, (s, _d) in results.items() if s == STATUS_FAILED
+            k for k, (s, _d) in results.items()
+            if s in (STATUS_FAILED, STATUS_BLOCKED)
         ]
         logger.error(
             "\n  ✗ One or more steps FAILED: " + ", ".join(failed_keys) + "\n"
@@ -494,7 +503,9 @@ def run_workflow(args: argparse.Namespace) -> int:
         return 1
 
     # ---- Set up logging -----------------------------------------------------
-    logger, log_path = get_logger(ctx.year, ctx.month, ctx.part)
+    logger, log_path = get_logger(
+        ctx.year, ctx.month, ctx.part, write_file=not args.dry_run
+    )
 
     log_section(logger, "UPM Release Workflow")
     logger.info(ctx.summary())
@@ -530,6 +541,10 @@ def run_workflow(args: argparse.Namespace) -> int:
     )
 
     results = StepResults()
+    soundmouse_domo_prepared = False
+    soundmouse_unisync_prepared = False
+    soundmouse_codes: list[str] = []
+    us_wav_ready = False
 
     # ---- Preflight ----------------------------------------------------------
     log_section(logger, "Preflight")
@@ -594,12 +609,46 @@ def run_workflow(args: argparse.Namespace) -> int:
                         f"  Downstream steps may fail."
                     )
                 results["1 Domo exports"] = _STEP_RESULT_SKIPPED
+            elif _failed_dependencies("1", results):
+                results.set(
+                    "1 Domo exports", STATUS_BLOCKED,
+                    "folder setup failed",
+                )
             else:
                 log_step_start(logger, 1, "Domo Exports")
-                from domo_exports import run_domo_exports
-                export_results = run_domo_exports(ctx, args.dry_run, logger)
-                any_stub   = any(v == "stub"   for v in export_results.values())
-                any_failed = any(v == "failed" for v in export_results.values())
+                from domo_exports import EXPORT_KEYS, run_domo_exports
+                extra_cards = None
+                followup_cards = None
+                if not args.skip_soundmouse:
+                    from soundmouse import (
+                        domo_metadata_cards_from_bucket,
+                        domo_seed_cards,
+                    )
+                    extra_cards = domo_seed_cards(ctx)
+                    followup_cards = lambda: (
+                        domo_metadata_cards_from_bucket(ctx)
+                    )
+                export_results = run_domo_exports(
+                    ctx,
+                    args.dry_run,
+                    logger,
+                    extra_cards=extra_cards,
+                    followup_cards=followup_cards,
+                )
+                for export_key, export_status in export_results.items():
+                    if export_key in EXPORT_KEYS:
+                        results.set(
+                            f"1 Domo:{export_key}",
+                            STATUS_FAILED
+                            if export_status == "failed"
+                            else STATUS_COMPLETED,
+                        )
+                any_stub = any(
+                    export_results.get(key) == "stub" for key in EXPORT_KEYS
+                )
+                any_failed = any(
+                    export_results.get(key) == "failed" for key in EXPORT_KEYS
+                )
                 if any_stub:
                     results["1 Domo exports"] = _STEP_RESULT_STUB
                 elif any_failed:
@@ -608,12 +657,35 @@ def run_workflow(args: argparse.Namespace) -> int:
                 else:
                     results["1 Domo exports"] = _ok(args.dry_run)
                     log_step_end(logger, 1, "Domo Exports", True)
+                    if not args.skip_soundmouse and not args.dry_run:
+                        from soundmouse import metadata_codes_from_bucket
+                        soundmouse_failed = any(
+                            value == "failed"
+                            for key, value in export_results.items()
+                            if key.startswith("soundmouse_")
+                            or key == "followup_exports"
+                        )
+                        if not soundmouse_failed:
+                            soundmouse_codes = metadata_codes_from_bucket(
+                                ctx.soundmouse_bucket_csv
+                            )
+                            soundmouse_domo_prepared = bool(soundmouse_codes)
+                        else:
+                            logger.warning(
+                                "  SoundMouse acquisition exports were not "
+                                "complete; independent Step 16 will retry them."
+                            )
 
             # ---- Step 4: Album List Doc ---------------------------------------------
             log_section(logger, "Step 4 — Album List DOCX & PDF")
             if args.skip_album_list_doc:
                 log_step_skipped(logger, 4, "Album List DOCX/PDF")
                 results["4 Album list doc"] = _STEP_RESULT_SKIPPED
+            elif _failed_dependencies("4", results):
+                results.set(
+                    "4 Album list doc", STATUS_BLOCKED,
+                    "required exports or HD folder setup failed",
+                )
             else:
                 log_step_start(logger, 4, "Album List DOCX/PDF")
                 from album_list_doc import create_album_list_doc
@@ -628,6 +700,11 @@ def run_workflow(args: argparse.Namespace) -> int:
             if args.skip_unisync:
                 log_step_skipped(logger, 5, "UniSync Jobs")
                 results["5 UniSync jobs"] = _STEP_RESULT_SKIPPED
+            elif _failed_dependencies("5", results):
+                results.set(
+                    "5 UniSync jobs", STATUS_BLOCKED,
+                    "required exports or Specials folder setup failed",
+                )
             else:
                 log_step_start(logger, 5, "UniSync Jobs")
                 from unisync_automation import (
@@ -640,12 +717,38 @@ def run_workflow(args: argparse.Namespace) -> int:
                 set_capture_steps(getattr(args, "capture_steps", False))
                 set_supervised(getattr(args, "unisync_supervised", False))
                 set_xml_setup(getattr(args, "unisync_xml_setup", True))
-                job_results = run_all_unisync_jobs(
-                    ctx, args.dry_run, logger, overwrite=args.overwrite
-                )
+                sm_names: set[str] = set()
+                if soundmouse_domo_prepared and not args.skip_soundmouse:
+                    from types import SimpleNamespace
+                    from soundmouse import soundmouse_job_batch
+                    with soundmouse_job_batch(ctx) as sm_jobs:
+                        combined = SimpleNamespace(
+                            unisync_jobs=list(ctx.unisync_jobs) + sm_jobs
+                        )
+                        job_results = run_all_unisync_jobs(
+                            combined,
+                            args.dry_run,
+                            logger,
+                            overwrite=args.overwrite,
+                        )
+                    sm_names = {job["name"] for job in sm_jobs}
+                    soundmouse_unisync_prepared = all(
+                        job_results.get(name) not in (None, _US_FAILED)
+                        for name in sm_names
+                    ) and bool(sm_names)
+                else:
+                    job_results = run_all_unisync_jobs(
+                        ctx, args.dry_run, logger, overwrite=args.overwrite
+                    )
                 for job_name, status in job_results.items():
                     logger.info(f"  UniSync {job_name}: {status}")
-                any_failed = any(v == _US_FAILED for v in job_results.values())
+                us_wav_ready = job_results.get("US WAV") not in (
+                    None, _US_FAILED
+                )
+                any_failed = any(
+                    value == _US_FAILED and name not in sm_names
+                    for name, value in job_results.items()
+                )
                 if any_failed:
                     results["5 UniSync jobs"] = _STEP_RESULT_FAILED
                 else:
@@ -663,8 +766,23 @@ def run_workflow(args: argparse.Namespace) -> int:
                 if args.skip_unisync and args.rebuild_wav_covers:
                     log_section(logger,
                                 "Step 5 tail — Rebuild WAV w COVERS (forced)")
-                from covers import build_wav_with_covers_from_wav
-                build_wav_with_covers_from_wav(ctx, args.dry_run, logger)
+                if not args.skip_unisync and not us_wav_ready:
+                    results.set(
+                        "5 WAV w COVERS build", STATUS_BLOCKED,
+                        "US WAV UniSync job did not complete",
+                    )
+                else:
+                    from covers import build_wav_with_covers_from_wav
+                    ok_wwc = build_wav_with_covers_from_wav(
+                        ctx, args.dry_run, logger, overwrite=args.overwrite
+                    )
+                    results.set(
+                        "5 WAV w COVERS build",
+                        _ok(args.dry_run) if ok_wwc else STATUS_FAILED,
+                        "" if ok_wwc else "copy from WAV tree failed",
+                    )
+            else:
+                results["5 WAV w COVERS build"] = _STEP_RESULT_SKIPPED
 
             # ---- Steps 6–8: Covers --------------------------------------------------
             log_section(logger, "Steps 6–8 — Album Covers")
@@ -675,6 +793,19 @@ def run_workflow(args: argparse.Namespace) -> int:
                 results["6 Download covers"]       = _STEP_RESULT_SKIPPED
                 results["7 Covers → Specials"]     = _STEP_RESULT_SKIPPED
                 results["8 Covers → WAV w COVERS"] = _STEP_RESULT_SKIPPED
+            elif _failed_dependencies("6", results):
+                results.set(
+                    "6 Download covers", STATUS_BLOCKED,
+                    "required export or WAV w COVERS build failed",
+                )
+                results.set(
+                    "7 Covers → Specials", STATUS_BLOCKED,
+                    "cover download blocked",
+                )
+                results.set(
+                    "8 Covers → WAV w COVERS", STATUS_BLOCKED,
+                    "cover materialization blocked",
+                )
             else:
                 from covers import (
                     download_covers,
@@ -687,24 +818,49 @@ def run_workflow(args: argparse.Namespace) -> int:
                 log_step_end(logger, 6, "Download Covers", ok6)
                 results["6 Download covers"] = _ok(args.dry_run) if ok6 else _STEP_RESULT_STUB
 
-                log_step_start(logger, 7, "Copy Covers → Specials")
-                ok7 = copy_covers_to_specials(ctx, args.dry_run, logger)
-                log_step_end(logger, 7, "Copy Covers → Specials", ok7)
-                results["7 Covers → Specials"] = _ok(args.dry_run) if ok7 else _STEP_RESULT_STUB
+                if ok6:
+                    log_step_start(logger, 7, "Copy Covers → Specials")
+                    ok7 = copy_covers_to_specials(ctx, args.dry_run, logger)
+                    log_step_end(logger, 7, "Copy Covers → Specials", ok7)
+                    results["7 Covers → Specials"] = (
+                        _ok(args.dry_run) if ok7 else _STEP_RESULT_STUB
+                    )
+                else:
+                    ok7 = False
+                    results.set(
+                        "7 Covers → Specials", STATUS_BLOCKED,
+                        "cover download failed",
+                    )
 
-                log_step_start(logger, 8, "Copy Covers → WAV w COVERS")
-                ok8 = copy_covers_to_wav_with_covers(ctx, args.dry_run, logger)
-                log_step_end(logger, 8, "Copy Covers → WAV w COVERS", ok8)
-                results["8 Covers → WAV w COVERS"] = (
-                    _ok(args.dry_run) if ok8 else _STEP_RESULT_STUB
+                wwc_ready = results.status("5 WAV w COVERS build") not in (
+                    STATUS_FAILED, STATUS_BLOCKED
                 )
+                if ok7 and wwc_ready:
+                    log_step_start(logger, 8, "Copy Covers → WAV w COVERS")
+                    ok8 = copy_covers_to_wav_with_covers(
+                        ctx, args.dry_run, logger
+                    )
+                    log_step_end(logger, 8, "Copy Covers → WAV w COVERS", ok8)
+                    results["8 Covers → WAV w COVERS"] = (
+                        _ok(args.dry_run) if ok8 else _STEP_RESULT_STUB
+                    )
+                else:
+                    reason = (
+                        "Specials cover copy failed" if not ok7
+                        else "WAV w COVERS audio build failed"
+                    )
+                    results.set(
+                        "8 Covers → WAV w COVERS", STATUS_BLOCKED, reason
+                    )
 
             # ---- Optional: prune Music trees before verifying -----------------------
             if args.prune_music:
                 log_section(logger, "Prune — Reconcile 1-ORIGINAL/Music")
                 from prune import prune_music_trees
                 mode = "report" if args.dry_run else args.prune_mode
-                removable, kept = prune_music_trees(ctx, mode, logger)
+                removable, kept = prune_music_trees(
+                    ctx, mode, logger, write_report=not args.dry_run
+                )
                 results["Music prune"] = (
                     f"{removable} {'removed' if mode == 'delete' else 'archived' if mode == 'archive' else 'removable (report)'}"
                     f", {kept} kept"
@@ -716,6 +872,13 @@ def run_workflow(args: argparse.Namespace) -> int:
             if args.skip_verify:
                 log_step_skipped(logger, 9, "File Verification")
                 results["9 Verification"] = _STEP_RESULT_SKIPPED
+            elif _failed_dependencies("9", results):
+                ok9 = False
+                verify_failed = True
+                results.set(
+                    "9 Verification", STATUS_BLOCKED,
+                    "media acquisition or cover materialization failed",
+                )
             else:
                 log_step_start(logger, 9, "File Verification")
                 if args.remediate:
@@ -777,7 +940,10 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 10 — Final Packaging")
             if finalize_blocked:
                 log_step_skipped(logger, 10, "Copy Originals to Finals")
-                results["10 Final packaging"] = "blocked — verification failed"
+                results.set(
+                    "10 Final packaging", STATUS_BLOCKED,
+                    "verification failed",
+                )
             elif args.skip_final_packaging:
                 log_step_skipped(logger, 10, "Copy Originals to Finals")
                 results["10 Final packaging"] = _STEP_RESULT_SKIPPED
@@ -801,7 +967,10 @@ def run_workflow(args: argparse.Namespace) -> int:
             # the audio/cover copy above.
             if finalize_blocked:
                 log_step_skipped(logger, 10, "SoundExchange Ingest Forms")
-                results["10 SoundExchange forms"] = "blocked — verification failed"
+                results.set(
+                    "10 SoundExchange forms", STATUS_BLOCKED,
+                    "verification failed",
+                )
             elif args.skip_final_packaging or args.skip_soundexchange:
                 log_step_skipped(logger, 10, "SoundExchange Ingest Forms")
                 results["10 SoundExchange forms"] = _STEP_RESULT_SKIPPED
@@ -816,11 +985,47 @@ def run_workflow(args: argparse.Namespace) -> int:
                     _ok(args.dry_run) if ok_se else _STEP_RESULT_STUB
                 )
 
+            # Step 15 depends on Step 10 outputs, not on either Soundminer GUI
+            # workflow. Run it here during a normal/full run so packaging
+            # problems are detected before spending time in Steps 11–12. A
+            # repair run that starts at Step 13 defers this check until after
+            # that repair alias has executed.
+            run_final_check_early = (
+                not args.skip_final_metadata_check
+                and (
+                    not args.skip_final_packaging
+                    or args.skip_non_maintrack_cleanup
+                )
+            )
+            if run_final_check_early:
+                log_section(logger, "Step 15 — Final Metadata Cross-Check (early)")
+                if finalize_blocked:
+                    results.set(
+                        "15 Final metadata check", STATUS_BLOCKED,
+                        "verification failed",
+                    )
+                else:
+                    from final_metadata_verification import (
+                        verify_final_packaging_metadata,
+                    )
+                    ok15 = verify_final_packaging_metadata(
+                        ctx, logger, dry_run=args.dry_run
+                    )
+                    results["15 Final metadata check"] = (
+                        _ok(args.dry_run) if ok15 else _STEP_RESULT_FAILED
+                    )
+
+            soundminer_blockers = _failed_dependencies("11", results)
+            soundminer_blocked = bool(soundminer_blockers)
+
             # ---- Step 11: SourceAudio (Soundminer scan → AIFF mirror) -------------
             log_section(logger, "Step 11 — SourceAudio (AIFF) Mirror")
-            if finalize_blocked:
+            if soundminer_blocked:
                 log_step_skipped(logger, 11, "SourceAudio Mirror")
-                results["11 SourceAudio"] = "blocked — verification failed"
+                results.set(
+                    "11 SourceAudio", STATUS_BLOCKED,
+                    "source or packaged-delivery verification failed",
+                )
             elif args.skip_sourceaudio:
                 log_step_skipped(logger, 11, "SourceAudio Mirror")
                 results["11 SourceAudio"] = _STEP_RESULT_SKIPPED
@@ -885,9 +1090,12 @@ def run_workflow(args: argparse.Namespace) -> int:
             #   Kept directly after SourceAudio (Step 11) so the operator stays
             #   in Soundminer for both partner deliveries before moving on.
             log_section(logger, "Step 12 — Soundminer NBC Workflow")
-            if finalize_blocked:
+            if soundminer_blocked:
                 log_step_skipped(logger, 12, "Soundminer NBC")
-                results["12 Soundminer"] = "blocked — verification failed"
+                results.set(
+                    "12 Soundminer", STATUS_BLOCKED,
+                    "source or packaged-delivery verification failed",
+                )
             elif args.skip_soundminer:
                 log_step_skipped(logger, 12, "Soundminer NBC")
                 results["12 Soundminer"] = _STEP_RESULT_SKIPPED
@@ -961,16 +1169,22 @@ def run_workflow(args: argparse.Namespace) -> int:
                 # avoids converting an empty or partial WAV tree).
                 if ok_nbc and not args.dry_run:
                     log_step_start(logger, 12, "NBC WAV → MP3 Conversion")
-                    from audio_conversion import convert_nbc_wav_to_mp3
-                    ok_nbc_conv = convert_nbc_wav_to_mp3(ctx, args.dry_run, args.overwrite, logger)
+                    from audio_conversion import convert_and_finalize_nbc
+                    ok_nbc_conv = convert_and_finalize_nbc(
+                        ctx, args.dry_run, args.overwrite, logger,
+                        rename_files=not args.skip_rename,
+                    )
                     log_step_end(logger, 12, "NBC WAV → MP3 Conversion", ok_nbc_conv)
                     results["12 NBC WAV→MP3"] = (
                         _ok(args.dry_run) if ok_nbc_conv else _STEP_RESULT_FAILED
                     )
                 elif args.dry_run:
                     log_step_start(logger, 12, "NBC WAV → MP3 Conversion")
-                    from audio_conversion import convert_nbc_wav_to_mp3
-                    ok_nbc_conv = convert_nbc_wav_to_mp3(ctx, args.dry_run, args.overwrite, logger)
+                    from audio_conversion import convert_and_finalize_nbc
+                    ok_nbc_conv = convert_and_finalize_nbc(
+                        ctx, args.dry_run, args.overwrite, logger,
+                        rename_files=not args.skip_rename,
+                    )
                     log_step_end(logger, 12, "NBC WAV → MP3 Conversion", ok_nbc_conv)
                     results["12 NBC WAV→MP3"] = _ok(args.dry_run)
                 else:
@@ -984,16 +1198,34 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 13 — Non-MainTrack Cleanup")
             if finalize_blocked:
                 log_step_skipped(logger, 13, "Non-MainTrack Removal")
-                results["13 Non-maintrack cleanup"] = "blocked — verification failed"
+                results.set(
+                    "13 Non-maintrack cleanup", STATUS_BLOCKED,
+                    "verification failed",
+                )
             elif args.skip_non_maintrack_cleanup:
                 log_step_skipped(logger, 13, "Non-MainTrack Removal")
                 results["13 Non-maintrack cleanup"] = _STEP_RESULT_SKIPPED
+            elif results.status("10 Final packaging") in (
+                STATUS_FAILED, STATUS_BLOCKED
+            ):
+                results.set(
+                    "13 Non-maintrack cleanup", STATUS_BLOCKED,
+                    "Step 10 packaging failed",
+                )
+            elif not args.skip_final_packaging:
+                logger.info(
+                    "  ✓ Tunesat filtering was integrated into Step 10; "
+                    "no separate cleanup pass is needed."
+                )
+                results.set(
+                    "13 Non-maintrack cleanup", STATUS_COMPLETED,
+                    "integrated into Step 10",
+                )
             else:
                 log_step_start(logger, 13, "Non-MainTrack Removal")
                 from cleanup import remove_non_maintracks
-                # Real deletion in a normal run; only --dry-run holds back to a
-                # report.  --dry-run is the safety net, so there's no separate
-                # opt-in flag — a normal run deletes the non-maintracks.
+                # Compatibility repair path for an existing Tunesat delivery.
+                # Normal runs already perform this filtered sync inside Step 10.
                 ok_cleanup = remove_non_maintracks(
                     ctx=ctx,
                     dry_run=args.dry_run,
@@ -1009,10 +1241,28 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 14 — Rename NBC Music Files")
             if finalize_blocked:
                 log_step_skipped(logger, 14, "NBC Filename Rename")
-                results["14 NBC rename"] = "blocked — verification failed"
+                results.set(
+                    "14 NBC rename", STATUS_BLOCKED,
+                    "verification failed",
+                )
             elif args.skip_rename:
                 log_step_skipped(logger, 14, "NBC Filename Rename")
                 results["14 NBC rename"] = _STEP_RESULT_SKIPPED
+            elif results.status("12 NBC WAV→MP3") == STATUS_COMPLETED:
+                logger.info(
+                    "  ✓ NBC filename sanitization completed as the Step 12.7 tail."
+                )
+                results.set(
+                    "14 NBC rename", STATUS_COMPLETED,
+                    "integrated into Step 12.7",
+                )
+            elif results.status("12 NBC WAV→MP3") in (
+                STATUS_FAILED, STATUS_BLOCKED
+            ):
+                results.set(
+                    "14 NBC rename", STATUS_BLOCKED,
+                    "NBC conversion failed",
+                )
             else:
                 log_step_start(logger, 14, "NBC Filename Rename")
                 from cleanup import rename_nbc_music_files
@@ -1024,9 +1274,17 @@ def run_workflow(args: argparse.Namespace) -> int:
 
             # ---- Step 15: Final Packaging metadata ⇄ media cross-check -------------
             log_section(logger, "Step 15 — Final Metadata Cross-Check")
-            if finalize_blocked:
+            if "15 Final metadata check" in results:
+                logger.info(
+                    "  ↩ Final packaging cross-check already ran before "
+                    "the Soundminer phases."
+                )
+            elif finalize_blocked:
                 log_step_skipped(logger, 15, "Final Metadata Cross-Check")
-                results["15 Final metadata check"] = "blocked — verification failed"
+                results.set(
+                    "15 Final metadata check", STATUS_BLOCKED,
+                    "verification failed",
+                )
             elif args.skip_final_metadata_check:
                 log_step_skipped(logger, 15, "Final Metadata Cross-Check")
                 results["15 Final metadata check"] = _STEP_RESULT_SKIPPED
@@ -1052,7 +1310,13 @@ def run_workflow(args: argparse.Namespace) -> int:
                 log_step_start(logger, 16, "SoundMouse Delivery")
                 from soundmouse import run_soundmouse_step
                 ok16 = run_soundmouse_step(
-                    ctx, args.dry_run, args.overwrite, logger
+                    ctx,
+                    args.dry_run,
+                    args.overwrite,
+                    logger,
+                    domo_prepared=soundmouse_domo_prepared,
+                    unisync_prepared=soundmouse_unisync_prepared,
+                    prepared_codes=soundmouse_codes,
                 )
                 log_step_end(logger, 16, "SoundMouse Delivery", ok16)
                 results["16 SoundMouse"] = (
@@ -1098,16 +1362,48 @@ _STEP_UNITS = [
     ("5",    5.0,  "skip_unisync",               "UniSync"),
     ("6",    6.0,  "skip_covers",                "Covers (download/distribute, 6-8)"),
     ("9",    9.0,  "skip_verify",                "Verification (gate)"),
-    ("10",   10.0, "skip_final_packaging",       "Final packaging (+ SoundExchange forms)"),
+    ("10",   10.0, "skip_final_packaging",       "Package + Tunesat + SoundExchange"),
     ("11",   11.0, "skip_sourceaudio",           "SourceAudio (AIFF mirror)"),
     ("12",   12.0, "skip_soundminer",            "Soundminer NBC"),
     ("12.7", 12.7, None,                         "NBC WAV->MP3 (within step 12)"),
-    ("13",   13.0, "skip_non_maintrack_cleanup", "Non-maintrack cleanup"),
-    ("14",   14.0, "skip_rename",                "NBC rename"),
-    ("15",   15.0, "skip_final_metadata_check",  "Final metadata cross-check"),
+    ("13",   13.0, "skip_non_maintrack_cleanup", "Tunesat repair alias"),
+    ("14",   14.0, "skip_rename",                "NBC rename repair alias"),
+    ("15",   15.0, "skip_final_metadata_check",  "Package check (runs before GUI)"),
     ("16",   16.0, "skip_soundmouse",            "SoundMouse delivery"),
 ]
 _STEP_TOKENS = [u[0] for u in _STEP_UNITS]
+
+# Artifact/status dependencies used at runtime. Numeric selectors remain as
+# backward-compatible operator aliases, but execution is no longer assumed to
+# be purely linear (folder setup precedes Domo and SoundMouse is independent).
+_STEP_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "1": ("2 Specials folder", "3 HD folders"),
+    "4": ("1 Domo:album_list", "3 HD folders"),
+    "5": (
+        "1 Domo:us_tracklist", "1 Domo:exus_tracklist",
+        "1 Domo:japan_metadata", "2 Specials folder",
+    ),
+    "6": (
+        "1 Domo:us_tracklist", "1 Domo:exus_tracklist",
+        "5 WAV w COVERS build",
+    ),
+    "9": ("5 UniSync jobs", "6 Download covers"),
+    "10": ("9 Verification",),
+    "11": ("9 Verification", "10 Final packaging", "15 Final metadata check"),
+    "12": ("9 Verification", "10 Final packaging", "15 Final metadata check"),
+    "13": ("10 Final packaging",),
+    "14": ("12 NBC WAV→MP3",),
+    "15": ("10 Final packaging",),
+    "16": (),
+}
+
+
+def _failed_dependencies(token: str, results: StepResults) -> list[str]:
+    """Return failed/blocked prerequisite result keys for a workflow token."""
+    return [
+        key for key in _STEP_DEPENDENCIES.get(token, ())
+        if results.status(key) in (STATUS_FAILED, STATUS_BLOCKED)
+    ]
 
 
 def format_step_list() -> str:
@@ -1122,6 +1418,12 @@ def format_step_list() -> str:
         "from it.\nGated steps (10-15) also require Step 9 to pass "
         "(or --skip-verify)."
     )
+    lines.append(
+        "\nActual full-run phases: setup (2-3) → exports/docs/media (1,4-8) "
+        "→ source gate (9) → package/Tunesat/package check (10,13,15) "
+        "→ Soundminer/NBC rename (11,12,14) → independent SoundMouse (16). "
+        "Numeric tokens remain backward-compatible repair/resume aliases."
+    )
     return "\n".join(lines)
 _ALL_SKIP_ATTRS = [
     "skip_domo", "skip_folder_setup", "skip_album_list_doc", "skip_unisync",
@@ -1135,8 +1437,10 @@ _ALL_SKIP_ATTRS = [
 def _apply_step_selectors(args, logger) -> None:
     """Expand --start-at / --only into the concrete --skip-* flags.
 
-    The pipeline is linear, so 'start at K' = skip every unit before K, and
-    'only K' = skip every unit except K.  Step 12's two entry points (12 = full
+    Numeric tokens retain their historical ordering for compatibility, so
+    'start at K' skips earlier aliases and 'only K' selects one alias. Runtime
+    artifact dependencies are defined separately in _STEP_DEPENDENCIES.
+    Step 12's two entry points (12 = full
     embed+mirror+convert; 12.7 = convert only, mirror already done) map to
     skip_soundminer vs skip_nbc_mirror.  Raises ValueError on an unknown token.
     """
@@ -1239,13 +1543,21 @@ def build_parser() -> argparse.ArgumentParser:
              "(the audio/cover copy still runs). --skip-final-packaging skips "
              "both.")
     skips.add_argument("--skip-sourceaudio",            action="store_true")
-    skips.add_argument("--skip-non-maintrack-cleanup",  action="store_true")
+    skips.add_argument(
+        "--skip-non-maintrack-cleanup", action="store_true",
+        help="Skip the legacy Step 13 repair alias. Step 10 still builds the "
+             "contractually filtered Tunesat delivery.",
+    )
     skips.add_argument("--skip-soundminer",             action="store_true")
     skips.add_argument("--skip-nbc-mirror",             action="store_true",
         help="Step 12: the NBC Soundminer embed+mirror (12.1–12.6) is already "
              "done; skip it and resume at the WAV→MP3 conversion (12.7). "
              "Verifies the NBC WAV tree is non-empty first.")
-    skips.add_argument("--skip-rename",                 action="store_true")
+    skips.add_argument(
+        "--skip-rename", action="store_true",
+        help="Skip NBC filename sanitization in Step 12.7 and the standalone "
+             "Step 14 repair alias.",
+    )
     skips.add_argument("--skip-final-metadata-check",   action="store_true",
         help="Skip Step 15 (cross-check each 3-FINAL PACKAGING partner's "
              "metadata sheet against its media folder).")

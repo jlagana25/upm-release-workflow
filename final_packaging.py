@@ -18,11 +18,10 @@ Source-tree layout (all under ``{specials_dir}/1-ORIGINAL``):
     Music/Ex-US (WAV)/MEDIA/ ← {Label}/{AlbumNo - title}/{Filename}.wav
     Music/Japan/MEDIA/       ← Japan NTT-DATA-formatted WAVs
 
-Each source feeds 1-4 destinations.  All destinations are pre-built in
-``ctx.partner_dirs`` (see config.py).  The one exception is the Ex-US MP3
-→ Tunesat copy, which is filtered to the labels in
-``TUNESAT_EXUS_LABELS`` — only those Bruton/BTV/Kosinus libraries are
-contractually eligible for the Tunesat feed.
+Each source feeds one or more destinations. All destinations are pre-built in
+``ctx.partner_dirs`` (see config.py). Tunesat is materialized directly from its
+authoritative metadata keep-list instead of copying every MP3 and deleting the
+non-main tracks later.
 
 Behaviour:
   * Walks each source tree and copies file-by-file (NOT shutil.copytree).
@@ -44,7 +43,7 @@ import logging
 import os
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -54,24 +53,6 @@ from config import ReleaseContext, context_from_cli_args
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-# Ex-US MP3 → Tunesat is restricted to these label sub-folders.  The label
-# name is the IMMEDIATE child of the Ex-US (MP3)/MEDIA folder; anything
-# outside this set is skipped silently for the Tunesat destination.
-TUNESAT_EXUS_LABELS: frozenset[str] = frozenset({
-    "Bruton",
-    "Bruton Classical Series",
-    "Bruton Vaults",
-    "Bruton Vaults Anthologies",
-    "BTV",
-    "Kosinus",
-    "Kosinus Archives",
-    "Kosinus Arts",
-    "Kosinus Classical",
-    "Kosinus Magazine",
-    "Kosinus Trailers",
-    "Kosinus World",
-})
 
 PROGRESS_EVERY = 100  # log a progress line every N files (per op)
 
@@ -94,10 +75,9 @@ class CopyResult:
 
     @property
     def ok(self) -> bool:
-        # source_missing is treated as a soft skip, NOT a failure — if a
-        # previous step didn't produce that source folder we want the
-        # step to continue with the other destinations.
-        return self.errors == 0
+        # Continue running other destinations after a missing source, but do
+        # not report the final-packaging phase as successful/integral.
+        return self.errors == 0 and not self.source_missing
 
     def summary_line(self) -> str:
         tag = " (filtered)" if self.label_filter else ""
@@ -258,6 +238,87 @@ def _run_op(
     return res
 
 
+def _run_grouped_ops(
+    ops: list[CopyOp],
+    *,
+    dry_run: bool,
+    overwrite: bool,
+    logger: logging.Logger,
+) -> list[CopyResult]:
+    """Run copy operations with one source-tree traversal per filter group."""
+    groups: dict[tuple[Path, Optional[frozenset[str]]], list[CopyOp]] = {}
+    for op in ops:
+        groups.setdefault((op.src, op.label_filter), []).append(op)
+
+    results: dict[str, CopyResult] = {
+        op.name: CopyResult(
+            op.name, op.src, op.dst, label_filter=op.label_filter
+        )
+        for op in ops
+    }
+    for (src, label_filter), group in groups.items():
+        logger.info(
+            f"\n  • Source fan-out: {src} → {len(group)} destination(s)"
+        )
+        for op in group:
+            logger.info(f"      {op.name}: {op.dst}")
+        if not src.exists():
+            for op in group:
+                results[op.name].source_missing = True
+            logger.warning("      ⚠ Source tree is missing; fan-out blocked.")
+            continue
+
+        src_str = str(src)
+        seen = 0
+        for root, dirs, files in os.walk(src):
+            rel = os.path.relpath(root, src_str)
+            rel_parts = () if rel == "." else Path(rel).parts
+            if label_filter is not None:
+                if not rel_parts:
+                    dirs[:] = sorted(
+                        d for d in dirs if d.strip() in label_filter
+                    )
+                    continue
+                if rel_parts[0].strip() not in label_filter:
+                    dirs[:] = []
+                    continue
+            else:
+                dirs.sort()
+
+            for filename in sorted(files):
+                if filename == ".DS_Store" or filename.startswith("._"):
+                    continue
+                seen += 1
+                source_file = Path(root) / filename
+                for op in group:
+                    result = results[op.name]
+                    dest_dir = (
+                        op.dst if not rel_parts
+                        else op.dst.joinpath(*rel_parts)
+                    )
+                    dest_file = dest_dir / filename
+                    try:
+                        if dest_file.exists() and not overwrite:
+                            result.skipped += 1
+                        else:
+                            if not dry_run:
+                                dest_dir.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(source_file, dest_file)
+                            result.copied += 1
+                    except Exception as exc:
+                        result.errors += 1
+                        logger.error(
+                            f"      ✗ {op.name}: copy {filename}: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                if seen % PROGRESS_EVERY == 0:
+                    logger.info(
+                        f"      … scanned {seen:>5} source files for "
+                        f"{len(group)} destination(s)"
+                    )
+    return [results[op.name] for op in ops]
+
+
 # ---------------------------------------------------------------------------
 # Op-list builder
 # ---------------------------------------------------------------------------
@@ -272,13 +333,11 @@ def _build_ops(ctx: ReleaseContext) -> list[CopyOp]:
     mp3_src         = music / "MP3"           / "MEDIA"
     wav_src         = music / "WAV"           / "MEDIA"
     wavcov_src      = music / "WAV w COVERS"  / "MEDIA"
-    exus_mp3_src    = music / "Ex-US (MP3)"   / "MEDIA"
     exus_wav_src    = music / "Ex-US (WAV)"   / "MEDIA"
     japan_src       = music / "Japan"         / "MEDIA"
 
     return [
-        # ---- MP3 (3 destinations) ----
-        CopyOp("MP3 → Tunesat",           mp3_src,    pd["tunesat_mp3"]),
+        # ---- MP3 (Tunesat is materialized separately from its keep-list) ----
         CopyOp("MP3 → Discovery",         mp3_src,    pd["discovery_mp3"]),
         CopyOp("MP3 → HD UDrive master",  mp3_src,    pd["hd_mp3_media"]),
 
@@ -297,15 +356,8 @@ def _build_ops(ctx: ReleaseContext) -> list[CopyOp]:
         # ---- WAV w COVERS → Netmix (covers ride along) ----
         CopyOp("WAV w COVERS → Netmix",      wavcov_src, pd["netmix_music"]),
 
-        # ---- Ex-US (2 destinations; Tunesat is label-filtered) ----
+        # ---- Ex-US WAV (Tunesat MP3 is built from its keep-list above) ----
         CopyOp("Ex-US WAV → ExUS staging", exus_wav_src, pd["exus_staging_media"]),
-        CopyOp(
-            "Ex-US MP3 → Tunesat",
-            exus_mp3_src,
-            pd["tunesat_mp3"],
-            label_filter=TUNESAT_EXUS_LABELS,
-        ),
-
         # ---- Japan (1 destination) ----
         CopyOp("Japan → UPM Japan NTT DATA", japan_src, pd["japan_final_media"]),
     ]
@@ -324,10 +376,9 @@ def copy_originals_to_finals(
     """
     Execute every Step 10 copy operation.
 
-    Returns True if every op completed without I/O errors (missing source
-    folders are treated as a soft skip, not a failure).  Returns False if
-    any op produced an error — the orchestrator can then decide whether
-    to stop or continue.
+    Returns True only if every source exists and every copy completed without
+    I/O errors. All operations are still attempted so a partial problem does
+    not prevent independent destinations from making progress.
     """
     ops = _build_ops(ctx)
 
@@ -340,10 +391,25 @@ def copy_originals_to_finals(
     if dry_run:
         logger.info("    --dry-run is ON — no files will be written")
 
-    results: list[CopyResult] = []
-    for op in ops:
-        res = _run_op(op, dry_run=dry_run, overwrite=overwrite, logger=logger)
-        results.append(res)
+    results = _run_grouped_ops(
+        ops, dry_run=dry_run, overwrite=overwrite, logger=logger
+    )
+
+    # Tunesat is defined by its metadata keep-list. Build the destination from
+    # the US + eligible Ex-US source union directly instead of copying every
+    # MP3 and deleting non-main tracks in a later workflow phase.
+    logger.info("\n  Tunesat filtered materialization:")
+    from cleanup import remove_non_maintracks
+    tunesat_target = ctx.partner_dirs["tunesat_mp3"]
+    if not dry_run:
+        tunesat_target.mkdir(parents=True, exist_ok=True)
+    tunesat_ok = remove_non_maintracks(
+        ctx,
+        dry_run=dry_run,
+        actually_delete=not dry_run,
+        logger=logger,
+        target_folder=tunesat_target,
+    )
 
     # ---- Ex-US staging covers -----------------------------------------------
     # The "Ex-US WAV → ExUS staging" copy carries no cover art (unlike the
@@ -379,13 +445,18 @@ def copy_originals_to_finals(
     total_skipped = sum(r.skipped for r in results)
     total_errors  = sum(r.errors  for r in results)
     n_missing     = sum(1 for r in results if r.source_missing)
-    overall_ok    = all(r.ok for r in results) and covers_ok
+    overall_ok = tunesat_ok and all(
+        r.ok or (dry_run and r.source_missing) for r in results
+    ) and covers_ok
 
     logger.info("\n  ─── Step 10 summary ─────────────────────────────────")
     for r in results:
         prefix = "  ⚠ " if r.source_missing else ("  ✗ " if not r.ok else "  ✓ ")
         logger.info(f"{prefix}{r.summary_line()}")
     logger.info("  ─────────────────────────────────────────────────────")
+    logger.info(
+        f"  Tunesat filtered sync: {'OK' if tunesat_ok else 'FAILED'}"
+    )
     logger.info(
         f"  Totals: {total_copied} copied, {total_skipped} skipped, "
         f"{total_errors} errors, {n_missing} source(s) missing"
@@ -433,10 +504,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Convenience no-op for parity with the orchestrator's "
                         "--skip-final-packaging flag.")
     p.add_argument("--only", default=None,
-                   help="Restrict the run to a single op by name substring "
-                        "(case-insensitive), e.g. --only 'Tunesat' or "
-                        "--only 'Japan'.  Useful for re-running just one "
-                        "destination after a partial failure.")
+                   help="Restrict the run to a single destination by name "
+                        "substring (case-insensitive). --only Tunesat runs the "
+                        "filtered keep-list materialization; other values match "
+                        "copy-op names such as Japan.")
     p.add_argument("--debug",    action="store_true")
     return p
 
@@ -460,6 +531,19 @@ def _run_cli(argv: list[str] | None = None) -> int:
 
     if args.only:
         needle = args.only.lower()
+        if "tunesat" in needle:
+            from cleanup import remove_non_maintracks
+            target = ctx.partner_dirs["tunesat_mp3"]
+            if not args.dry_run:
+                target.mkdir(parents=True, exist_ok=True)
+            ok = remove_non_maintracks(
+                ctx,
+                dry_run=args.dry_run,
+                actually_delete=not args.dry_run,
+                logger=logger,
+                target_folder=target,
+            )
+            return 0 if ok else 1
         ops = _build_ops(ctx)
         matches = [op for op in ops if needle in op.name.lower()]
         if not matches:
@@ -476,7 +560,9 @@ def _run_cli(argv: list[str] | None = None) -> int:
             _run_op(op, dry_run=args.dry_run, overwrite=args.overwrite, logger=logger)
             for op in matches
         ]
-        overall_ok = all(r.ok for r in results)
+        overall_ok = all(
+            r.ok or (args.dry_run and r.source_missing) for r in results
+        )
         for r in results:
             prefix = "  ⚠ " if r.source_missing else ("  ✗ " if not r.ok else "  ✓ ")
             logger.info(f"{prefix}{r.summary_line()}")

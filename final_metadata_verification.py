@@ -43,11 +43,12 @@ import csv
 import logging
 import re
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 from config import ReleaseContext, context_from_cli_args, EXPORTS_DIR
+from filesystem_names import resolve_label_dir
+from release_manifest import invalidate_table, read_table
 from tracklist_columns import (
     _find_column,
     POSSIBLE_LABEL_COLS,
@@ -145,20 +146,14 @@ def _key(name: str) -> str:
     return Path(str(name).strip()).stem.strip().lower()
 
 
-@lru_cache(maxsize=None)
 def _read_df(path: Path):
     """Read a sheet/tracklist into a DataFrame.
 
-    Memoized by path: a single Step 15 run cross-references the same source
-    files many times (the US tracklist alone backs ~6 checks), so caching turns
-    a dozen full reads into four.  Callers treat the result as read-only.
-    `verify_final_packaging_metadata` clears this cache at the start of each run
-    so re-runs in the same process never see stale data.
+    The shared release manifest caches by path + file signature, so repeated
+    consumers avoid parsing the same export and a replaced Domo file reloads
+    automatically. Callers treat the returned frame as read-only.
     """
-    import pandas as pd
-    if path.suffix.lower() in (".xlsx", ".xlsm", ".xls"):
-        return pd.read_excel(path, dtype=str).fillna("")
-    return pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
+    return read_table(path)
 
 
 def _column_keys(
@@ -253,7 +248,7 @@ def _check_covers_per_album(chk: "Check", logger: logging.Logger, add) -> bool:
     missing: list[str] = []
     checked = 0
     for lbl, ano, cov in albums:
-        label_dir = media / lbl
+        label_dir = resolve_label_dir(media, lbl)
         album_dir: Optional[Path] = None
         if label_dir.is_dir():
             for entry in label_dir.iterdir():
@@ -335,7 +330,7 @@ def verify_final_packaging_metadata(
         "  (NBC excluded — built separately & renamed.  1-ORIGINAL/Covers and "
         "WAV w COVERS covers are checked in Step 9.)"
     )
-    _read_df.cache_clear()   # fresh reads each run; dedups within the run
+    invalidate_table()  # fresh run, then shared/deduplicated reads within it
 
     report_rows: list[dict] = []
     overall_ok = True
@@ -352,10 +347,19 @@ def verify_final_packaging_metadata(
         logger.info(f"      media:  {chk.media_dir}")
 
         if not chk.media_dir.exists():
-            logger.info(
-                "      ↩  Media folder not present — skipping (delivery doesn't "
-                "use this folder, or the copy hasn't run yet)."
-            )
+            if dry_run:
+                logger.warning(
+                    "      ⚠ Required media folder is not present yet; dry-run "
+                    "leaves it untouched and continues the preview."
+                )
+            else:
+                logger.error(
+                    "      ✗ Required media folder is MISSING — final delivery "
+                    "is incomplete."
+                )
+                add(chk.label, "MISSING_MEDIA_DIR", chk.media_dir.name,
+                    str(chk.media_dir))
+                overall_ok = False
             skipped += 1
             continue
         checked += 1
@@ -372,6 +376,13 @@ def verify_final_packaging_metadata(
             if want is None:
                 add(chk.label, "UNREADABLE_SOURCE", chk.audio_source.name,
                     str(chk.audio_source))
+                overall_ok = False
+            elif not want:
+                logger.error("      ✗ Audio source contains zero usable filenames.")
+                add(
+                    chk.label, "EMPTY_SOURCE_LIST", chk.audio_source.name,
+                    str(chk.audio_source),
+                )
                 overall_ok = False
             else:
                 have = _disk_keys(chk.media_dir, AUDIO_EXTS)
@@ -410,6 +421,15 @@ def verify_final_packaging_metadata(
                 if want_cov is None:
                     add(chk.label, "NO_COVER_COLUMN", chk.cover_source.name,
                         str(chk.cover_source))
+                    overall_ok = False
+                elif not want_cov:
+                    logger.error(
+                        "      ✗ Cover source contains zero usable filenames."
+                    )
+                    add(
+                        chk.label, "EMPTY_COVER_LIST", chk.cover_source.name,
+                        str(chk.cover_source),
+                    )
                     overall_ok = False
                 else:
                     have_cov = _disk_keys(chk.cover_root, IMAGE_EXTS)

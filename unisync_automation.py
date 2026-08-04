@@ -471,8 +471,8 @@ def _run_single_job(
     expected = _expected_output_filenames(job["csv"], ext, logger)
     total = len(expected)
     if total == 0:
-        logger.warning("  Tracklist has no usable rows for this job; nothing to do.")
-        return STATUS_OK
+        logger.error("  Tracklist has no usable rows for this job; refusing to mark it complete.")
+        return STATUS_FAILED
 
     present0 = _present_filenames(job["client_path"], expected)
     have0 = len(present0)
@@ -638,7 +638,11 @@ def _run_single_job(
                 force_setup = True                  # clean reload after the pause
                 continue
 
-            return STATUS_OK
+            logger.error(
+                f"  ✗ Job incomplete: {len(missing)}/{total} expected {ext} "
+                "file(s) remain undelivered after a zero-progress pass."
+            )
+            return STATUS_FAILED
     finally:
         # Tidy up the transient request CSVs.
         for tc in temp_csvs:

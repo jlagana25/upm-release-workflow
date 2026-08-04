@@ -8,9 +8,9 @@ Step 6 — Download covers from CDN URLs to the master library
     Source CSV: ctx.us_tracklist_csv
     Destination: /Volumes/Pegasus32 R8 - 1/UPM-US-Masters/Covers/{Label}/{AlbumCoverArt}
     Behavior:    Skip files that already exist unless `overwrite=True`.
-                 Stream-download with timeout, write to temp then atomic
-                 rename so a half-finished download never corrupts a real
-                 file.  Failures collected and exported to a CSV report.
+                 Reuse one HTTP session, validate image signatures, then
+                 atomically replace so a partial/error response never corrupts
+                 a real file. Failures are exported to a CSV report.
 
 Step 7 — Flatten covers into the Specials Covers folder
     Source:      /Volumes/Pegasus32 R8 - 1/UPM-US-Masters/Covers/{Label}/{AlbumCoverArt}
@@ -47,12 +47,14 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 import pandas as pd
 import requests
 
 from config import EXPORTS_DIR, MASTERS_COVERS_DIR, ReleaseContext, context_from_cli_args
+from cover_downloads import download_image_atomic
+from filesystem_names import resolve_label_dir
+from release_manifest import read_table
 from tracklist_columns import (
     _find_column,
     _normalize,
@@ -71,7 +73,6 @@ from tracklist_columns import (
 
 # Network settings for Step 6 downloads
 DOWNLOAD_TIMEOUT_SEC = 30
-DOWNLOAD_CHUNK_BYTES = 8192
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,7 @@ def _load_tracklist(
             f"  Run Step 1 (Domo exports) before Steps 6–8."
         )
 
-    df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig").fillna("")
+    df = read_table(csv_path)
     cols = _detect_columns(df)
     logger.info(
         f"  CSV columns detected:  "
@@ -267,64 +268,49 @@ def download_covers(
     stats = {"downloaded": 0, "skipped_exists": 0, "skipped_no_url": 0, "failed": 0}
     failures: list[dict[str, str]] = []
 
-    for cover_name, info in covers.items():
-        url = info["url"]
-        label = info["label"]
-        albumno = info["albumno"]
+    with requests.Session() as session:
+        for cover_name, info in covers.items():
+            url = info["url"]
+            label = info["label"]
+            albumno = info["albumno"]
 
-        if not url:
-            logger.debug(f"  Skip (no URL): {label}/{cover_name}")
-            stats["skipped_no_url"] += 1
-            continue
+            if not url:
+                logger.debug(f"  Skip (no URL): {label}/{cover_name}")
+                stats["skipped_no_url"] += 1
+                continue
 
-        label_dir = MASTERS_COVERS_DIR / label
-        final_path = label_dir / cover_name
+            label_dir = resolve_label_dir(MASTERS_COVERS_DIR, label)
+            final_path = label_dir / cover_name
 
-        if final_path.exists() and not overwrite:
-            logger.debug(f"  Skip (exists): {label}/{cover_name}")
-            stats["skipped_exists"] += 1
-            continue
+            if final_path.exists() and not overwrite:
+                logger.debug(f"  Skip (exists): {label}/{cover_name}")
+                stats["skipped_exists"] += 1
+                continue
 
-        if dry_run:
-            logger.info(f"  [DRY] would download: {label}/{cover_name}")
-            stats["downloaded"] += 1
-            continue
+            if dry_run:
+                logger.info(f"  [DRY] would download: {label}/{cover_name}")
+                stats["downloaded"] += 1
+                continue
 
-        # Real download — atomic via temp file
-        tmp_path: Optional[Path] = None
-        try:
-            label_dir.mkdir(parents=True, exist_ok=True)
-            ext = Path(urlparse(url).path).suffix or ".jpg"
-            tmp_path = label_dir / f".tmp_{albumno or cover_name}{ext}"
-
-            r = requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT_SEC)
-            r.raise_for_status()
-            with tmp_path.open("wb") as f:
-                for chunk in r.iter_content(DOWNLOAD_CHUNK_BYTES):
-                    f.write(chunk)
-            tmp_path.replace(final_path)
-            tmp_path = None  # success, nothing to clean up
-            logger.info(f"  ✓  Downloaded: {label}/{cover_name}")
-            stats["downloaded"] += 1
-        except Exception as exc:
-            logger.error(f"  ✗  Failed: {label}/{cover_name} — {exc}")
-            stats["failed"] += 1
-            failures.append(
-                {
-                    "Label":         label,
-                    "AlbumNo":       albumno,
-                    "AlbumCoverArt": cover_name,
-                    "URL":           url,
-                    "Error":         str(exc),
-                }
-            )
-        finally:
-            if tmp_path is not None:
-                try:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-                except Exception:
-                    pass
+            try:
+                download_image_atomic(
+                    url, final_path, timeout=DOWNLOAD_TIMEOUT_SEC,
+                    session=session,
+                )
+                logger.info(f"  ✓  Downloaded: {label}/{cover_name}")
+                stats["downloaded"] += 1
+            except Exception as exc:
+                logger.error(f"  ✗  Failed: {label}/{cover_name} — {exc}")
+                stats["failed"] += 1
+                failures.append(
+                    {
+                        "Label": label,
+                        "AlbumNo": albumno,
+                        "AlbumCoverArt": cover_name,
+                        "URL": url,
+                        "Error": str(exc),
+                    }
+                )
 
     if failures and not dry_run:
         _write_failures_report(failures, ctx, logger)
@@ -561,7 +547,10 @@ def distribute_covers_into_album_folders(
             stats["no_albumno"] += 1
             continue
 
-        src = (src_dir / label / cover_name) if src_by_label else (src_dir / cover_name)
+        src = (
+            resolve_label_dir(src_dir, label) / cover_name
+            if src_by_label else (src_dir / cover_name)
+        )
         if not src.exists():
             hint = "run Step 6 first?" if src_by_label else "run Step 7 first?"
             logger.warning(
@@ -570,7 +559,7 @@ def distribute_covers_into_album_folders(
             stats["missing_source"] += 1
             continue
 
-        label_dir = dest_root / label
+        label_dir = resolve_label_dir(dest_root, label)
 
         # Look for any existing "{albumno} - <whatever>" folder to reuse
         existing: Optional[Path] = None
@@ -636,6 +625,7 @@ def build_wav_with_covers_from_wav(
     ctx: ReleaseContext,
     dry_run: bool,
     logger: logging.Logger,
+    overwrite: bool = False,
 ) -> bool:
     """
     Build  <Music>/WAV w COVERS/MEDIA/  by COPYING  <Music>/WAV/MEDIA/ .
@@ -647,9 +637,8 @@ def build_wav_with_covers_from_wav(
     {Label}/{AlbumNo - AlbumTitle}/ structure.
 
     Idempotent: files already present at the destination are skipped, so
-    re-runs and partial WAV deliveries are handled cleanly.  Returns True
-    unless a copy error occurred (a missing WAV source is a no-op warning,
-    not a failure).
+    re-runs and partial WAV deliveries are handled cleanly. A missing or empty
+    WAV source fails a real run; a from-scratch dry-run may preview past it.
     """
     import os
 
@@ -668,7 +657,7 @@ def build_wav_with_covers_from_wav(
             f"     {src}\n"
             f"     (Expected after the 'US WAV' UniSync job runs.)"
         )
-        return True
+        return dry_run
 
     copied = skipped = errors = seen = 0
     for root, _dirs, files in os.walk(src):
@@ -680,7 +669,7 @@ def build_wav_with_covers_from_wav(
             seen += 1
             s = Path(root) / f
             d = target_dir / f
-            if d.exists():
+            if d.exists() and not overwrite:
                 skipped += 1
             elif dry_run:
                 copied += 1
@@ -702,6 +691,9 @@ def build_wav_with_covers_from_wav(
         f"  result: {copied} copied, {skipped} skipped, {errors} errors "
         f"({seen} WAV file(s) seen)"
     )
+    if seen == 0:
+        logger.error("  ✗ WAV MEDIA source contains no files.")
+        return False
     return errors == 0
 
 

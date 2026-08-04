@@ -54,11 +54,11 @@ setting up a new machine, work through Part 2 top to bottom.
 
 ## What runs, and in what order
 
-Preflight → 1 Domo exports → 2/3 Folder setup → 4 Album list DOCX/PDF →
-5 UniSync → 6–8 Covers → 9 Verification → 10 Final packaging (+ SoundExchange forms) →
-11 SourceAudio AIFF → 12 Soundminer → 12.7 NBC WAV→MP3 →
-13 Non-maintrack cleanup → 14 NBC rename → 15 Final metadata cross-check →
-16 SoundMouse delivery →
+Preflight → 2/3 Folder setup → 1 Domo + SoundMouse exports → 4 Album list →
+5 UniSync + SoundMouse WAV jobs → 6–8 Cover materialization → 9 Source gate →
+10 Final packaging + filtered Tunesat + SoundExchange → 15 Package check →
+11 SourceAudio → 12/12.7 Soundminer NBC + conversion + rename →
+16 independent SoundMouse finalization →
 Final summary.
 
 Steps 10–15 are gated behind the Step 9 verification: if verification fails the
@@ -87,9 +87,8 @@ missing-report path, the log-file path, and the overall status).
      then press ENTER back on USMPSMDHDF2 to continue through conversion + rename.
    - On **USMPSMDHDF1**, Step 12 runs inline automatically — no pause — and the
      full pipeline completes in one pass.
-   - Step 13 **deletes** the non-maintracks in a normal run. Use `--dry-run`
-     to preview the deletions without removing anything — that's the only
-     safety gate; there is no separate opt-in flag.
+   - Step 10 builds Tunesat directly from its metadata keep-list. Step 13 is
+     retained only as an independent repair/reconciliation alias.
 4. **Read the final summary** — confirm `Overall status: ✓ completed`. If any
    step failed, the summary names it and prints restart guidance.
 
@@ -154,6 +153,16 @@ final metadata cross-check; `--start-at 12.7` resumes at NBC WAV→MP3).
 
 Work top to bottom: the **dry-run** and **per-module** tests build confidence
 cheaply before the **full end-to-end** run.
+
+Before any machine-specific test, run the complete offline suite:
+
+```bash
+make verify
+```
+
+This runs module imports/wiring checks, all synthetic unit tests, and byte
+compilation. Dry-run is write-free: it uses console-only logging and does not
+create verification or prune reports.
 
 
 
@@ -356,13 +365,16 @@ Validates Step 10 (copy originals into the final delivery package structure).
 > (`final_packaging.py`). The SoundExchange ISRC Ingest Form generation is the
 > second phase of Step 10 and is covered by **Test 15** below. In a full run
 > both happen under Step 10; `--skip-soundexchange` skips only the second phase.
+> Tunesat is also materialized here by copying only metadata keepers from the
+> US/Ex-US sources, avoiding the former copy-everything-then-delete pass.
 
 - **Command:**
   ```bash
   python3 final_packaging.py --test --year 2026 --month 5 --part 1 --dry-run
   python3 final_packaging.py --test --year 2026 --month 5 --part 1
   ```
-  (`--only "Tunesat"` / `--only "Japan"` to re-run a single partner's copy op.)
+  (`--only "Tunesat"` rebuilds the filtered delivery; `--only "Japan"` reruns
+  that partner copy.)
 - **Expected output:**
   - Dry-run lists each copy operation (source → destination).
   - Real run logs copies into `3-FINAL PACKAGING/…`.
@@ -485,14 +497,19 @@ Validates Step 12.7 (flatten the mirrored MEDIA tree if needed, then encode 320k
   - Spot-check one MP3 with `ffprobe`: codec `mp3`, ~320 kb/s, sample rate preserved (≤48k).
 - **Rollback/cleanup:**
   - Delete the MP3 tree to re-test: `rm -rf "{nbc}/Music/MP3"`.
-  - The flatten step **moves** the WAV tree (it does not copy). If you need the original nested layout back for any reason, re-run the Soundminer mirror (Test 11); the flatten is idempotent and a flat tree is a no-op.
+  - The flatten step **moves** the WAV tree (it does not copy). A flat tree is a
+    no-op. If `WAV/MEDIA` already exists, replacement requires `--overwrite`;
+    the existing tree is backed up on the same volume and restored if installing
+    the nested mirror fails.
   - Without `--overwrite`, existing MP3s are skipped, so re-running only fills gaps.
 
 ---
 
 ## 13. Final rename test
 
-Validates Step 14 (strip characters outside `[A-Za-z0-9_ ]` from filenames under NBC Music). Runs on the pipeline machine off the shared volume.
+Validates the Step 14 repair alias (strip characters outside `[A-Za-z0-9_ ]`
+from filenames under NBC Music). A normal run performs this as the tail of
+Step 12.7; `--only 14` remains available for repair.
 
 - **Command:**
   ```bash
@@ -516,7 +533,11 @@ Validates Step 14 (strip characters outside `[A-Za-z0-9_ ]` from filenames under
 
 ## 14. Final metadata cross-check test (Step 15)
 
-Validates Step 15: cross-references each partner deliverable's metadata sheet (or the US/Ex-US tracklist) against the audio actually present in its media folder, and checks covers where required. Missing audio/cover = **FAIL**; extra files = warning.
+Validates Step 15: cross-references each partner deliverable's metadata sheet
+(or the US/Ex-US tracklist) against the audio actually present in its media
+folder, and checks covers where required. A normal run executes this directly
+after Step 10, before Soundminer. Missing audio/cover = **FAIL**; extra files =
+warning.
 
 - **Command:**
   ```bash
@@ -531,7 +552,9 @@ Validates Step 15: cross-references each partner deliverable's metadata sheet (o
   - Final line: `Checked N, Skipped M, Discrepancies D, Result ✓ PASS` (FAIL writes a per-discrepancy CSV to the `_Exports` folder).
   - A trailing note lists any `3-FINAL PACKAGING` partner folder with no audio cross-check — metadata-only folders (SoundExchange, Qwire) are expected there; an **unexpected** folder is the signal to watch for.
 - **Inspect:**
-  - Media-absent partners log `↩ Media folder not present — skipping` (not a failure).
+  - On a real run, a required partner media folder that is absent is a **FAIL**
+    (`MISSING_MEDIA_DIR`). A dry-run only warns because upstream dry-run steps do
+    not create their planned output trees.
   - If FAIL, open the CSV report and confirm each row is a genuine miss.
 
 ---
@@ -558,6 +581,8 @@ Validates the SoundExchange export → ISRC ingest-form split (`split_se_ingest_
 - **Inspect:**
   - Open `… - Part 1.xlsx`: data begins at row 11 of the `Form` sheet, columns aligned with the template.
   - Files land in `{specials}/3-FINAL PACKAGING/Universal Production Music {Month} Release - SoundExchange/`.
+  - Re-running with fewer rows removes only obsolete generated `Part N` files
+    for that same entity after all current parts save successfully.
 
 ---
 
@@ -582,6 +607,9 @@ workbooks selected by the bucket.
   - Metadata contains only the `SoundMouseMetadata NN - … .xlsx` files named
     by the SoundMouse bucket card. Each remains an XLSX workbook, but its Domo
     formatting is removed; values, formulas, and worksheet names are retained.
+  - A full run reuses Step 1's authenticated Domo session and Step 5's UniSync
+    batch. `--only 16` performs the same acquisition in one standalone Domo
+    session.
   - The final SoundMouse validation unions every `Filename` and album-artwork
     filename across those selected workbooks and confirms they exist under
     `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in
@@ -609,8 +637,9 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
   cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
   python3 soundminer.py --test --year 2026 --month 5 --part 1 --capture-steps
   ```
-  Back on **USMPSMDHDF2**, press ENTER; the pipeline verifies the WAV output, runs 12.7 conversion, then Steps 13 (non-maintrack cleanup), 14 (rename), and 15 (final metadata cross-check), then the summary.
-  - Step 13 deletes the non-maintracks in a normal run; `--dry-run` previews them only.
+  Back on **USMPSMDHDF2**, press ENTER; the pipeline verifies the WAV output,
+  runs 12.7 conversion plus rename, then prints the summary. Tunesat filtering
+  and the final package check already completed before the Soundminer hand-off.
 - **Command (real run, inline — launched ON USMPSMDHDF1):**
   ```bash
   cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
@@ -650,10 +679,10 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
 ## General restart & safety notes
 
 - **Restart after a failure:** re-run the **same command**. Completed steps skip existing outputs; use the matching `--skip-*` flags to jump past phases you know are done and resume at the failed step.
-- **Dry-run everywhere first:** every step that writes supports `--dry-run`. In
-  particular, Step 13 deletes non-main tracks by default on every real run;
-  `--dry-run` is its preview/safety guard. `--delete-non-maintracks` is deprecated
-  and ignored (a compatibility no-op), so it does not enable or disable deletion.
+- **Dry-run everywhere first:** every step that writes supports `--dry-run`.
+  Step 10 previews the filtered Tunesat materialization; the Step 13 repair
+  alias previews reconciliation before changing an existing delivery.
+  `--delete-non-maintracks` is deprecated and ignored.
 - **Volumes:** if anything fails with "permission denied" or "no such file" on `/Volumes/Pegasus32 R8 - 1`, check the volume is mounted before assuming a code bug — especially after a reboot.
 - **Soundminer is the only non-restartable-in-place step** in the sense that it drives a GUI; if interrupted, cancel any open dialog and re-run (use `--skip-*` to resume at embed/mirror).
 - **Keep the remote code in sync:** before any Step 12 run, make sure USMPSMDHDF1 has the current modules (verify by `wc -c` byte size against the pipeline machine). Stale remote copies caused several false failures historically.

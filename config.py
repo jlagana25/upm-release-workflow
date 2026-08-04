@@ -84,7 +84,7 @@ DOMO_CARDS: dict[str, str] = {
     "album_list":       "1741693601",
     "japan_metadata":   "242186821",
     "nbc_metadata":     "233748559",
-    # Tunesat Metadata — Step 13 (non-maintrack cleanup) reads this CSV's
+    # Tunesat Metadata — Step 10 filtering / Step 13 repair reads this CSV's
     # "File Name" column to decide what stays in the Tunesat Music folder.
     # Same date-range filter as the other cards (Part 1: days 01–14,
     # Part 2: days 15–end of month).  Replace the placeholder with the
@@ -469,7 +469,7 @@ class ReleaseContext:
             / f"UPM {self.month_display_folder}_Missing_{_today}.csv"
         )
 
-        # ---- Step 13: Non-MainTrack cleanup paths ---------------------------
+        # ---- Step 10 Tunesat filter / Step 13 repair paths ------------------
         # The Tunesat delivery folder is the primary cleanup target.
         # CSV:    …/3-FINAL PACKAGING/Universal Production Music {mdf} Release - Tunesat/Metadata/UPM {mdf} Metadata.csv
         # Target: …/3-FINAL PACKAGING/Universal Production Music {mdf} Release - Tunesat/Music

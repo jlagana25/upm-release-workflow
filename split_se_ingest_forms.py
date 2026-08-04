@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import uuid
 from copy import copy
 from pathlib import Path
 from typing import Optional
@@ -141,42 +142,78 @@ def split_one(
     emit = logger.info if logger else print
 
     export_wb = load_workbook(export_path, data_only=False)
-    export_ws = export_wb.active
+    try:
+        export_ws = export_wb.active
+        rows = list(export_ws.iter_rows(min_row=2))   # skip export header
+        max_col = export_ws.max_column
+        chunks = [
+            rows[start:start + MAX_ROWS_PER_WORKBOOK]
+            for start in range(0, len(rows), MAX_ROWS_PER_WORKBOOK)
+        ]
+        expected = {
+            output_dir / f"{base_name} - Part {part}.xlsx"
+            for part in range(1, len(chunks) + 1)
+        }
 
-    rows = list(export_ws.iter_rows(min_row=2))   # skip export header
-    max_col = export_ws.max_column
+        if not dry_run:
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not dry_run:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        for part, chunk in enumerate(chunks, start=1):
+            output_path = output_dir / f"{base_name} - Part {part}.xlsx"
+            if dry_run:
+                emit(
+                    f"    [WOULD WRITE] {output_path.name} — "
+                    f"{len(chunk)} data row(s)"
+                )
+                continue
 
-    part = 1
-    for start in range(0, len(rows), MAX_ROWS_PER_WORKBOOK):
-        chunk = rows[start:start + MAX_ROWS_PER_WORKBOOK]
-        output_path = output_dir / f"{base_name} - Part {part}.xlsx"
+            template_wb = load_workbook(template_path)
+            staged = output_path.with_name(
+                f".{output_path.name}.new-{uuid.uuid4().hex}.xlsx"
+            )
+            try:
+                form_ws = template_wb[FORM_SHEET]
+                clear_form_data(form_ws)
+                for row_offset, export_row in enumerate(chunk):
+                    target_row_num = START_ROW + row_offset
+                    apply_template_row_format(form_ws, target_row_num, max_col)
+                    for col_idx, source_cell in enumerate(export_row, start=1):
+                        target_cell = form_ws.cell(
+                            row=target_row_num, column=col_idx
+                        )
+                        copy_cell(source_cell, target_cell)
+                template_wb.save(staged)
+                staged.replace(output_path)
+            finally:
+                template_wb.close()
+                if staged.exists():
+                    staged.unlink()
+            emit(f"    Saved {output_path.name} — {len(chunk)} data row(s)")
 
-        if dry_run:
-            emit(f"    [WOULD WRITE] {output_path.name} — {len(chunk)} data row(s)")
-            part += 1
-            continue
+        prefix = f"{base_name} - Part "
+        stale = sorted(
+            path for path in output_dir.iterdir()
+            if path.is_file()
+            and path.suffix.lower() == ".xlsx"
+            and path.stem.startswith(prefix)
+            and path.stem[len(prefix):].isdigit()
+            and path not in expected
+        ) if output_dir.is_dir() else []
+        for path in stale:
+            if dry_run:
+                emit(f"    [WOULD REMOVE STALE] {path.name}")
+            else:
+                path.unlink()
+                emit(f"    Removed stale generated part: {path.name}")
 
-        template_wb = load_workbook(template_path)
-        form_ws = template_wb[FORM_SHEET]
-        clear_form_data(form_ws)
-
-        for row_offset, export_row in enumerate(chunk):
-            target_row_num = START_ROW + row_offset
-            apply_template_row_format(form_ws, target_row_num, max_col)
-            for col_idx, source_cell in enumerate(export_row, start=1):
-                target_cell = form_ws.cell(row=target_row_num, column=col_idx)
-                copy_cell(source_cell, target_cell)
-
-        template_wb.save(output_path)
-        emit(f"    Saved {output_path.name} — {len(chunk)} data row(s)")
-        part += 1
-
-    if not rows:
-        emit(f"    ⚠ {export_path.name} has no data rows — nothing written.")
-    return part - 1
+        if not rows:
+            emit(
+                f"    ⚠ {export_path.name} has no data rows — no current parts; "
+                "stale generated parts removed."
+            )
+        return len(chunks)
+    finally:
+        export_wb.close()
 
 
 def run_soundexchange_split(
@@ -206,6 +243,13 @@ def run_soundexchange_split(
     error = logger.error   if logger else print
 
     only = (only or "").strip().lower()
+    valid_only = {token for _key, _base_name, token in ENTITIES}
+    if only and only not in valid_only:
+        error(
+            f"  ✗ Unknown SoundExchange --only value {only!r}; valid values: "
+            + ", ".join(sorted(valid_only))
+        )
+        return False
     template   = _resolve_template(ctx)
     output_dir = ctx.soundexchange_final_dir
     emit(f"  Template: {template}")

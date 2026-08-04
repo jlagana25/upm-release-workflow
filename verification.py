@@ -59,6 +59,8 @@ from typing import Optional
 import pandas as pd
 
 from config import ReleaseContext, context_from_cli_args
+from filesystem_names import resolve_label_dir
+from release_manifest import read_table
 from tracklist_columns import (
     _find_column,
     _normalize,
@@ -167,7 +169,7 @@ def _resolve_audio_path(
     else:
         leaf = f"{filename}.{ext}"
 
-    label_dir = media_root / label
+    label_dir = resolve_label_dir(media_root, label)
     album_dirs = _find_album_folders(label_dir, album_no)
 
     # Present if the leaf exists in ANY matching album folder…
@@ -337,7 +339,7 @@ def _check_album_cover(
     """
     label = info["label"]
     album_no = info["albumno"]
-    label_dir = wwc_root / label
+    label_dir = resolve_label_dir(wwc_root, label)
     album_dirs = _find_album_folders(label_dir, album_no)
 
     if not album_dirs:
@@ -390,7 +392,7 @@ def _load_csv(
         logger.error(f"    ✗  {csv_label} CSV not found: {csv_path}")
         return None, None
     try:
-        df = pd.read_csv(csv_path, dtype=str, encoding="utf-8-sig").fillna("")
+        df = read_table(csv_path)
     except Exception as exc:
         logger.error(f"    ✗  Could not read {csv_label}: {exc}")
         return None, None
@@ -692,6 +694,8 @@ def verify_all_files(
     ctx: ReleaseContext,
     dry_run: bool,
     logger: logging.Logger,
+    *,
+    findings_out: Optional[list[dict[str, str]]] = None,
 ) -> bool:
     """
     Step 9 — Verify every audio file and cover referenced in the three
@@ -724,12 +728,19 @@ def verify_all_files(
     all_missing.extend(_verify_us(ctx, logger))
     all_missing.extend(_verify_exus(ctx, logger))
     all_missing.extend(_verify_japan(ctx, logger))
+    if findings_out is not None:
+        findings_out.extend(all_missing)
 
     if not all_missing:
         logger.info("  ✓  All expected files present — nothing missing.")
         return True
 
-    _write_missing_report(all_missing, ctx, logger)
+    if dry_run:
+        logger.warning(
+            f"  [DRY RUN] Would write missing-files report: {ctx.missing_report_csv}"
+        )
+    else:
+        _write_missing_report(all_missing, ctx, logger)
 
     # Summary by Type for quick scanning
     by_type: dict[str, int] = {}

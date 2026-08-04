@@ -28,9 +28,11 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # Playwright drives the Domo browser exports (Step 1).  It's imported lazily so
 # that modules which only need the non-browser helpers here — e.g.
@@ -113,11 +115,11 @@ CARD_CONFIGS: list[dict] = [
         "output_fn":   lambda ctx: ctx.nbc_metadata_csv,
     },
     {
-        # Step 13 (non-maintrack cleanup) compares the MP3 files in the
+        # Step 10 (and the Step 13 repair alias) compares MP3 files with the
         # Tunesat Music folder against this CSV's "File Name" column.
         # Lands directly at ctx.cleanup_metadata_csv, which is the same
-        # path Step 13 reads from — so a fresh Step 1 run for this
-        # month/part automatically refreshes the keepers list for Step 13.
+        # path the Tunesat materializer reads — so a fresh Step 1 run for this
+        # month/part automatically refreshes the authoritative keepers list.
         "key":         "tunesat_metadata",
         "card_id":     DOMO_CARDS["tunesat_metadata"],
         "description": "Tunesat Metadata",
@@ -187,6 +189,8 @@ def run_domo_exports(
     dry_run: bool,
     logger: logging.Logger,
     only_keys: Optional[list[str]] = None,
+    extra_cards: Optional[list[dict]] = None,
+    followup_cards: Optional[Callable[[], list[dict]]] = None,
 ) -> dict[str, str]:
     """Export Domo cards. Returns dict of key → 'ok'|'skipped'|'failed'.
 
@@ -194,7 +198,7 @@ def run_domo_exports(
     keys, e.g. ["exus_tracklist"]) to export just those — used by
     remediation to refresh a single tracklist that's still missing tracks.
     """
-    cards = CARD_CONFIGS
+    cards = list(CARD_CONFIGS)
     if only_keys:
         wanted = set(only_keys)
         cards = [c for c in CARD_CONFIGS if c["key"] in wanted]
@@ -204,6 +208,9 @@ def run_domo_exports(
         if not cards:
             logger.warning("  No matching Domo cards to export.")
             return {}
+
+    if extra_cards:
+        cards.extend(extra_cards)
 
     logger.info(
         f"  Release date range: {ctx.release_start} → {ctx.release_end}\n"
@@ -231,20 +238,42 @@ def run_domo_exports(
         try:
             _authenticate(page, logger)
 
-            for card in cards:
-                output_path = card["output_fn"](ctx)
-                logger.info(f"\n  ── {card['description']} (card {card['card_id']}) ──")
-                logger.info(f"     Output: {output_path}")
+            def export_cards(batch: list[dict]) -> None:
+                for card in batch:
+                    output_path = card["output_fn"](ctx)
+                    logger.info(
+                        f"\n  ── {card['description']} "
+                        f"(card {card['card_id']}) ──"
+                    )
+                    logger.info(f"     Output: {output_path}")
+                    try:
+                        _export_card(page, card, output_path, ctx, logger)
+                        postprocess = card.get("postprocess")
+                        if postprocess:
+                            postprocess(output_path)
+                        results[card["key"]] = "ok"
+                        logger.info(f"     ✓ Saved: {output_path}")
+                    except PlaywrightTimeoutError as exc:
+                        logger.error(
+                            f"     ✗ Timeout on '{card['description']}': {exc}"
+                        )
+                        results[card["key"]] = "failed"
+                    except Exception as exc:
+                        logger.error(
+                            f"     ✗ Failed '{card['description']}': {exc}"
+                        )
+                        results[card["key"]] = "failed"
+
+            export_cards(cards)
+            if followup_cards and not any(
+                results.get(card["key"]) == "failed"
+                for card in (extra_cards or [])
+            ):
                 try:
-                    _export_card(page, card, output_path, ctx, logger)
-                    results[card["key"]] = "ok"
-                    logger.info(f"     ✓ Saved: {output_path}")
-                except PlaywrightTimeoutError as exc:
-                    logger.error(f"     ✗ Timeout on '{card['description']}': {exc}")
-                    results[card["key"]] = "failed"
+                    export_cards(followup_cards())
                 except Exception as exc:
-                    logger.error(f"     ✗ Failed '{card['description']}': {exc}")
-                    results[card["key"]] = "failed"
+                    logger.error(f"     ✗ Follow-up export planning failed: {exc}")
+                    results["followup_exports"] = "failed"
         finally:
             browser.close()
 
@@ -343,12 +372,23 @@ def _export_card(
     xlsx_temp = _trigger_excel_download(page, card["description"], logger)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if card.get("format", "csv") == "xlsx":
-        # Keep the workbook as-is (cross-filesystem move: temp is in Downloads,
-        # output on the Pegasus volume).
-        if output_path.exists():
-            output_path.unlink()
-        shutil.move(str(xlsx_temp), str(output_path))
-        logger.info(f"     Saved XLSX → {output_path.name}")
+        # Stage beside the destination first. Path.replace() is then an atomic
+        # same-filesystem swap, so a failed copy/validation never destroys the
+        # previous known-good export.
+        staged = output_path.with_name(
+            f".{output_path.name}.new-{uuid.uuid4().hex}.xlsx"
+        )
+        try:
+            shutil.move(str(xlsx_temp), str(staged))
+            if not staged.is_file() or staged.stat().st_size == 0:
+                raise RuntimeError("downloaded workbook is empty")
+            if not zipfile.is_zipfile(staged):
+                raise RuntimeError("download is not a valid XLSX workbook")
+            staged.replace(output_path)
+            logger.info(f"     Saved XLSX → {output_path.name}")
+        finally:
+            if staged.exists():
+                staged.unlink()
     else:
         _xlsx_to_csv(xlsx_temp, output_path, logger)
 
@@ -678,9 +718,19 @@ def _xlsx_to_csv(xlsx_path: Path, csv_path: Path, logger: logging.Logger) -> Non
         )
     df = pd.read_excel(xlsx_path, dtype=str).fillna("")
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    logger.info(f"     CSV rows: {len(df)}  columns: {len(df.columns)}")
-    xlsx_path.unlink()
+    staged = csv_path.with_name(
+        f".{csv_path.name}.new-{uuid.uuid4().hex}.csv"
+    )
+    try:
+        df.to_csv(staged, index=False, encoding="utf-8-sig")
+        if not staged.is_file() or staged.stat().st_size == 0:
+            raise RuntimeError("converted CSV is empty")
+        staged.replace(csv_path)
+        logger.info(f"     CSV rows: {len(df)}  columns: {len(df.columns)}")
+        xlsx_path.unlink()
+    finally:
+        if staged.exists():
+            staged.unlink()
 
 
 # ---------------------------------------------------------------------------

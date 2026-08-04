@@ -3,15 +3,16 @@
 
 PY ?= python3
 
-.PHONY: help install lock smoke steps verify
+.PHONY: help install lock smoke test steps verify
 
 help:
 	@echo "UPM Release Workflow — make targets:"
 	@echo "  make install   Install dependencies (requirements.txt) + Playwright browser"
 	@echo "  make lock       Pin the current environment to requirements.lock"
 	@echo "  make smoke      Run the fast offline smoke test"
+	@echo "  make test       Run all offline synthetic unit tests"
 	@echo "  make steps      Print the canonical workflow step list"
-	@echo "  make verify     smoke test + byte-compile every module"
+	@echo "  make verify     Smoke test + unit tests + byte-compile every module"
 
 install:
 	$(PY) -m pip install -r requirements.txt
@@ -28,9 +29,12 @@ lock:
 smoke:
 	$(PY) smoke_test.py
 
+test:
+	$(PY) -m unittest -v
+
 steps:
 	$(PY) upm_release_workflow.py --list-steps
 
-verify: smoke
+verify: smoke test
 	$(PY) -m py_compile *.py
 	@echo "All modules byte-compile cleanly."

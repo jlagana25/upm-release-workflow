@@ -1,8 +1,9 @@
 # UPM Release Workflow
 
 Automation for the twice-monthly Universal Production Music release process on
-macOS — Domo exports through final packaging, in 16 ordered steps driven by a
-single orchestrator (`upm_release_workflow.py`).
+macOS — Domo exports through final packaging, driven by a single orchestrator
+(`upm_release_workflow.py`). Historical step numbers remain CLI-compatible,
+while runtime phases follow explicit artifact dependencies.
 
 ## Machines
 
@@ -42,16 +43,21 @@ python3 upm_release_workflow.py --previous-month --only 16           # SoundMous
 python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --start-at 12.7
 ```
 
-A normal run **deletes** non-maintracks at Step 13; `--dry-run` is the only thing
-that holds back to a preview. Steps 10–15 are gated behind Step 9 verification
+Step 10 materializes Tunesat directly from its metadata keep-list; Step 13 is a
+repair-only compatibility alias. Steps 10–15 are gated behind Step 9 verification
 (escape with `--skip-verify`). See `TESTING_CHECKLIST.md` for the per-step
 operating and testing guide.
+
+Dry-run is write-free, including console-only logging and no audit-report files.
+On real runs, missing Step 10 source trees and missing Step 15 required partner
+media directories are failures rather than successful skips.
 
 ## Before you push: smoke test
 
 ```bash
 make smoke      # imports every module, checks arg/step consistency + shared helpers
-make verify     # smoke + byte-compile everything
+make test       # offline synthetic-filesystem regression tests
+make verify     # smoke + unit tests + byte-compile everything
 ```
 
 The smoke test is offline (no volumes needed) and runs in seconds. Run it after
@@ -104,6 +110,9 @@ Then the other machine installs with `pip install -r requirements.lock`.
 - `upm_release_workflow.py` — orchestrator + CLI (canonical step registry is `_STEP_UNITS`).
 - `config.py` — release context, all paths, partner destinations.
 - `tracklist_columns.py` — shared CSV/XLSX column-name detection (one source for every module).
+- `filesystem_names.py` — shared whitespace/case normalization for real label folders.
+- `release_manifest.py` — process-local, automatically invalidated export-table cache.
+- `cover_downloads.py` — shared atomic image validation and master-cache reuse.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`.
@@ -112,11 +121,19 @@ Then the other machine installs with `pip install -r requirements.lock`.
   remains XLSX but all downloaded workbook formatting is removed automatically.
   The step then validates every audio and cover filename referenced across the
   selected metadata workbooks and fails with a missing-items CSV if needed.
+  A full run folds these exports into Step 1's authenticated Domo session and
+  its WAV request into Step 5's UniSync batch; standalone Step 16 retains the
+  same independent outcome and uses one Domo session. After selected exports
+  succeed, metadata workbooks from buckets no longer
+  selected for the run are removed using the exact generated-name pattern.
   Also runnable standalone with the normal date flags and `--dry-run`.
 - `split_se_ingest_forms.py` — SoundExchange metadata → ISRC ingest-form workbooks.
   Runs **automatically as the second phase of Step 10** (final packaging) in a
   full pipeline run; also runnable standalone (`python3 split_se_ingest_forms.py
   --previous-month`, `--dry-run` supported). `--skip-soundexchange` skips just
   this phase; `--skip-final-packaging` skips the whole of Step 10.
+  Reruns atomically replace current parts and remove only obsolete generated
+  `Part N` files for the same entity.
 - `smoke_test.py` — fast offline sanity check.
+- `test_release_safety.py`, `test_soundmouse.py` — offline regression tests.
 - `TESTING_CHECKLIST.md` — operating + per-step testing guide.

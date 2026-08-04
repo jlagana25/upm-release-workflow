@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Optional
 
 from config import ReleaseContext, context_from_cli_args
+from filesystem_names import normalize_label
 from verification import _load_csv, _row_value
 
 # Modes
@@ -117,15 +118,16 @@ def _build_keepsets(
         filename = _row_value(row, cols, "filename")
         if not (label and albumno and filename):
             continue
-        keep_audio.add((label, albumno, _leaf(filename, ext).lower()))
+        label_key = normalize_label(label)
+        keep_audio.add((label_key, albumno, _leaf(filename, ext).lower()))
         if want_covers and cols["cover"]:
             cover = _row_value(row, cols, "cover")
             if cover:
-                keep_cover.add((label, albumno, cover.lower()))
-        if title_col and (label, albumno) not in titles:
+                keep_cover.add((label_key, albumno, cover.lower()))
+        if title_col and (label_key, albumno) not in titles:
             t = str(row.get(title_col, "")).strip()
             if t:
-                titles[(label, albumno)] = t
+                titles[(label_key, albumno)] = t
     return keep_audio, keep_cover, titles
 
 
@@ -157,14 +159,15 @@ def _scan_tree(root: Path, keep_audio: set, keep_cover: set, want_covers: bool):
             continue
 
         label, album_folder, leaf = rel
+        label_key = normalize_label(label)
         albumno = _albumno_of(album_folder)
         leaf_l = leaf.lower()
 
-        is_keeper = ((label, albumno, leaf_l) in keep_audio) or (
-            want_covers and (label, albumno, leaf_l) in keep_cover
+        is_keeper = ((label_key, albumno, leaf_l) in keep_audio) or (
+            want_covers and (label_key, albumno, leaf_l) in keep_cover
         )
         if is_keeper:
-            by_album.setdefault((label, albumno), {}).setdefault(p.parent, {})[leaf_l] = p
+            by_album.setdefault((label_key, albumno), {}).setdefault(p.parent, {})[leaf_l] = p
         else:
             extras.append((p, "not referenced by current tracklist"))
 
@@ -247,6 +250,8 @@ def prune_music_trees(
     ctx: ReleaseContext,
     mode: str,
     logger: logging.Logger,
+    *,
+    write_report: bool = True,
 ) -> tuple[int, int]:
     """
     Reconcile every 1-ORIGINAL/Music tree against its tracklist.
@@ -280,6 +285,7 @@ def prune_music_trees(
     report_rows: list[dict[str, str]] = []
     total_removable = 0
     total_kept = 0
+    failures: list[str] = []
 
     for tree_label, root, csv_path, ext, want_covers in _tree_specs(ctx):
         logger.info(f"\n  ── {tree_label} ── {root}")
@@ -293,6 +299,7 @@ def prune_music_trees(
                 "     ⚠  Tracklist unreadable/missing — SKIPPING this tree "
                 "(refusing to prune without a keep-list)."
             )
+            failures.append(f"{tree_label}: authoritative tracklist unavailable")
             continue
         keep_audio, keep_cover, titles = keepsets
 
@@ -362,6 +369,8 @@ def prune_music_trees(
                 except OSError as exc:
                     errs += 1
                     logger.error(f"       ✗ {p}: {exc}")
+            if errs:
+                failures.append(f"{tree_label}: {errs} prune operation error(s)")
             empties = _remove_empty_dirs(root, logger, do_delete=True)
             logger.info(
                 f"     applied: "
@@ -374,16 +383,22 @@ def prune_music_trees(
             if empties:
                 logger.info(f"     would remove {empties} empty folder(s) afterward")
 
-    # Write the full report.
-    try:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(report_path, "w", encoding="utf-8-sig", newline="") as f:
-            w = _csv.DictWriter(f, fieldnames=["Tree", "Action", "Reason", "Path"])
-            w.writeheader()
-            w.writerows(report_rows)
-        logger.info(f"\n  Prune report: {report_path}")
-    except Exception as exc:
-        logger.error(f"  Could not write prune report: {exc}")
+    # Write the full report unless a global dry-run requested zero writes.
+    if write_report:
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(report_path, "w", encoding="utf-8-sig", newline="") as f:
+                w = _csv.DictWriter(
+                    f, fieldnames=["Tree", "Action", "Reason", "Path"]
+                )
+                w.writeheader()
+                w.writerows(report_rows)
+            logger.info(f"\n  Prune report: {report_path}")
+        except Exception as exc:
+            logger.error(f"  Could not write prune report: {exc}")
+            failures.append(f"prune report could not be written: {exc}")
+    else:
+        logger.info(f"\n  [DRY RUN] Would write prune report: {report_path}")
 
     verb = "removed" if do_delete else "archived" if do_change else "removable"
     logger.info(
@@ -391,6 +406,8 @@ def prune_music_trees(
         + (" (preview — re-run with --prune-mode archive to apply)"
            if not do_change else "")
     )
+    if failures:
+        raise RuntimeError("Prune incomplete — " + "; ".join(failures))
     return total_removable, total_kept
 
 

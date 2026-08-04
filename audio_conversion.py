@@ -35,6 +35,7 @@ import json
 import logging
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -146,6 +147,7 @@ def _flatten_mirrored_media(
     logger: logging.Logger,
     *,
     dry_run: bool,
+    overwrite: bool = False,
 ) -> bool:
     """
     Undo Soundminer's "Mirror Source Folder Structure" nesting.
@@ -168,16 +170,19 @@ def _flatten_mirrored_media(
     Soundminer's setting: the nested MEDIA folder IS the signal that the
     setting was used.
 
-    If WAV/MEDIA already exists (e.g. a prior partial run), it is OVERWRITTEN.
+    Replacing an existing WAV/MEDIA requires ``overwrite=True``. The old tree is
+    renamed to a same-volume backup and restored if installation fails.
 
     Honours dry_run (describes the move, changes nothing).  Returns True on
     success or no-op, False on error.
     """
-    # A nested MEDIA dir = named "MEDIA", below wav_root, but NOT directly
-    # wav_root/MEDIA (which is the already-flattened target).
+    target = wav_root / "MEDIA"
+    # A nested MEDIA dir = named "MEDIA", below wav_root, but not the already
+    # flattened target or anything inside it. A label/album named MEDIA beneath
+    # WAV/MEDIA must never be mistaken for Soundminer's mirrored scaffold.
     nested = [
         d for d in wav_root.rglob("MEDIA")
-        if d.is_dir() and d.parent != wav_root
+        if d.is_dir() and d != target and target not in d.parents
     ]
     if not nested:
         logger.debug("  No nested MEDIA folder under WAV/ — no flatten needed.")
@@ -189,17 +194,20 @@ def _flatten_mirrored_media(
         d for d in nested
         if next(d.rglob("*.wav"), None) or next(d.rglob("*.WAV"), None)
     ]
-    chosen = with_audio or nested
-    if len(chosen) > 1:
+    if not with_audio:
+        logger.warning(
+            "  Nested MEDIA folder(s) contain no WAV audio; leaving them untouched."
+        )
+        return True
+    if len(with_audio) > 1:
         logger.error(
             "  ✗  Multiple nested MEDIA folders found under WAV/; refusing to "
             "guess which to flatten:\n"
-            + "\n".join(f"       {d}" for d in chosen)
+            + "\n".join(f"       {d}" for d in with_audio)
         )
         return False
 
-    nested_media = chosen[0]
-    target       = wav_root / "MEDIA"
+    nested_media = with_audio[0]
     # The top of the leftover scaffold = the first path component below
     # wav_root on the way to the nested MEDIA (e.g. wav_root/_Specials).
     top_scaffold = wav_root / nested_media.relative_to(wav_root).parts[0]
@@ -209,19 +217,45 @@ def _flatten_mirrored_media(
     logger.info(f"      →   to: {target}")
 
     if dry_run:
+        if target.exists() and not overwrite:
+            logger.info(
+                "  [DRY RUN] Existing WAV/MEDIA would be preserved; pass "
+                "--overwrite to replace it."
+            )
+            return True
+        replacement = (
+            "safely replacing the existing tree"
+            if target.exists() else "with no existing tree"
+        )
         logger.info(
-            "  [DRY RUN] Would move that MEDIA folder up to WAV/MEDIA "
-            f"(overwriting any existing) and remove the scaffold under "
-            f"{top_scaffold}."
+            "  [DRY RUN] Would move that MEDIA folder up to WAV/MEDIA, "
+            f"{replacement}, and remove the scaffold under {top_scaffold}."
         )
         return True
 
+    if target.exists() and not overwrite:
+        logger.error(
+            f"  ✗ Existing flattened target found: {target}\n"
+            "     Refusing to replace it without --overwrite; nested output "
+            "was left untouched."
+        )
+        return False
+
+    backup = target.with_name(f".{target.name}.pre-flatten-{uuid.uuid4().hex}")
+    installed = False
     try:
         if target.exists():
-            logger.info(f"      Overwriting existing {target}")
-            shutil.rmtree(target)
-        shutil.move(str(nested_media), str(target))
+            logger.info(f"      Safely replacing existing {target}")
+            target.rename(backup)
+        nested_media.rename(target)
+        installed = True
         logger.info("      MEDIA folder moved up to WAV/MEDIA.")
+
+        if not (
+            next(target.rglob("*.wav"), None)
+            or next(target.rglob("*.WAV"), None)
+        ):
+            raise OSError("installed WAV/MEDIA contains no WAV audio")
 
         # Remove the now-empty scaffold (WAV/_Specials/…), but only if no
         # audio remains under it — never delete files unexpectedly.
@@ -239,10 +273,24 @@ def _flatten_mirrored_media(
                 shutil.rmtree(top_scaffold)
                 logger.info(f"      Removed leftover scaffold: {top_scaffold}")
 
+        if backup.exists():
+            shutil.rmtree(backup)
         logger.info("  ✓ Flatten complete — WAV/MEDIA/<labels>/ ready.")
         return True
     except OSError as exc:
         logger.error(f"  ✗ Failed to flatten mirrored MEDIA folder: {exc}")
+        try:
+            if installed and target.exists():
+                failed = target.with_name(
+                    f".{target.name}.failed-flatten-{uuid.uuid4().hex}"
+                )
+                target.rename(failed)
+                logger.error(f"     Failed replacement preserved at: {failed}")
+            if backup.exists() and not target.exists():
+                backup.rename(target)
+                logger.info("     Restored the previous WAV/MEDIA tree.")
+        except OSError as restore_exc:
+            logger.error(f"     Could not restore previous WAV/MEDIA: {restore_exc}")
         return False
 
 
@@ -261,8 +309,9 @@ def convert_nbc_wav_to_mp3(
     - Existing MP3s skipped unless `overwrite` is True.
     - dry_run lists the work without encoding.
 
-    Returns True on success (including a clean no-op or dry-run), False if
-    any conversion errors or a required tool/path is missing.
+    Returns True on success, False if no WAVs are available, conversion errors
+    occur, or a required tool/path is missing. A missing upstream tree is only
+    tolerated by a from-scratch dry-run.
     """
     wav_root = ctx.partner_dirs.get("nbc_wav_music")
     mp3_root = ctx.partner_dirs.get("nbc_mp3_music")
@@ -329,7 +378,9 @@ def convert_nbc_wav_to_mp3(
     # If Soundminer mirrored with 'Mirror Source Folder Structure', the audio
     # is nested under a replicated source path inside WAV/.  Lift it up to
     # WAV/MEDIA before converting (no-op for a flat mirror).
-    if not _flatten_mirrored_media(wav_root, logger, dry_run=dry_run):
+    if not _flatten_mirrored_media(
+        wav_root, logger, dry_run=dry_run, overwrite=overwrite
+    ):
         return False
 
     # Collect WAV files (both .wav and .WAV — macOS is case-insensitive on
@@ -338,8 +389,8 @@ def convert_nbc_wav_to_mp3(
         {p for p in wav_root.rglob("*.wav")} | {p for p in wav_root.rglob("*.WAV")}
     )
     if not wav_files:
-        logger.warning(f"  No WAV files found under {wav_root} — nothing to do.")
-        return True  # not an error
+        logger.error(f"  ✗ No WAV files found under {wav_root}; conversion is incomplete.")
+        return False
 
     logger.info(
         f"  Found {len(wav_files)} WAV file(s).  Encoding {MP3_CODEC} @ "
@@ -419,6 +470,24 @@ def convert_nbc_wav_to_mp3(
     else:
         logger.info("  ✓  Step 12.7 complete — NBC MP3s written.")
     return True
+
+
+def convert_and_finalize_nbc(
+    ctx: ReleaseContext,
+    dry_run: bool,
+    overwrite: bool,
+    logger: logging.Logger,
+    *,
+    rename_files: bool = True,
+) -> bool:
+    """Convert NBC WAVs, then sanitize WAV/MP3 filenames as one unit."""
+    if not convert_nbc_wav_to_mp3(ctx, dry_run, overwrite, logger):
+        return False
+    if not rename_files:
+        logger.info("  ↩ NBC filename sanitization skipped by request.")
+        return True
+    from cleanup import rename_nbc_music_files
+    return rename_nbc_music_files(ctx, dry_run, logger)
 
 
 # ---------------------------------------------------------------------------

@@ -16,10 +16,12 @@ import csv
 import logging
 import re
 import tempfile
+from contextlib import contextmanager
 from copy import copy
 from pathlib import Path
 
 from config import (
+    MASTERS_COVERS_DIR,
     SOUNDMOUSE_BASE,
     SOUNDMOUSE_DOMO_CARDS,
     SOUNDMOUSE_DOMO_PAGE_ID,
@@ -27,9 +29,15 @@ from config import (
     ReleaseContext,
     context_from_cli_args,
 )
+from cover_downloads import (
+    copy_cached_cover,
+    download_image_atomic,
+    find_cached_cover,
+)
 from tracklist_columns import (
     POSSIBLE_COVER_COLS,
     POSSIBLE_FILENAME_COLS,
+    POSSIBLE_LABEL_COLS,
     POSSIBLE_URL_COLS,
     _find_column,
 )
@@ -365,6 +373,28 @@ def metadata_codes_from_bucket(path: Path) -> list[str]:
     return sorted(found, key=int)
 
 
+def remove_stale_soundmouse_metadata(
+    metadata_dir: Path,
+    selected_codes: list[str],
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """Remove only generated SoundMouse workbooks not selected by this bucket."""
+    expected = {metadata_filename(code) for code in selected_codes}
+    generated = {metadata_filename(f"{code:02d}") for code in range(1, 11)}
+    stale = sorted(
+        metadata_dir / name for name in generated - expected
+        if (metadata_dir / name).is_file()
+    ) if metadata_dir.is_dir() else []
+    for path in stale:
+        if dry_run:
+            logger.info(f"  [DRY RUN] Would remove stale metadata: {path.name}")
+        else:
+            path.unlink()
+            logger.info(f"  Removed stale generated metadata: {path.name}")
+    return len(stale)
+
+
 def _domo_configs(ctx: ReleaseContext, codes: list[str] | None = None) -> list[dict]:
     if codes is None:
         return [
@@ -395,10 +425,23 @@ def _domo_configs(ctx: ReleaseContext, codes: list[str] | None = None) -> list[d
                 / "Metadata" / metadata_filename(c)
             ),
             "format": "xlsx",
-            "strip_formatting": True,
+            "postprocess": strip_xlsx_formatting,
         }
         for code in codes
     ]
+
+
+def domo_seed_cards(ctx: ReleaseContext) -> list[dict]:
+    """Cards required before SoundMouse metadata selection is known."""
+    return _domo_configs(ctx)
+
+
+def domo_metadata_cards_from_bucket(ctx: ReleaseContext) -> list[dict]:
+    """Resolve bucket-selected cards after the seed exports complete."""
+    codes = metadata_codes_from_bucket(ctx.soundmouse_bucket_csv)
+    if not codes:
+        raise ValueError("SoundMouse bucket selected no known metadata sheets")
+    return _domo_configs(ctx, codes)
 
 
 def _export_domo_cards(
@@ -406,6 +449,7 @@ def _export_domo_cards(
     cards: list[dict],
     dry_run: bool,
     logger: logging.Logger,
+    followup_cards=None,
 ) -> bool:
     if dry_run:
         for card in cards:
@@ -430,17 +474,26 @@ def _export_domo_cards(
         page = browser_ctx.new_page()
         try:
             domo._authenticate(page, logger)
-            for card in cards:
-                output = card["output_fn"](ctx)
-                logger.info(f"  Exporting {card['description']} → {output}")
-                try:
-                    domo._export_card(page, card, output, ctx, logger)
-                    if card.get("strip_formatting"):
-                        strip_xlsx_formatting(output)
-                        logger.info(f"  Removed XLSX formatting: {output.name}")
-                except Exception as exc:  # browser errors are logged per card
-                    logger.error(f"  ✗ {card['description']} failed: {exc}")
-                    ok = False
+            def export_batch(batch):
+                nonlocal ok
+                for card in batch:
+                    output = card["output_fn"](ctx)
+                    logger.info(f"  Exporting {card['description']} → {output}")
+                    try:
+                        domo._export_card(page, card, output, ctx, logger)
+                        postprocess = card.get("postprocess")
+                        if postprocess:
+                            postprocess(output)
+                            logger.info(
+                                f"  Removed XLSX formatting: {output.name}"
+                            )
+                    except Exception as exc:
+                        logger.error(f"  ✗ {card['description']} failed: {exc}")
+                        ok = False
+
+            export_batch(cards)
+            if ok and followup_cards:
+                export_batch(followup_cards())
         finally:
             browser.close()
     return ok
@@ -473,6 +526,22 @@ def run_soundmouse_unisync(
         )
         return True
 
+    with soundmouse_job_batch(ctx) as jobs:
+        class _Jobs:
+            unisync_jobs = jobs
+
+        from unisync_automation import STATUS_FAILED, run_all_unisync_jobs
+        results = run_all_unisync_jobs(
+            _Jobs(), dry_run=dry_run, logger=logger, overwrite=overwrite
+        )
+        return bool(results) and not any(
+            value == STATUS_FAILED for value in results.values()
+        )
+
+
+@contextmanager
+def soundmouse_job_batch(ctx: ReleaseContext):
+    """Yield SoundMouse UniSync jobs and clean any split request CSVs."""
     fields, grouped = _rows_by_range(ctx.soundmouse_tracklist_csv)
     temp_paths: list[Path] = []
     jobs: list[dict] = []
@@ -497,15 +566,7 @@ def run_soundmouse_unisync(
                 "client_path": str(SOUNDMOUSE_BASE / activation_range / "MEDIA"),
                 "csv": str(csv_path),
             })
-
-        class _Jobs:
-            unisync_jobs = jobs
-
-        from unisync_automation import STATUS_FAILED, run_all_unisync_jobs
-        results = run_all_unisync_jobs(
-            _Jobs(), dry_run=dry_run, logger=logger, overwrite=overwrite
-        )
-        return bool(results) and not any(v == STATUS_FAILED for v in results.values())
+        yield jobs
     finally:
         for path in temp_paths:
             try:
@@ -525,12 +586,16 @@ def download_soundmouse_covers(
     fields, grouped = _rows_by_range(tracklist_csv)
     cover_col = _find_column(fields, POSSIBLE_COVER_COLS)
     url_col = _find_column(fields, POSSIBLE_URL_COLS)
+    label_col = _find_column(fields, POSSIBLE_LABEL_COLS)
     if not cover_col or not url_col:
         logger.error("  ✗ SoundMouse tracklist needs AlbumCoverArt and CDNAlbumArt columns.")
         return False
 
     if not dry_run:
         import requests
+        session = requests.Session()
+    else:
+        session = None
 
     ok = True
     for activation_range, rows in grouped.items():
@@ -552,14 +617,30 @@ def download_soundmouse_covers(
                 logger.info(f"  [DRY RUN] Would download cover: {destination}")
                 continue
             try:
-                response = requests.get(url, timeout=45)
-                response.raise_for_status()
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(response.content)
+                cached = None
+                if label_col:
+                    from filesystem_names import resolve_label_dir
+                    label = str(row.get(label_col, "")).strip()
+                    candidate = resolve_label_dir(
+                        MASTERS_COVERS_DIR, label
+                    ) / name
+                    if candidate.is_file():
+                        cached = candidate
+                if cached is None:
+                    cached = find_cached_cover(MASTERS_COVERS_DIR, name)
+                if cached is not None:
+                    copy_cached_cover(cached, destination)
+                    logger.info(f"  Reused cached cover: {name}")
+                else:
+                    download_image_atomic(
+                        url, destination, timeout=45, session=session
+                    )
             except Exception as exc:
                 logger.error(f"  ✗ Cover download failed ({name}): {exc}")
                 ok = False
         logger.info(f"  SoundMouse covers for {activation_range}: {len(seen)}")
+    if session is not None:
+        session.close()
     return ok
 
 
@@ -568,6 +649,10 @@ def run_soundmouse_step(
     dry_run: bool,
     overwrite: bool,
     logger: logging.Logger,
+    *,
+    domo_prepared: bool = False,
+    unisync_prepared: bool = False,
+    prepared_codes: list[str] | None = None,
 ) -> bool:
     logger.info(f"  Tracklist: {ctx.soundmouse_tracklist_csv}")
     logger.info(f"  Release:   {ctx.soundmouse_release_dir}")
@@ -589,8 +674,17 @@ def run_soundmouse_step(
         )
         return True
 
-    if not _export_domo_cards(ctx, _domo_configs(ctx), False, logger):
-        return False
+    if not domo_prepared:
+        if not _export_domo_cards(
+            ctx,
+            _domo_configs(ctx),
+            False,
+            logger,
+            followup_cards=lambda: domo_metadata_cards_from_bucket(ctx),
+        ):
+            return False
+    else:
+        logger.info("  ↩ SoundMouse Domo exports reused from Step 1 session.")
     try:
         roots = create_soundmouse_directories(
             ctx.soundmouse_tracklist_csv, SOUNDMOUSE_BASE, False, logger
@@ -604,15 +698,20 @@ def run_soundmouse_step(
             f"{ctx.soundmouse_activation_range}."
         )
         return False
-    if not run_soundmouse_unisync(ctx, False, overwrite, logger):
-        return False
+    if not unisync_prepared:
+        if not run_soundmouse_unisync(ctx, False, overwrite, logger):
+            return False
+    else:
+        logger.info("  ↩ SoundMouse WAV acquisition reused from Step 5 batch.")
     if not download_soundmouse_covers(
         ctx.soundmouse_tracklist_csv, SOUNDMOUSE_BASE, False, overwrite, logger
     ):
         return False
 
     try:
-        codes = metadata_codes_from_bucket(ctx.soundmouse_bucket_csv)
+        codes = prepared_codes or metadata_codes_from_bucket(
+            ctx.soundmouse_bucket_csv
+        )
     except (OSError, ValueError) as exc:
         logger.error(f"  ✗ Could not read SoundMouse bucket export: {exc}")
         return False
@@ -623,7 +722,12 @@ def run_soundmouse_step(
         )
         return False
     logger.info(f"  SoundMouse metadata buckets: {', '.join(codes)}")
-    if not _export_domo_cards(ctx, _domo_configs(ctx, codes), False, logger):
+    try:
+        remove_stale_soundmouse_metadata(
+            ctx.soundmouse_release_dir / "Metadata", codes, False, logger
+        )
+    except OSError as exc:
+        logger.error(f"  ✗ Could not remove stale SoundMouse metadata: {exc}")
         return False
     metadata_paths = [
         ctx.soundmouse_release_dir / "Metadata" / metadata_filename(code)
