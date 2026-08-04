@@ -182,8 +182,10 @@ python3 upm_release_workflow.py ... --dry-run
   `--skip-soundexchange`, `--skip-sourceaudio`, `--skip-soundminer`,
   `--skip-nbc-mirror`, `--skip-non-maintrack-cleanup`, `--skip-rename`,
   `--skip-final-metadata-check`.
-- **Destructive actions are opt-in**: cleanup only deletes with
-  `--delete-non-maintracks`; folder overwrite requires `--overwrite`.
+- **Step 13 deletes by default on real runs**: non-main-track cleanup passes
+  `actually_delete = not args.dry_run`, so `--dry-run` is the preview/safety
+  guard. `--delete-non-maintracks` is deprecated and ignored; it remains only
+  so older commands do not error. Folder overwrite still requires `--overwrite`.
 - Soundminer steps run **unattended by default**; `--soundminer-attended` re-adds
   the settings-confirmation pauses.
 
