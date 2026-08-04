@@ -318,7 +318,12 @@ def _export_card(
         )
 
     # 1. Navigate to card detail
-    _navigate_to_card(page, card["card_id"], logger)
+    _navigate_to_card(
+        page,
+        card["card_id"],
+        logger,
+        page_id=card.get("page_id", DOMO_PAGE_ID),
+    )
 
     # 2. Set the date range.  In previous-month mode use Domo's built-in
     #    "Previous Month" preset; otherwise set the explicit Between range.
@@ -348,8 +353,14 @@ def _export_card(
         _xlsx_to_csv(xlsx_temp, output_path, logger)
 
 
-def _navigate_to_card(page, card_id: str, logger: logging.Logger) -> None:
-    url = f"https://{DOMO_INSTANCE}/page/{DOMO_PAGE_ID}/kpis/details/{card_id}"
+def _navigate_to_card(
+    page,
+    card_id: str,
+    logger: logging.Logger,
+    *,
+    page_id: str = DOMO_PAGE_ID,
+) -> None:
+    url = f"https://{DOMO_INSTANCE}/page/{page_id}/kpis/details/{card_id}"
     logger.info(f"     Navigating to card {card_id}…")
     page.evaluate(f"window.location.replace('{url}')")
     try:

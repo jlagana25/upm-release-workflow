@@ -11,7 +11,8 @@ the hard-won invariants that are easy to break.
 
 A modular Python automation for Universal Production Music's **twice-monthly
 release workflow** on macOS. One orchestrator (`upm_release_workflow.py`) runs
-**15 ordered steps** from Domo metadata exports through final partner packaging.
+**16 ordered steps** from Domo metadata exports through final partner packaging
+and the independent SoundMouse delivery.
 
 - **Part 1** of a month = releases dated the **1st–14th**.
 - **Part 2** = the **15th–end** of the month.
@@ -34,14 +35,14 @@ pipeline here — it will fail, and that failure means nothing about your code.*
 Specifically, these **cannot run in the sandbox** and must not be used as a
 validation signal:
 
-- **GUI automation** — Step 5 (UniSync) and Steps 11–12 (Soundminer) drive
+- **GUI automation** — Steps 5 and 16 (UniSync) and Steps 11–12 (Soundminer) drive
   desktop apps via `pyautogui` + `opencv` screen-matching. They need a real macOS
   GUI session, the apps installed, and per-machine reference screenshots. None
   exist here.
 - **Mounted storage** — every real input/output path is on two Thunderbolt
   volumes, `/Volumes/Pegasus32 R8 - 1` (Specials) and `/Volumes/Pegasus32 R8 - 2`
   (Hard Drive Updates). They are not present in the sandbox.
-- **Domo exports** — Step 1 drives an authenticated Domo browser session via
+- **Domo exports** — Steps 1 and 16 drive an authenticated Domo browser session via
   Playwright. Needs credentials and interactive login.
 - **DOCX→PDF** — Step 4 shells out to LibreOffice/Word.
 
@@ -114,7 +115,7 @@ with the three tools above.
 
 ---
 
-## 5. The 15 steps (and where things live)
+## 5. The 16 steps (and where things live)
 
 | Step | Name | Module | Runs in sandbox? |
 |------|------|--------|------------------|
@@ -130,11 +131,22 @@ with the three tools above.
 | 13 | Non-main-track cleanup | `cleanup.py` | Logic testable |
 | 14 | Rename NBC files | `cleanup.py` | Logic testable |
 | 15 | Final metadata cross-check | `final_metadata_verification.py` | Logic testable |
+| 16 | SoundMouse delivery | `soundmouse.py` | Data/filesystem logic testable; Domo + UniSync cannot run |
 
 Steps **10–15 are gated behind Step 9**: if verification fails on a real run
 (`finalize_blocked = verify_failed and not dry_run`), they're skipped. When Step 9
 is skipped entirely (e.g. `--start-at 13`), `verify_failed` defaults to `False`,
 so the finalization steps are **not** blocked.
+
+Step **16 is independent of the Step 9 gate**. It exports the SoundMouse
+tracklist and bucket, builds each safe `ActivationRange` directory, runs a WAV
+UniSync job into `MEDIA`, downloads flat covers, and exports only metadata
+workbooks selected by bucket codes 01–10. Those metadata exports remain XLSX,
+but Step 16 removes their Domo workbook formatting after download while keeping
+cell values, formulas, worksheet names, and workbook structure. Its final gate
+unions the audio and cover filenames across every selected metadata workbook,
+checks them against `MEDIA` and `Covers`, writes an auditable missing-items CSV,
+and fails Step 16 when a referenced file is absent.
 
 **SoundExchange note:** `split_se_ingest_forms.py` runs automatically as the
 **second phase of Step 10** via `run_soundexchange_split(ctx, dry_run, logger)`.
@@ -176,12 +188,12 @@ python3 upm_release_workflow.py ... --dry-run
 ```
 
 - **Selectors** (mutually exclusive): `--start-at <token>`, `--only <token>`.
-  Tokens come from `_STEP_UNITS` (e.g. `1,2,4,5,6,9,10,11,12,12.7,13,14,15`).
+  Tokens come from `_STEP_UNITS` (e.g. `1,2,4,5,6,9,10,11,12,12.7,13,14,15,16`).
 - **Per-step skips**: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
   `--skip-unisync`, `--skip-covers`, `--skip-verify`, `--skip-final-packaging`,
   `--skip-soundexchange`, `--skip-sourceaudio`, `--skip-soundminer`,
   `--skip-nbc-mirror`, `--skip-non-maintrack-cleanup`, `--skip-rename`,
-  `--skip-final-metadata-check`.
+  `--skip-final-metadata-check`, `--skip-soundmouse`.
 - **Destructive actions are opt-in**: cleanup only deletes with
   `--delete-non-maintracks`; folder overwrite requires `--overwrite`.
 - Soundminer steps run **unattended by default**; `--soundminer-attended` re-adds
@@ -295,4 +307,4 @@ saved. When proposing commits, follow these rules:
 
 ---
 
-_Last updated when SoundExchange was wired into Step 10 as its second phase._
+_Last updated when SoundMouse was added as independent Step 16._

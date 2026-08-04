@@ -29,7 +29,7 @@ MODULES = [
     "final_packaging", "cleanup", "audio_conversion", "domo_exports",
     "split_se_ingest_forms", "folder_setup", "album_list_doc", "soundminer",
     "make_soundminer_crops", "prune", "unisync_automation", "unisync_prefs",
-    "remote_runner", "upm_release_workflow",
+    "remote_runner", "soundmouse", "upm_release_workflow",
 ]
 
 failures: list[str] = []
@@ -74,6 +74,14 @@ def main() -> int:
               hasattr(ctx, "soundexchange_final_dir"))
         check("partner_metadata has SoundExchange xlsx",
               str(ctx.partner_metadata["soundexchange_mgb"]).endswith(".xlsx"))
+        check("SoundMouse tracklist uses exclusive end date",
+              ctx.soundmouse_tracklist_csv.name ==
+              "Soundmouse 05-01-26 to 05-15-26.csv")
+        check("SoundMouse ActivationRange uses inclusive end date",
+              ctx.soundmouse_activation_range ==
+              "2026-05-01_to_2026-05-14")
+        check("SoundMouse validation report is a CSV",
+              ctx.soundmouse_validation_report.suffix == ".csv")
     except Exception as exc:                           # noqa: BLE001
         check("ReleaseContext builds", False, repr(exc))
 
