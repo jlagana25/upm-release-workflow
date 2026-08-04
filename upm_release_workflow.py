@@ -26,6 +26,7 @@ Optional flags:
     --skip-non-maintrack-cleanup  Skip Step 13 (non-maintrack removal)
     --skip-rename                 Skip Step 14 (NBC filename rename)
     --skip-final-metadata-check   Skip Step 15 (final metadata cross-check)
+    --skip-soundmouse             Skip Step 16 (SoundMouse delivery)
     --start-at STEP / --only STEP Resume at / run only one step (see step list)
 """
 
@@ -419,6 +420,8 @@ def _render_final_summary(
         ("Non-maintrack cleanup",  _status_label(results.status("13 Non-maintrack cleanup"))),
         ("NBC filename rename",    _status_label(results.status("14 NBC rename"))),
         ("Final metadata check",   _status_label(results.status("15 Final metadata check"))),
+        ("SoundMouse",             _status_label(results.status("16 SoundMouse"))),
+        ("SoundMouse missing report", str(ctx.soundmouse_validation_report)),
         ("Log file",               str(log_path)),
         ("Overall status",         _status_label(overall)),
     ]
@@ -1037,6 +1040,24 @@ def run_workflow(args: argparse.Namespace) -> int:
                 results["15 Final metadata check"] = (
                     _ok(args.dry_run) if ok15 else _STEP_RESULT_STUB
                 )
+
+            # ---- Step 16: SoundMouse delivery --------------------------------------
+            # SoundMouse is an independent delivery and is intentionally not
+            # gated by the Step 9 Specials/HD verification result.
+            log_section(logger, "Step 16 — SoundMouse Delivery")
+            if args.skip_soundmouse:
+                log_step_skipped(logger, 16, "SoundMouse Delivery")
+                results["16 SoundMouse"] = _STEP_RESULT_SKIPPED
+            else:
+                log_step_start(logger, 16, "SoundMouse Delivery")
+                from soundmouse import run_soundmouse_step
+                ok16 = run_soundmouse_step(
+                    ctx, args.dry_run, args.overwrite, logger
+                )
+                log_step_end(logger, 16, "SoundMouse Delivery", ok16)
+                results["16 SoundMouse"] = (
+                    _ok(args.dry_run) if ok16 else _STEP_RESULT_FAILED
+                )
     except KeyboardInterrupt:
         logger.error("\n  ✗ Interrupted by user (Ctrl-C). Halting.")
         if not results.any_failed():
@@ -1084,6 +1105,7 @@ _STEP_UNITS = [
     ("13",   13.0, "skip_non_maintrack_cleanup", "Non-maintrack cleanup"),
     ("14",   14.0, "skip_rename",                "NBC rename"),
     ("15",   15.0, "skip_final_metadata_check",  "Final metadata cross-check"),
+    ("16",   16.0, "skip_soundmouse",            "SoundMouse delivery"),
 ]
 _STEP_TOKENS = [u[0] for u in _STEP_UNITS]
 
@@ -1106,6 +1128,7 @@ _ALL_SKIP_ATTRS = [
     "skip_covers", "skip_verify", "skip_final_packaging", "skip_soundexchange",
     "skip_sourceaudio", "skip_soundminer", "skip_nbc_mirror",
     "skip_non_maintrack_cleanup", "skip_rename", "skip_final_metadata_check",
+    "skip_soundmouse",
 ]
 
 
@@ -1226,6 +1249,9 @@ def build_parser() -> argparse.ArgumentParser:
     skips.add_argument("--skip-final-metadata-check",   action="store_true",
         help="Skip Step 15 (cross-check each 3-FINAL PACKAGING partner's "
              "metadata sheet against its media folder).")
+    skips.add_argument("--skip-soundmouse", action="store_true",
+        help="Skip Step 16 (SoundMouse Domo exports, folders, WAVs, covers, "
+             "and bucket-selected metadata sheets).")
     skips.add_argument("--rebuild-wav-covers",          action="store_true",
         help="Run the WAV w COVERS audio build (the Step 5 tail) even when "
              "--skip-unisync is set — e.g. the audio is already fetched but the "
