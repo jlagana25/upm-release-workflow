@@ -134,7 +134,8 @@ To recover:
 ## All flags
 
 `--year` `--month` `--part` · `--previous-month` · `--dry-run` · `--overwrite` ·
-`--delete-non-maintracks`
+`--delete-non-maintracks` (deprecated and ignored; retained only so old commands
+do not error)
 
 Per-step skips: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
 `--skip-unisync`, `--skip-covers`, `--skip-verify`, `--skip-final-packaging`,
@@ -649,7 +650,10 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
 ## General restart & safety notes
 
 - **Restart after a failure:** re-run the **same command**. Completed steps skip existing outputs; use the matching `--skip-*` flags to jump past phases you know are done and resume at the failed step.
-- **Dry-run everywhere first:** every step that writes supports `--dry-run` (or, for Step 11, defaults to dry-run unless `--delete-non-maintracks`). Use it.
+- **Dry-run everywhere first:** every step that writes supports `--dry-run`. In
+  particular, Step 13 deletes non-main tracks by default on every real run;
+  `--dry-run` is its preview/safety guard. `--delete-non-maintracks` is deprecated
+  and ignored (a compatibility no-op), so it does not enable or disable deletion.
 - **Volumes:** if anything fails with "permission denied" or "no such file" on `/Volumes/Pegasus32 R8 - 1`, check the volume is mounted before assuming a code bug — especially after a reboot.
 - **Soundminer is the only non-restartable-in-place step** in the sense that it drives a GUI; if interrupted, cancel any open dialog and re-run (use `--skip-*` to resume at embed/mirror).
 - **Keep the remote code in sync:** before any Step 12 run, make sure USMPSMDHDF1 has the current modules (verify by `wc -c` byte size against the pipeline machine). Stale remote copies caused several false failures historically.
