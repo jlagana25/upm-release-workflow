@@ -55,6 +55,7 @@ HD_FINAL_BASE = Path(
 MASTERS_COVERS_DIR = Path("/Volumes/Pegasus32 R8 - 1/UPM-US-Masters/Covers")
 UPM_CACHE_MP3 = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/MP3")
 UPM_CACHE_WAV = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/WAV")
+SOUNDMOUSE_BASE = Path("/Volumes/Pegasus32 R8 - 2/SoundMouse")
 
 # ---------------------------------------------------------------------------
 # Fixed user-side paths
@@ -75,6 +76,7 @@ MISSING_COVER_REPORT = Path("/Volumes/UPM Builds/Missing_CDCover_Downloads.csv")
 
 DOMO_INSTANCE = "umusic-publishing.domo.com"
 DOMO_PAGE_ID = "117808327"
+SOUNDMOUSE_DOMO_PAGE_ID = "1225470481"
 
 DOMO_CARDS: dict[str, str] = {
     "us_tracklist":     "1384111004",
@@ -99,6 +101,23 @@ DOMO_CARDS: dict[str, str] = {
     "japan_jmdtss_metadata": "272055256",   # exported as .xlsx (not CSV)
     "soundexchange_mgb":     "700921386",
     "soundexchange_ztunes":  "583310488",
+}
+
+# SoundMouse is a self-contained Step 16.  Its bucket card determines which
+# of the ten territory-specific metadata workbooks are required for a run.
+SOUNDMOUSE_DOMO_CARDS: dict[str, str] = {
+    "tracklist": "1928643877",
+    "bucket": "471892560",
+    "01": "491141478",
+    "02": "2122953228",
+    "03": "1047392342",
+    "04": "1779722120",
+    "05": "674513648",
+    "06": "248457036",
+    "07": "108032482",
+    "08": "430369583",
+    "09": "91106427",
+    "10": "1228428287",
 }
 
 # ---------------------------------------------------------------------------
@@ -387,6 +406,37 @@ class ReleaseContext:
             TRACKLISTS_DIR
             / "Album Lists"
             / f"UPM-US-{self.tracklist_token}-AlbumList.csv"
+        )
+
+        # ---- Step 16: SoundMouse -------------------------------------------
+        # SoundMouse's human-facing tracklist name uses an exclusive upper
+        # bound (e.g. a June full-month export is 06-01-26 to 07-01-26), while
+        # Domo and ActivationRange use the normal inclusive release_end.
+        from datetime import date as _sm_date, timedelta as _sm_timedelta
+        _sm_end_exclusive = (
+            _sm_date.fromisoformat(self.release_end) + _sm_timedelta(days=1)
+        )
+        _sm_name_start = _sm_date.fromisoformat(self.release_start).strftime(
+            "%m-%d-%y"
+        )
+        _sm_name_end = _sm_end_exclusive.strftime("%m-%d-%y")
+        self.soundmouse_tracklist_csv = (
+            TRACKLISTS_DIR / "SoundMouse"
+            / f"Soundmouse {_sm_name_start} to {_sm_name_end}.csv"
+        )
+        self.soundmouse_bucket_csv = (
+            TRACKLISTS_DIR / "SoundMouse"
+            / f"Soundmouse Bucket {_sm_name_start} to {_sm_name_end}.csv"
+        )
+        self.soundmouse_activation_range = (
+            f"{self.release_start}_to_{self.release_end}"
+        )
+        self.soundmouse_release_dir = (
+            SOUNDMOUSE_BASE / self.soundmouse_activation_range
+        )
+        self.soundmouse_validation_report = (
+            EXPORTS_DIR
+            / f"SoundMouse {self.soundmouse_activation_range}_Missing.csv"
         )
 
         _japan_folder = f"UPM Japan NTT DATA {self.month_display_folder} Release"

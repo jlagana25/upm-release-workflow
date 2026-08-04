@@ -58,6 +58,7 @@ Preflight → 1 Domo exports → 2/3 Folder setup → 4 Album list DOCX/PDF →
 5 UniSync → 6–8 Covers → 9 Verification → 10 Final packaging (+ SoundExchange forms) →
 11 SourceAudio AIFF → 12 Soundminer → 12.7 NBC WAV→MP3 →
 13 Non-maintrack cleanup → 14 NBC rename → 15 Final metadata cross-check →
+16 SoundMouse delivery →
 Final summary.
 
 Steps 10–15 are gated behind the Step 9 verification: if verification fails the
@@ -139,11 +140,11 @@ Per-step skips: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
 `--skip-unisync`, `--skip-covers`, `--skip-verify`, `--skip-final-packaging`,
 `--skip-soundexchange`, `--skip-sourceaudio`, `--skip-soundminer`,
 `--skip-nbc-mirror`, `--skip-non-maintrack-cleanup`, `--skip-rename`,
-`--skip-final-metadata-check`.
+`--skip-final-metadata-check`, `--skip-soundmouse`.
 
 Step selectors (mutually exclusive): `--start-at STEP` resumes at a step and runs
 to the end; `--only STEP` runs just that step. Valid STEP tokens:
-`1, 2, 4, 5, 6, 9, 10, 11, 12, 12.7, 13, 14, 15` (e.g. `--only 15` runs only the
+`1, 2, 4, 5, 6, 9, 10, 11, 12, 12.7, 13, 14, 15, 16` (e.g. `--only 15` runs only the
 final metadata cross-check; `--start-at 12.7` resumes at NBC WAV→MP3).
 
 ---
@@ -559,7 +560,38 @@ Validates the SoundExchange export → ISRC ingest-form split (`split_se_ingest_
 
 ---
 
-## 16. Full end-to-end test
+## 16. SoundMouse delivery test (Step 16)
+
+Validates the separate SoundMouse delivery: tracklist + bucket exports,
+ActivationRange folders, WAV download, flat covers, and only the metadata
+workbooks selected by the bucket.
+
+- **Offline logic test:**
+  ```bash
+  python3 -m unittest test_soundmouse.py
+  ```
+- **Preview / real commands:**
+  ```bash
+  python3 upm_release_workflow.py --previous-month --only 16 --dry-run
+  python3 upm_release_workflow.py --previous-month --only 16
+  ```
+- **Expected full-month naming (June 2026 example):**
+  - Tracklist: `Soundmouse 06-01-26 to 07-01-26.csv` (exclusive upper bound).
+  - Delivery: `2026-06-01_to_2026-06-30/{MEDIA,Covers,Metadata}` (inclusive range).
+  - Metadata contains only the `SoundMouseMetadata NN - … .xlsx` files named
+    by the SoundMouse bucket card. Each remains an XLSX workbook, but its Domo
+    formatting is removed; values, formulas, and worksheet names are retained.
+  - The final SoundMouse validation unions every `Filename` and album-artwork
+    filename across those selected workbooks and confirms they exist under
+    `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in
+    `SoundMouse <ActivationRange>_Missing.csv`; a clean report is header-only.
+- **Part naming:** Part 1 uses `06-01-26 to 06-15-26`; Part 2 uses
+  `06-15-26 to 07-01-26`. The corresponding ActivationRange directories remain
+  inclusive (`01_to_14` and `15_to_30`).
+
+---
+
+## 17. Full end-to-end test
 
 The real thing: all steps in order, through the orchestrator. Do a complete **dry-run first**, then the real run.
 
@@ -584,7 +616,7 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
   python3 upm_release_workflow.py --year 2026 --month 5 --part 1
   ```
   Run from the Soundminer machine, Step 12 runs **inline with no pause** — the
-  whole pipeline (1–15) completes in one pass. Confirm the run header shows
+  whole pipeline (1–16) completes in one pass. Confirm the run header shows
   `Machine: USMPSMDHDF1 (Soundminer machine)` and `Step 12 mode: inline`. Same
   Soundminer prerequisites as Test 11 apply (Accessibility + Screen Recording,
   crops, CSV, staged WAVs, current code).

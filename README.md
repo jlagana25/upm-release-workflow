@@ -1,7 +1,7 @@
 # UPM Release Workflow
 
 Automation for the twice-monthly Universal Production Music release process on
-macOS — Domo exports through final packaging, in 15 ordered steps driven by a
+macOS — Domo exports through final packaging, in 16 ordered steps driven by a
 single orchestrator (`upm_release_workflow.py`).
 
 ## Machines
@@ -38,6 +38,7 @@ python3 upm_release_workflow.py --previous-month                     # full prio
 python3 upm_release_workflow.py --previous-month --dry-run           # preview, no writes
 python3 upm_release_workflow.py --list-steps                         # the canonical step list
 python3 upm_release_workflow.py --previous-month --only 15           # run one step
+python3 upm_release_workflow.py --previous-month --only 16           # SoundMouse only
 python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --start-at 12.7
 ```
 
@@ -106,6 +107,12 @@ Then the other machine installs with `pip install -r requirements.lock`.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`.
+- `soundmouse.py` — Step 16: SoundMouse tracklist/bucket exports, release
+  directories, WAVs, covers, and bucket-selected metadata workbooks. Metadata
+  remains XLSX but all downloaded workbook formatting is removed automatically.
+  The step then validates every audio and cover filename referenced across the
+  selected metadata workbooks and fails with a missing-items CSV if needed.
+  Also runnable standalone with the normal date flags and `--dry-run`.
 - `split_se_ingest_forms.py` — SoundExchange metadata → ISRC ingest-form workbooks.
   Runs **automatically as the second phase of Step 10** (final packaging) in a
   full pipeline run; also runnable standalone (`python3 split_se_ingest_forms.py
