@@ -272,14 +272,13 @@ def _soundminer_handoff(
     if dests is None:
         dests = [ctx.partner_dirs["nbc_wav_music"]]
     # Build the exact command for the operator to run on the Soundminer Mac.
-    # We always pin the RESOLVED --year/--month/--part so it targets this run's
-    # exact folders regardless of what date it's run on.  (We deliberately do
-    # NOT pass a bare --previous-month: if the operator ran it on a later date
-    # it would resolve to a different month than the pipeline targeted.)
+    # pinned_cli_args() preserves a resolved Full/Part context regardless of
+    # what date the hand-off command is eventually run.
     if sm_cmd is None:
+        pinned_args = " ".join(ctx.pinned_cli_args())
         sm_cmd = (
             f"python3 soundminer.py --nbc "
-            f"--year {ctx.year} --month {ctx.month} --part {ctx.part}"
+            f"{pinned_args}"
         )
 
     logger.info("")
@@ -293,9 +292,8 @@ def _soundminer_handoff(
     logger.info(f"  │      cd {repo!r}")
     logger.info(f"  │      {sm_cmd}")
     if getattr(ctx, "previous_month", False):
-        logger.info("  │      (previous-month run → targets the full month "
-                    f"{ctx.month_display}; '--part 1' selects the same")
-        logger.info("  │       folders, which have no Part suffix.)")
+        logger.info("  │      (pinned previous-month command → targets "
+                    f"{ctx.month_display} Full regardless of run date.)")
     logger.info(f"  │ 3. Watch it through {what}; answer prompts.")
     logger.info("  │ 4. When it reports success, return here and press Enter.")
     logger.info("  │")
@@ -409,7 +407,7 @@ def _render_final_summary(
     rows: list[tuple[str, str]] = [
         ("Year",                   str(ctx.year)),
         ("Month",                  f"{ctx.month_name} {ctx.year_str}"),
-        ("Part",                   str(ctx.part)),
+        ("Release type",           "Full" if ctx.is_full_month else f"Part {ctx.part}"),
         ("Release date range",     f"{ctx.release_start} → {ctx.release_end}"),
         ("Domo exports",           _status_label(results.status("1 Domo exports"))),
         ("Specials folder",        _status_label(results.status("2 Specials folder"))),
@@ -504,7 +502,11 @@ def run_workflow(args: argparse.Namespace) -> int:
 
     # ---- Set up logging -----------------------------------------------------
     logger, log_path = get_logger(
-        ctx.year, ctx.month, ctx.part, write_file=not args.dry_run
+        ctx.year,
+        ctx.month,
+        ctx.part,
+        write_file=not args.dry_run,
+        release_label="Full" if ctx.is_full_month else None,
     )
 
     log_section(logger, "UPM Release Workflow")
@@ -1064,9 +1066,10 @@ def run_workflow(args: argparse.Namespace) -> int:
                             "only covers the NBC step; SourceAudio uses the manual "
                             "hand-off."
                         )
+                    pinned_args = " ".join(ctx.pinned_cli_args())
                     sa_cmd = (
                         f"python3 soundminer.py --sourceaudio "
-                        f"--year {ctx.year} --month {ctx.month} --part {ctx.part}"
+                        f"{pinned_args}"
                     )
                     if str(args.sourceaudio_db_shortcut) != "8":
                         sa_cmd += (
@@ -1514,7 +1517,7 @@ def build_parser() -> argparse.ArgumentParser:
              "default the previous month is relative to today; pass --year/"
              "--month to compute it relative to a specific month instead.  "
              "Domo uses its built-in 'Previous Month' preset and all folders "
-             "use the plain 'Month YYYY' naming.",
+             "use explicit 'Month YYYY Full' naming.",
     )
 
     # Safety flags

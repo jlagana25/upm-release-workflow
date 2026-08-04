@@ -38,6 +38,7 @@ def get_logger(
     log_dir: Path | None = None,
     *,
     write_file: bool = True,
+    release_label: str | None = None,
 ) -> tuple[logging.Logger, Path | None]:
     """
     Create (or retrieve) the logger for one workflow run.
@@ -50,16 +51,17 @@ def get_logger(
     if log_dir is None:
         log_dir = _DEFAULT_LOG_DIR
 
-    key = f"{year}-{month:02d}-p{part}-{'file' if write_file else 'console'}"
+    variant = release_label or f"Part{part}"
+    key = f"{year}-{month:02d}-{variant}-{'file' if write_file else 'console'}"
     if key in _ACTIVE_LOGGERS:
         return _ACTIVE_LOGGERS[key]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"UPM_Workflow_{year}-{month:02d}_Part{part}_{timestamp}.log"
+    log_filename = f"UPM_Workflow_{year}-{month:02d}_{variant}_{timestamp}.log"
     log_path = (log_dir / log_filename) if write_file else None
 
     logger = logging.getLogger(
-        f"upm_workflow.{year}.{month:02d}.{part}."
+        f"upm_workflow.{year}.{month:02d}.{variant}."
         f"{'file' if write_file else 'console'}"
     )
     logger.setLevel(logging.DEBUG)

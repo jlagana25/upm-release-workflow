@@ -95,8 +95,11 @@ missing-report path, the log-file path, and the overall status).
 ## A previous-month release (full month, no Part split)
 
 Use this for the monthly full-month export. It covers the whole prior calendar
-month (1st → last day), names folders with the plain "Month YYYY" form (no Part
-suffix), and tells Domo to use its built-in **"Previous Month"** preset.
+month (1st → last day), names folders with the explicit "Month YYYY Full" form,
+and tells Domo to use its built-in **"Previous Month"** preset. For example, a
+July run performed in August is named
+`Universal Production Music July 2026 Full Release`; the run date does not
+change the release name.
 
 ```bash
 # Auto — previous month relative to today's date:
@@ -656,9 +659,10 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
   python3 upm_release_workflow.py --previous-month               # real run
   ```
   Confirm the header shows the correct prior month and a `2026-05-01 → 2026-05-31`
-  full-month range, folders use the plain "Month YYYY" form (no Part suffix), and
+  full-month range, folders use the explicit "Month YYYY Full" form, and
   Domo uses its "Previous Month" preset. Inspect the same deliverables as below,
-  under the plain-named folders (e.g. `UPM-2026-05`, `… May 2026 Release - NBC`).
+  under the full-release folders (e.g. `UPM-2026-05_FULL`,
+  `… May 2026 Full Release - NBC`).
 - **Expected output:**
   - Each step logs start → end with a status; no `✗ FAILED` lines.
   - Final summary shows the full field list, every requested step `✓ completed` (Soundminer/MP3/rename `✓` after the hand-off or inline run), `Overall status: ✓ completed`, exit code `0`.

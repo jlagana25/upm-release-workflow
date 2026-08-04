@@ -34,9 +34,30 @@ class SoundMouseTests(unittest.TestCase):
             "Soundmouse 06-01-26 to 07-01-26.csv",
         )
         self.assertEqual(full.soundmouse_activation_range, "2026-06-01_to_2026-06-30")
+        self.assertEqual(full.tracklist_token, "Jun2026-Full")
+        self.assertEqual(full.month_display_folder, "June 2026 Full")
+        self.assertEqual(full.specials_root, "UPM-2026-06_FULL")
+        self.assertEqual(full.hd_folder, "2026-06 (June Full)")
+        self.assertEqual(
+            full.pinned_cli_args(),
+            ["--previous-month", "--year", "2026", "--month", "7"],
+        )
+        self.assertEqual(
+            full.cleanup_target_folder.parent.name,
+            "Universal Production Music June 2026 Full Release - Tunesat",
+        )
 
         part1 = ReleaseContext(2026, 6, 1)
         part2 = ReleaseContext(2026, 6, 2)
+        self.assertEqual(
+            part2.pinned_cli_args(),
+            ["--year", "2026", "--month", "6", "--part", "2"],
+        )
+        december_full = ReleaseContext(2026, 12, 1, previous_month=True)
+        self.assertEqual(
+            december_full.pinned_cli_args(),
+            ["--previous-month", "--year", "2027", "--month", "1"],
+        )
         self.assertEqual(part1.soundmouse_tracklist_csv.name, "Soundmouse 06-01-26 to 06-15-26.csv")
         self.assertEqual(part2.soundmouse_tracklist_csv.name, "Soundmouse 06-15-26 to 07-01-26.csv")
 
