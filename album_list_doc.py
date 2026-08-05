@@ -192,6 +192,13 @@ def _build_docx(
             doc, PLACEHOLDER, ctx.month_display_text
         )
         logger.info(f"  Replaced {n_replaced} placeholder run(s).")
+        if n_replaced == 0:
+            n_migrated = _replace_legacy_release_label(doc, ctx)
+            if n_migrated:
+                logger.info(
+                    f"  Migrated {n_migrated} legacy release-label run(s) "
+                    f"to {ctx.month_display_text!r}."
+                )
 
         n_removed = _remove_existing_tables(doc)
         if n_removed:
@@ -258,6 +265,40 @@ def _replace_placeholder_in_doc(doc, placeholder: str, replacement: str) -> int:
             except Exception:
                 pass
 
+    return count
+
+
+def _replace_legacy_release_label(doc, ctx: ReleaseContext) -> int:
+    """Upgrade an already-generated document to explicit Part/Full wording.
+
+    Once Step 4 has consumed ``MMMM YYYY``, a later naming migration cannot use
+    the placeholder path again.  Restrict this fallback to body paragraphs and
+    headers/footers (never album-table cells) so a legitimate album title that
+    contains the month is not altered.
+    """
+    if ctx.month_display_text == ctx.month_display:
+        return 0
+    legacy = f"{ctx.month_display} Release"
+    replacement = f"{ctx.month_display_text} Release"
+    count = 0
+    for paragraph in doc.paragraphs:
+        count += _replace_in_paragraph(paragraph, legacy, replacement)
+    for section in doc.sections:
+        for hf in (
+            section.header,
+            section.footer,
+            section.even_page_header,
+            section.even_page_footer,
+            section.first_page_header,
+            section.first_page_footer,
+        ):
+            try:
+                for paragraph in hf.paragraphs:
+                    count += _replace_in_paragraph(
+                        paragraph, legacy, replacement
+                    )
+            except Exception:
+                pass
     return count
 
 

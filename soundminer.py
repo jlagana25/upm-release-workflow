@@ -26,12 +26,10 @@ Substeps (matching the workflow spec):
         timeout safety net).
 
   12.6  Database → Mirror to open the Mirror Settings dialog.  Soundminer
-        retains these settings between runs, so the dialog should already
-        be configured.  By default we pause for human verification of the
-        dialog contents (saved as a screenshot to the failure-log folder
-        for the operator to inspect).  In --unattended mode the pause is
-        skipped and Enter is sent to accept whatever Soundminer currently
-        shows.
+        retains one global settings state between runs, so the workflow
+        explicitly applies the complete NBC profile before every mirror.
+        In --attended mode the operator may review the applied values before
+        continuing; unattended mode uses the verified automated profile.
 
         Required settings for the NBC (Broadcast Wave) mirror:
           Final File Type: Broadcast Wave
@@ -84,7 +82,9 @@ Prerequisites:
 
 from __future__ import annotations
 
+import csv
 import logging
+import math
 import subprocess
 import time
 from datetime import datetime
@@ -117,6 +117,7 @@ SCREENSHOTS_DIR = _FILES_DIR / "screenshots" / current_hostname()
 DEBUG_STEP_DIR = _REPO_ROOT / "_logs" / "soundminer_debug_steps"
 
 FAILURE_SCREENSHOTS_DIR = _REPO_ROOT / "_logs" / "soundminer_failures"
+RUNTIME_DIR = _REPO_ROOT / "_logs" / "soundminer_runtime"
 
 # Timeouts (seconds).  Soundminer operations vary widely with catalog size;
 # these are generous ceilings rather than tight bounds.  Override per-run
@@ -202,6 +203,70 @@ class _SoundminerError(RuntimeError):
     """Raised when a Soundminer UI step doesn't reach its expected state."""
 
 
+def _prepare_nbc_import_csv(
+    csv_path: Path,
+    logger: logging.Logger,
+) -> Path:
+    """Create a Soundminer-safe copy without Domo summary/footer rows.
+
+    NBC's Domo export currently ends with ``GRAND TOTAL`` in the Filename
+    column.  Soundminer interprets every data row as a soundfile, so importing
+    the raw export produces a misleading scan-failure log after all real audio
+    has loaded.  Preserve the canonical export and write a disposable runtime
+    copy containing the header and real track rows only.
+    """
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = RUNTIME_DIR / f"{csv_path.stem}-soundminer.csv"
+    temp_path = output_path.with_suffix(".csv.tmp")
+
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
+        rows = list(csv.reader(source))
+    if not rows:
+        raise _SoundminerError(f"NBC metadata CSV is empty: {csv_path}")
+
+    header = rows[0]
+    try:
+        filename_index = next(
+            index for index, value in enumerate(header)
+            if value.strip().casefold() == "filename"
+        )
+    except StopIteration as exc:
+        raise _SoundminerError(
+            f"NBC metadata CSV has no Filename column: {csv_path}"
+        ) from exc
+
+    kept_rows = [header]
+    removed_lines: list[int] = []
+    for line_number, row in enumerate(rows[1:], start=2):
+        filename = (
+            row[filename_index].strip()
+            if filename_index < len(row)
+            else ""
+        )
+        if filename.casefold() == "grand total":
+            removed_lines.append(line_number)
+            continue
+        kept_rows.append(row)
+
+    with temp_path.open("w", encoding="utf-8-sig", newline="") as target:
+        csv.writer(target).writerows(kept_rows)
+    temp_path.replace(output_path)
+
+    track_count = len(kept_rows) - 1
+    if removed_lines:
+        logger.info(
+            f"  Prepared Soundminer import CSV: {track_count} track row(s); "
+            f"removed GRAND TOTAL footer at line(s) "
+            f"{', '.join(map(str, removed_lines))}."
+        )
+    else:
+        logger.info(
+            f"  Prepared Soundminer import CSV: {track_count} track row(s); "
+            "no summary footer found."
+        )
+    return output_path
+
+
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
@@ -279,18 +344,18 @@ def run_soundminer_nbc_workflow(
                            run without any "press Enter" prompts: scan/import/
                            embed completion is detected by watching the
                            Soundminer UI settle, the blocking dupes / unmatched-
-                           fields dialogs are auto-OK'd, and the Mirror Settings
-                           dialog is auto-accepted (its settings persist between
-                           releases).  Pass attended (orchestrator:
+                           fields dialogs are auto-OK'd, and the complete NBC
+                           Mirror Settings profile is applied automatically.
+                           Pass attended (orchestrator:
                            --soundminer-attended, soundminer.py: --attended) to
                            restore the supervised pauses — useful for a first
                            run on a new machine to eyeball the mirror settings.
     skip_*               : Individual phase skips for restart/recovery.
     manual_verify_mirror_settings :
                            Override the default (which is `not unattended`).
-                           When True, pause for human inspection of the
-                           Mirror Settings dialog.  When False, send Enter
-                           to accept whatever the dialog currently shows.
+                           When True, pause for human inspection after the
+                           automated profile is applied.  When False, continue
+                           with the automatically configured values.
 
     Returns True on full success; False on any hard failure.
     """
@@ -341,6 +406,23 @@ def run_soundminer_nbc_workflow(
         )
         return False
     mirror_dest.mkdir(parents=True, exist_ok=True)
+    expected_wav_count = sum(
+        1 for path in audio_folder.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".wav"
+    )
+    existing_wav_count = sum(
+        1 for path in mirror_dest.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".wav"
+    )
+    if 0 < existing_wav_count < expected_wav_count:
+        logger.error(
+            f"  ✗  NBC mirror destination is partial: "
+            f"{existing_wav_count}/{expected_wav_count} WAV files.\n"
+            f"     Soundminer's Skip Existing mode cannot reliably resume a "
+            f"partial NBC batch. Archive the partial WAV tree and recreate "
+            f"an empty destination before retrying the mirror."
+        )
+        return False
 
     # ---- Preflight: tooling -----------------------------------------------
     if not verify_screenshots(logger):
@@ -369,7 +451,8 @@ def run_soundminer_nbc_workflow(
         if skip_import:
             logger.info("  ↩  Skipping 12.4 import metadata (per flag).")
         else:
-            _import_metadata(csv_path, audio_folder, logger,
+            import_csv = _prepare_nbc_import_csv(csv_path, logger)
+            _import_metadata(import_csv, audio_folder, logger,
                              unattended=unattended)
 
         if skip_embed:
@@ -384,13 +467,20 @@ def run_soundminer_nbc_workflow(
 
         _select_all_records(logger)
         _open_mirror_dialog(logger)
+        mirror_bounds = _configure_mirror_settings("nbc", logger)
         _verify_mirror_settings_dialog(
             logger,
             manual_verify=manual_verify_mirror_settings,
         )
-        _click_mirror_ok(logger)
+        _click_mirror_ok(logger, mirror_bounds)
         _navigate_mirror_destination(mirror_dest, logger)
-        _wait_for_mirror_complete(mirror_dest, logger)
+        _wait_for_mirror_complete(
+            mirror_dest,
+            logger,
+            output_exts=("wav",),
+            reject_exts=("aif", "aiff"),
+            expected_count=expected_wav_count,
+        )
 
         logger.info("  ✓  Step 12 complete — NBC mirror finished.")
         return True
@@ -433,7 +523,7 @@ SOURCEAUDIO_MIRROR_SETTINGS = (
     "          Destination Folder Structure:       Build Using Library then Volume\n"
     "          File Exists Behavior:               Skip Existing\n"
     "          CPU Usage:                          1\n"
-    "          Filename Scheme:                    Filename:1\n"
+    "          Filename Scheme:                    <Filename:1>\n"
     "          Use mono(.M) extension:             ON\n"
     "          Filename Limit:                     255\n"
     "          Strip illegal characters:           ON\n"
@@ -443,6 +533,60 @@ SOURCEAUDIO_MIRROR_SETTINGS = (
 )
 
 SOURCEAUDIO_OUTPUT_EXTS = ("aif", "aiff")
+
+# Soundminer has one global Mirror Settings state shared by every database.
+# These profiles are therefore APPLIED before every mirror rather than merely
+# documented or assumed to have persisted from a previous run.
+MIRROR_PROFILES = {
+    "sourceaudio": {
+        "label": "SourceAudio AIFF",
+        "final_file_type": "AIFF",
+        "final_file_type_index": 2,
+        "destination_structure": "Build Using Library then Volume",
+        "destination_structure_index": 11,
+        "filename_scheme": "<Filename:1>",
+    },
+    "nbc": {
+        "label": "NBC Broadcast Wave",
+        "final_file_type": "Broadcast Wave",
+        "final_file_type_index": 1,
+        "destination_structure": "Mirror Source Folder Structure",
+        "destination_structure_index": 17,
+        "filename_scheme": "<Source:1>_<TrackTitle:2>",
+    },
+}
+
+# Normalized control centres measured relative to the Soundminer 5.0v560
+# Mirror Settings window.  The dialog scales with the display, so normalized
+# positions remain stable across the two HDF Macs' display modes.
+_MIRROR_CONTROL_POINTS = {
+    "final_file_type":       (0.66, 0.12),
+    "interleaved":           (0.36, 0.162),
+    "sum_to_mono":           (0.36, 0.203),
+    "decode_ms":             (0.36, 0.245),
+    "copy_markers":          (0.36, 0.286),
+    "embed_metadata":        (0.36, 0.328),
+    "destination_structure": (0.66, 0.370),
+    "file_exists_behavior":  (0.66, 0.412),
+    "cpu_usage":             (0.66, 0.454),
+    "filename_scheme":       (0.66, 0.532),
+    "mono_extension":        (0.36, 0.573),
+    "filename_limit":        (0.66, 0.615),
+    "strip_illegal":         (0.36, 0.656),
+    "use_source_format":     (0.36, 0.735),
+    "ok":                    (0.90, 0.954),
+}
+
+_MIRROR_CHECKBOX_STATES = {
+    "interleaved":       True,
+    "sum_to_mono":       False,
+    "decode_ms":         False,
+    "copy_markers":      False,
+    "embed_metadata":    True,
+    "mono_extension":    True,
+    "strip_illegal":     True,
+    "use_source_format": True,
+}
 
 
 def _switch_to_sourceaudio(
@@ -558,9 +702,9 @@ def run_soundminer_sourceaudio_workflow(
       2. 2-STAGING/SME WAV ExUS/MEDIA  → …Release - SourceAudio Ex-US/Music
 
     The mirror uses the SourceAudio settings (AIFF, Build Using Library then
-    Volume, Filename:1, etc.).  Soundminer persists ONE set of mirror settings
-    between releases, so by default (unattended) we auto-accept the Mirror
-    Settings dialog; the settings from the first pass carry to the second.
+    Volume, <Filename:1>, etc.).  Soundminer persists ONE set of mirror settings
+    globally, including the incompatible Broadcast Wave settings used by Step
+    12, so Step 11 explicitly applies its complete profile before every mirror.
     Before each mirror we ⌘A select-all so the whole scanned database is
     mirrored.  This step runs inline on the Soundminer machine and, in a full
     run, is followed immediately by Step 12 (NBC) with no hand-off.
@@ -601,6 +745,30 @@ def run_soundminer_sourceaudio_workflow(
     if manual_verify_mirror_settings is None:
         manual_verify_mirror_settings = not unattended
 
+    # Fail before touching the Soundminer database if a previous attempt wrote
+    # WAVs into either AIFF-only SourceAudio destination.  Otherwise the normal
+    # "Skip Existing" mirror behavior and extension-specific completion poll
+    # can conceal a wrong-format delivery.
+    wrong_output_found = False
+    for tag, _src, dest in pairs:
+        if not dest.exists():
+            continue
+        wav_count = sum(
+            1 for path in dest.rglob("*")
+            if path.is_file() and path.suffix.lower() == ".wav"
+        )
+        if wav_count:
+            logger.error(
+                f"  ✗  SourceAudio {tag} destination contains {wav_count} "
+                f"WAV file(s), but Step 11 requires AIFF:\n"
+                f"     {dest}\n"
+                f"     Archive or remove the wrong-format output before "
+                f"re-running."
+            )
+            wrong_output_found = True
+    if wrong_output_found:
+        return False
+
     DEBUG_STEP_DIR.mkdir(parents=True, exist_ok=True)
     FAILURE_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -639,18 +807,29 @@ def run_soundminer_sourceaudio_workflow(
 
             _select_all_records(logger)
             _open_mirror_dialog(logger)
+            mirror_bounds = _configure_mirror_settings("sourceaudio", logger)
             _verify_mirror_settings_dialog(
                 logger,
                 manual_verify=manual_verify_mirror_settings,
                 expected_text=SOURCEAUDIO_MIRROR_SETTINGS,
             )
-            _click_mirror_ok(logger)
+            _click_mirror_ok(logger, mirror_bounds)
             _navigate_mirror_destination(dest, logger)
-            _wait_for_mirror_complete(dest, logger, output_exts=SOURCEAUDIO_OUTPUT_EXTS)
+            _wait_for_mirror_complete(
+                dest,
+                logger,
+                output_exts=SOURCEAUDIO_OUTPUT_EXTS,
+                reject_exts=("wav",),
+                expected_count=sum(
+                    1 for path in source.rglob("*")
+                    if path.is_file() and path.suffix.lower() == ".wav"
+                ),
+            )
             logger.info(f"  ✓  SourceAudio {tag} mirror finished → {dest}")
 
-            # Only the FIRST pass needs the attended settings check; the
-            # settings (and DB selection) persist for the second pass.
+            # Only the FIRST pass needs an optional attended review.  The full
+            # SourceAudio profile is still explicitly re-applied above for the
+            # second pass rather than trusting persisted state.
             manual_verify_mirror_settings = False
 
         if overall_ok:
@@ -831,18 +1010,35 @@ def _import_metadata(
     # Auto-dismiss them (best-effort; operator handles any during the wait).
     _watch_and_dismiss_import_dialogs(logger)
 
-    # Wait for the import to complete.  Soundminer gives no external "done"
-    # signal, so we watch the UI settle — and keep auto-OK'ing the blocking
-    # "Unmatched Fields" / "Check for Dupes Warning" dialogs the whole time,
-    # since they can appear a little after the panels rather than instantly.
+    # Soundminer does not expose a machine-readable imported-record count.
+    # Its canvas can also remain visually static while records are still being
+    # processed, which made the old two-minute idle fallback advance through a
+    # partial import.  Give unattended imports a conservative floor scaled to
+    # the staged file count; the exact mirror-count gate remains the final
+    # correctness check.
+    expected_records = sum(
+        1 for path in audio_folder.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".wav"
+    )
+    safe_wait_minutes = min(30, max(3, math.ceil(expected_records / 480)))
+
+    def _import_poll_guard() -> bool:
+        dismissed = _dismiss_import_dialogs_once(logger)
+        _raise_if_soundminer_log_window(logger, phase="import")
+        return dismissed
+
+    # Wait for the import to complete and keep auto-OK'ing the two expected
+    # confirmation dialogs.  Any Soundminer Log Window is a hard stop: it must
+    # be investigated rather than silently continuing into embed/mirror.
     _wait_with_manual_handshake(
         phase_label  = "import",
-        soft_minutes = 2,                   # log "still importing…" after this
+        soft_minutes = safe_wait_minutes,
         hard_timeout = IMPORT_TIMEOUT,
         unattended   = unattended,
         logger       = logger,
-        on_poll      = lambda: _dismiss_import_dialogs_once(logger),
+        on_poll      = _import_poll_guard,
     )
+    _raise_if_soundminer_log_window(logger, phase="import")
     logger.info("        ✓ Import complete.")
 
 
@@ -884,12 +1080,12 @@ def _select_all_and_embed(
         hard_timeout = EMBED_TIMEOUT,
         unattended   = unattended,
         logger       = logger,
+        on_poll      = lambda: _raise_if_soundminer_log_window(
+            logger, phase="embed"
+        ),
     )
 
-    # After embed, a log window may list files that were not scanned (e.g.
-    # "Scan Failure (Unable to locate soundfile)").  Surface it with guidance
-    # — these usually mean the audio files aren't where the CSV expects them.
-    _report_embed_log_window(logger)
+    _raise_if_soundminer_log_window(logger, phase="embed")
     logger.info("        ✓ Embed complete.")
 
 
@@ -928,6 +1124,276 @@ def _open_mirror_dialog(logger: logging.Logger) -> None:
             "          if the dialog did not actually open.)"
         )
     _save_step_screenshot("12_6a_mirror_dialog_open", logger)
+
+
+def _mirror_dialog_bounds(
+    logger: logging.Logger,
+) -> tuple[int, int, int, int]:
+    """Return ``(left, top, width, height)`` for Mirror Settings.
+
+    Prefer the Accessibility window geometry.  Soundminer 5's modal is not
+    exposed as a separate window on every macOS build, so retain a guarded
+    proportional fallback: its predicted title-bar area must visibly look like
+    the light dialog chrome before any control is touched.
+    """
+    import pyautogui
+
+    script = (
+        f'tell application "System Events"\n'
+        f'  tell process "{SOUNDMINER_APP}"\n'
+        f'    repeat with w in windows\n'
+        f'      if name of w contains "Mirror Settings" then\n'
+        f'        set p to position of w\n'
+        f'        set s to size of w\n'
+        f'        return (item 1 of p as text) & "," & '
+        f'(item 2 of p as text) & "," & (item 1 of s as text) & "," & '
+        f'(item 2 of s as text)\n'
+        f'      end if\n'
+        f'    end repeat\n'
+        f'  end tell\n'
+        f'end tell\n'
+        f'return "none"'
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        values = [int(v.strip()) for v in result.stdout.strip().split(",")]
+        if result.returncode == 0 and len(values) == 4:
+            left, top, width, height = values
+            sw, sh = pyautogui.size()
+            if (
+                0 <= left < sw and 0 <= top < sh
+                and sw * 0.25 <= width <= sw * 0.50
+                and sh * 0.45 <= height <= sh * 0.75
+            ):
+                logger.debug(
+                    f"        Mirror Settings bounds via Accessibility: "
+                    f"{left},{top} {width}x{height}"
+                )
+                return left, top, width, height
+    except Exception as exc:
+        logger.debug(f"        (Mirror Settings bounds lookup failed: {exc})")
+
+    # Soundminer centres a ~31.3% x 55.6% modal.  This fallback matches both
+    # display modes used on HDF1, but it is allowed only when the predicted
+    # title bar is visibly a light neutral region (not the blue record grid).
+    sw, sh = pyautogui.size()
+    width = int(sw * 0.313)
+    height = int(sh * 0.556)
+    left = int((sw - width) / 2)
+    top = int(sh * 0.186)
+    screenshot = pyautogui.screenshot()
+    sample_y = top + int(height * 0.025)
+    scale_x = screenshot.width / sw
+    scale_y = screenshot.height / sh
+    pixels = []
+    for dx in range(-20, 21, 5):
+        px = int((left + width // 2 + dx) * scale_x)
+        py = int(sample_y * scale_y)
+        r, g, b = screenshot.getpixel((px, py))[:3]
+        pixels.append((r, g, b))
+    light_neutral = sum(
+        1 for r, g, b in pixels
+        if min(r, g, b) >= 155 and max(r, g, b) - min(r, g, b) <= 45
+    )
+    if light_neutral < max(3, len(pixels) // 2):
+        raise _SoundminerError(
+            "Mirror Settings dialog geometry could not be verified; refusing "
+            "to click controls blindly."
+        )
+    logger.debug(
+        f"        Mirror Settings bounds via guarded fallback: "
+        f"{left},{top} {width}x{height}"
+    )
+    return left, top, width, height
+
+
+def _mirror_point(
+    bounds: tuple[int, int, int, int],
+    control: str,
+) -> tuple[int, int]:
+    left, top, width, height = bounds
+    rx, ry = _MIRROR_CONTROL_POINTS[control]
+    return left + int(width * rx), top + int(height * ry)
+
+
+def _assert_mirror_dialog_visible(
+    bounds: tuple[int, int, int, int],
+) -> None:
+    """Fail closed unless Soundminer's three dark section headers are visible."""
+    import pyautogui
+    left, top, width, height = bounds
+    screenshot = pyautogui.screenshot()
+    sw, sh = pyautogui.size()
+    scale_x = screenshot.width / sw
+    scale_y = screenshot.height / sh
+    # Transfer Preferences, Filenaming, and Sample Rate / Bit Depth headers.
+    # Sample toward the right side of each header, away from its light text.
+    markers = ((0.80, 0.083), (0.80, 0.495), (0.80, 0.699))
+    dark = 0
+    for rx, ry in markers:
+        px = int((left + width * rx) * scale_x)
+        py = int((top + height * ry) * scale_y)
+        r, g, b = screenshot.getpixel((px, py))[:3]
+        if max(r, g, b) <= 85:
+            dark += 1
+    if dark < 3:
+        raise _SoundminerError(
+            "Mirror Settings dialog closed or changed unexpectedly while "
+            "applying its profile; refusing further clicks."
+        )
+
+
+def _set_mirror_popup(
+    bounds: tuple[int, int, int, int],
+    control: str,
+    value: str,
+    option_index: int,
+    logger: logging.Logger,
+) -> None:
+    """Choose a Soundminer popup row without pressing Enter.
+
+    Soundminer's custom popups do not reliably implement macOS menu
+    type-to-select.  Pressing Enter after typing can activate the Mirror
+    Settings dialog's default OK button, prematurely opening the destination
+    chooser.  The v5.0v560 popup rows have a stable 20-point height and open
+    immediately below the control; click the known exact row instead.
+    """
+    import pyautogui
+    x, y = _mirror_point(bounds, control)
+    pyautogui.click(x, y)
+    time.sleep(0.35)
+
+    _left, _top, width, height = bounds
+    row_height = height * 0.03345
+    first_row_offset = height * 0.0410
+    item_x = x
+    item_y = int(y + first_row_offset + option_index * row_height)
+    logger_text = f"{control}={value} (popup row {option_index})"
+    pyautogui.click(item_x, item_y)
+    time.sleep(0.35)
+
+    # A second click at the chosen row must never be needed; if the menu did
+    # not open, the coordinates would land outside the original control.  Keep
+    # the detail available in captured screenshots/log-level diagnostics.
+    logger.debug(f"        Set {logger_text}")
+
+
+def _set_mirror_text(
+    bounds: tuple[int, int, int, int],
+    control: str,
+    value: str,
+    logger: logging.Logger,
+) -> None:
+    """Replace a Mirror Settings text field using clipboard-safe input."""
+    import pyautogui
+    x, y = _mirror_point(bounds, control)
+    pyautogui.click(x, y)
+    pyautogui.hotkey("command", "a")
+    if _set_clipboard(value, logger):
+        pyautogui.hotkey("command", "v")
+    else:
+        pyautogui.write(value, interval=0.02)
+    time.sleep(0.2)
+
+
+def _mirror_checkbox_is_checked(
+    bounds: tuple[int, int, int, int],
+    control: str,
+) -> bool:
+    """Read Soundminer's gold-vs-grey checkbox fill from a small pixel patch."""
+    import pyautogui
+    x, y = _mirror_point(bounds, control)
+    screenshot = pyautogui.screenshot()
+    sw, sh = pyautogui.size()
+    scale_x = screenshot.width / sw
+    scale_y = screenshot.height / sh
+    px = int(x * scale_x)
+    py = int(y * scale_y)
+    patch_x = max(1, int(round(2 * scale_x)))
+    patch_y = max(1, int(round(2 * scale_y)))
+    warm_pixels = 0
+    total = 0
+    for dx in range(-int(5 * scale_x), int(5 * scale_x) + 1, patch_x):
+        for dy in range(-int(5 * scale_y), int(5 * scale_y) + 1, patch_y):
+            r, g, b = screenshot.getpixel((px + dx, py + dy))[:3]
+            total += 1
+            if r >= 125 and r - b >= 18 and g - b >= 5:
+                warm_pixels += 1
+    return warm_pixels >= max(4, total // 5)
+
+
+def _set_mirror_checkbox(
+    bounds: tuple[int, int, int, int],
+    control: str,
+    desired: bool,
+) -> None:
+    """Normalize one checkbox and verify its resulting visual state."""
+    import pyautogui
+    current = _mirror_checkbox_is_checked(bounds, control)
+    if current != desired:
+        pyautogui.click(*_mirror_point(bounds, control))
+        time.sleep(0.25)
+    actual = _mirror_checkbox_is_checked(bounds, control)
+    if actual != desired:
+        raise _SoundminerError(
+            f"Could not set Mirror Settings checkbox '{control}' to "
+            f"{'ON' if desired else 'OFF'}."
+        )
+
+
+def _configure_mirror_settings(
+    profile_name: str,
+    logger: logging.Logger,
+) -> tuple[int, int, int, int]:
+    """Apply and verify the complete SourceAudio or NBC mirror profile."""
+    if profile_name not in MIRROR_PROFILES:
+        raise _SoundminerError(f"Unknown mirror profile: {profile_name}")
+    profile = MIRROR_PROFILES[profile_name]
+    bounds = _mirror_dialog_bounds(logger)
+    _assert_mirror_dialog_visible(bounds)
+    logger.info(f"  12.6b Applying {profile['label']} Mirror Settings…")
+
+    _set_mirror_popup(
+        bounds,
+        "final_file_type",
+        profile["final_file_type"],
+        profile["final_file_type_index"],
+        logger,
+    )
+    _assert_mirror_dialog_visible(bounds)
+    _save_step_screenshot(f"12_6b_{profile_name}_file_type", logger)
+    _set_mirror_popup(
+        bounds,
+        "destination_structure",
+        profile["destination_structure"],
+        profile["destination_structure_index"],
+        logger,
+    )
+    _assert_mirror_dialog_visible(bounds)
+    _save_step_screenshot(f"12_6b_{profile_name}_folder_structure", logger)
+    # File Exists Behavior is shared by both profiles and is already the
+    # baseline/persisted "Skip Existing" value.  Do not reopen this custom
+    # popup: unlike the two profile-varying dropdowns above, changing it adds
+    # no value and previously risked firing the dialog's default OK action.
+    _set_mirror_text(bounds, "cpu_usage", "1", logger)
+    _set_mirror_text(
+        bounds, "filename_scheme", profile["filename_scheme"], logger
+    )
+    _set_mirror_text(bounds, "filename_limit", "255", logger)
+
+    for control, desired in _MIRROR_CHECKBOX_STATES.items():
+        _set_mirror_checkbox(bounds, control, desired)
+
+    _save_step_screenshot(f"12_6b_{profile_name}_settings_applied", logger)
+    logger.info(
+        f"        ✓ Applied {profile['final_file_type']} / "
+        f"{profile['destination_structure']} / "
+        f"{profile['filename_scheme']} and verified all checkbox states."
+    )
+    return bounds
 
 
 def _verify_mirror_settings_dialog(
@@ -987,10 +1453,8 @@ def _verify_mirror_settings_dialog(
 
     if not manual_verify:
         logger.info(
-            "        Unattended (default): auto-accepting the Mirror Settings "
-            "dialog and clicking OK.  Soundminer persists these settings "
-            "between releases; run with --soundminer-attended (orchestrator) or "
-            "--attended (soundminer.py) to review them by hand."
+            "        Settings were applied automatically; continuing without "
+            "a manual confirmation pause."
         )
         return
 
@@ -1014,7 +1478,10 @@ def _verify_mirror_settings_dialog(
         )
 
 
-def _click_mirror_ok(logger: logging.Logger) -> None:
+def _click_mirror_ok(
+    logger: logging.Logger,
+    bounds: Optional[tuple[int, int, int, int]] = None,
+) -> None:
     """
     Confirm the Mirror Settings dialog (trigger its default OK button).
 
@@ -1043,21 +1510,17 @@ def _click_mirror_ok(logger: logging.Logger) -> None:
         _save_step_screenshot("12_6c_after_mirror_ok", logger)
         return
 
-    # 2. Focus-then-Return path.  Click the dialog title bar to focus the
-    #    window (the Mirror Settings dialog is centred; its title sits near
-    #    the top-centre — ~0.50w, ~0.199h, i.e. ~(1280, 287) on a 2560-wide
-    #    display).  This region carries no control, so the click only
-    #    changes focus.  Then Return triggers the default OK button.
-    sw, sh = pyautogui.size()
-    title_x = int(sw * 0.50)
-    title_y = int(sh * 0.199)
+    # 2. Precise geometry path: the configurator already verified the dialog
+    #    bounds, so click the actual OK control rather than sending Return to
+    #    whichever text field happens to have focus.
+    if bounds is None:
+        bounds = _mirror_dialog_bounds(logger)
+    ok_x, ok_y = _mirror_point(bounds, "ok")
     logger.info(
-        "  12.6c Could not match OK button; focusing dialog title bar at "
-        f"({title_x}, {title_y}) then pressing Return…"
+        "  12.6c Could not match OK button; clicking verified dialog OK at "
+        f"({ok_x}, {ok_y})…"
     )
-    pyautogui.click(title_x, title_y)
-    time.sleep(0.5)
-    pyautogui.press("enter")
+    pyautogui.click(ok_x, ok_y)
     time.sleep(POST_CLICK_WAIT)
     _save_step_screenshot("12_6c_after_mirror_ok", logger)
 
@@ -1074,8 +1537,96 @@ def _navigate_mirror_destination(
     logger.info(f"  12.6d Selecting mirror destination: {mirror_dest}")
     time.sleep(DIALOG_OPEN_WAIT)
     _open_panel_go_to_path(str(mirror_dest), logger)
+    _confirm_mirror_destination_panel(logger)
     time.sleep(2.0)
     _save_step_screenshot("12_6d_after_dest", logger)
+
+
+def _confirm_mirror_destination_panel(logger: logging.Logger) -> None:
+    """Click the folder picker's final Open button and verify it closes.
+
+    Soundminer's destination NSOpenPanel sometimes navigates to the requested
+    folder after the two Return keys but leaves the final ``Open`` button
+    waiting.  Accessibility is preferred; a guarded proportional click is the
+    fallback for Soundminer builds that do not expose the panel hierarchy.
+    """
+    import pyautogui
+
+    script = (
+        f'tell application "System Events"\n'
+        f'  tell process "{SOUNDMINER_APP}"\n'
+        f'    repeat with buttonName in {{"Open", "Choose"}}\n'
+        f'      repeat with w in windows\n'
+        f'        try\n'
+        f'          if exists button (buttonName as string) of w then\n'
+        f'            click button (buttonName as string) of w\n'
+        f'            return "clicked"\n'
+        f'          end if\n'
+        f'        end try\n'
+        f'        try\n'
+        f'          repeat with s in sheets of w\n'
+        f'            if exists button (buttonName as string) of s then\n'
+        f'              click button (buttonName as string) of s\n'
+        f'              return "clicked"\n'
+        f'            end if\n'
+        f'          end repeat\n'
+        f'        end try\n'
+        f'      end repeat\n'
+        f'    end repeat\n'
+        f'  end tell\n'
+        f'end tell\n'
+        f'return "none"'
+    )
+    clicked = False
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        clicked = result.stdout.strip() == "clicked"
+    except Exception as exc:
+        logger.debug(f"        (Open-button Accessibility click failed: {exc})")
+
+    if clicked:
+        logger.info("        ✓ Confirmed mirror destination with Open.")
+        time.sleep(1.0)
+    else:
+        # Guarded fallback for the centred macOS folder picker used on HDF1.
+        # Only use it if the expected light panel covers the screen centre;
+        # otherwise fail rather than click an unrelated application.
+        screenshot = pyautogui.screenshot()
+        sw, sh = pyautogui.size()
+        scale_x = screenshot.width / sw
+        scale_y = screenshot.height / sh
+        cx, cy = int(sw * 0.50 * scale_x), int(sh * 0.50 * scale_y)
+        r, g, b = screenshot.getpixel((cx, cy))[:3]
+        if min(r, g, b) < 175 or max(r, g, b) - min(r, g, b) > 35:
+            raise _SoundminerError(
+                "Mirror destination panel did not close and its geometry "
+                "could not be verified; refusing to click Open blindly."
+            )
+        open_x, open_y = int(sw * 0.769), int(sh * 0.663)
+        logger.info(
+            f"        Open button not exposed through Accessibility; clicking "
+            f"verified folder-picker Open at ({open_x}, {open_y})…"
+        )
+        pyautogui.click(open_x, open_y)
+        time.sleep(1.0)
+
+    # Fail immediately if the light folder panel is still covering the screen
+    # centre.  This prevents the output poll from idling for ten minutes while
+    # an unconfirmed Open button remains visible.
+    screenshot = pyautogui.screenshot()
+    sw, sh = pyautogui.size()
+    scale_x = screenshot.width / sw
+    scale_y = screenshot.height / sh
+    cx, cy = int(sw * 0.50 * scale_x), int(sh * 0.50 * scale_y)
+    r, g, b = screenshot.getpixel((cx, cy))[:3]
+    if min(r, g, b) >= 175 and max(r, g, b) - min(r, g, b) <= 35:
+        raise _SoundminerError(
+            "Mirror destination folder picker is still open after confirming "
+            "Open; mirror was not started."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1086,25 +1637,32 @@ def _wait_for_mirror_complete(
     mirror_dest: Path,
     logger:      logging.Logger,
     output_exts: tuple[str, ...] = ("wav",),
+    reject_exts: tuple[str, ...] = (),
+    expected_count: Optional[int] = None,
 ) -> None:
     """
     Poll ``mirror_dest`` for new output files until the count stabilises
-    for MIRROR_STABILITY_WINDOW seconds.  Same completion-detection
+    for MIRROR_STABILITY_WINDOW seconds.  When ``expected_count`` is supplied,
+    a stable short count is a hard failure rather than a false success.  Same completion-detection
     pattern UniSync's _wait_for_job_output uses, generalised to "any file
     with one of ``output_exts`` appearing under the dest tree" (NBC mirrors
     to .wav; SourceAudio mirrors to .aif/.aiff).
     """
     exts = tuple(e.lower().lstrip(".") for e in output_exts)
+    rejected = tuple(e.lower().lstrip(".") for e in reject_exts)
     logger.info(
         f"  Polling mirror destination for new "
         f"{'/'.join('.' + e for e in exts)} files…"
     )
 
-    def _count_outputs() -> int:
-        total = 0
-        for e in exts:
-            total += sum(1 for _ in mirror_dest.rglob(f"*.{e}"))
-        return total
+    def _count_extensions(wanted: tuple[str, ...]) -> int:
+        # Compare suffixes case-insensitively: Soundminer/file-system settings
+        # can yield .AIF/.AIFF as well as lowercase extensions.
+        wanted_set = {f".{ext}" for ext in wanted}
+        return sum(
+            1 for path in mirror_dest.rglob("*")
+            if path.is_file() and path.suffix.lower() in wanted_set
+        )
 
     start              = time.monotonic()
     last_count         = -1
@@ -1127,10 +1685,21 @@ def _wait_for_mirror_complete(
 
         # Count output files under the destination tree
         try:
-            count = _count_outputs()
+            count = _count_extensions(exts)
+            rejected_count = _count_extensions(rejected) if rejected else 0
         except Exception as exc:
             logger.warning(f"    Could not count dest files: {exc}")
             count = last_count
+            rejected_count = 0
+
+        if rejected_count:
+            raise _SoundminerError(
+                f"Mirror produced {rejected_count} wrong-format "
+                f"{('/'.join('.' + e for e in rejected))} file(s) in an "
+                f"{('/'.join('.' + e for e in exts))} destination.\n"
+                f"  Stop this delivery and correct the Mirror Settings "
+                f"before retrying."
+            )
 
         if count != last_count:
             if first_seen_at is None and count > 0:
@@ -1153,6 +1722,14 @@ def _wait_for_mirror_complete(
 
         # Stability window: count stopped changing — mirror is done.
         if first_seen_at is not None and (now - last_change) >= MIRROR_STABILITY_WINDOW:
+            if expected_count is not None and last_count != expected_count:
+                raise _SoundminerError(
+                    f"Mirror stopped at {last_count} output file(s), but the "
+                    f"source contains {expected_count}.\n"
+                    f"  The import/selection may be incomplete, or a partial "
+                    f"destination may have prevented Skip Existing from "
+                    f"resuming. Do not continue until the counts match."
+                )
             logger.info(
                 f"    File count stable at {last_count} for "
                 f"{MIRROR_STABILITY_WINDOW}s — mirror complete."
@@ -1183,27 +1760,54 @@ def _menu_click(
     Fire a menu-bar click on `menu_title` → `item_title` via AppleScript
     System Events.  Far more reliable than image-matching for items
     whose label text is stable.
+
+    Soundminer's menu bar can take a moment to become available through the
+    Accessibility API after activation/database switching.  Wait for it, then
+    traverse the actual macOS hierarchy:
+
+        menu bar 1 → menu bar item → menu 1 → menu item
+
+    Addressing a named ``menu`` directly below ``menu bar 1`` can fail with
+    "Invalid index" even while the menu is visibly present on screen.
     """
     script = (
+        f'tell application "{SOUNDMINER_APP}" to activate\n'
         f'tell application "System Events"\n'
+        f'    set menuReady to false\n'
+        f'    repeat 40 times\n'
+        f'        if exists process "{SOUNDMINER_APP}" then\n'
+        f'            tell process "{SOUNDMINER_APP}"\n'
+        f'                set frontmost to true\n'
+        f'                if exists menu bar 1 then\n'
+        f'                    set menuReady to true\n'
+        f'                    exit repeat\n'
+        f'                end if\n'
+        f'            end tell\n'
+        f'        end if\n'
+        f'        delay 0.25\n'
+        f'    end repeat\n'
+        f'    if not menuReady then error "Soundminer menu bar did not become available through Accessibility"\n'
         f'    tell process "{SOUNDMINER_APP}"\n'
         f'        set frontmost to true\n'
-        f'        click menu item "{item_title}" of menu "{menu_title}" '
-        f'of menu bar 1\n'
+        f'        tell menu bar item "{menu_title}" of menu bar 1\n'
+        f'            click\n'
+        f'            delay 0.25\n'
+        f'            click menu item "{item_title}" of menu 1\n'
+        f'        end tell\n'
         f'    end tell\n'
         f'end tell'
     )
     result = subprocess.run(
         ["osascript", "-e", script], capture_output=True, text=True,
+        timeout=15,
     )
     if result.returncode != 0:
         raise _SoundminerError(
             f"Menu click failed: {menu_title} → {item_title}\n"
             f"  osascript stderr: {result.stderr.strip()}\n"
             f"  Common causes:\n"
-            f"  - Terminal not granted Automation access for '{SOUNDMINER_APP}'\n"
-            f"    or 'System Events' (System Settings → Privacy & Security\n"
-            f"    → Automation).\n"
+            f"  - Terminal not granted Accessibility access (System Settings\n"
+            f"    → Privacy & Security → Accessibility).\n"
             f"  - The menu item label has changed in Soundminer's UI.\n"
             f"  - Soundminer wasn't running."
         )
@@ -1329,12 +1933,14 @@ def _watch_and_dismiss_import_dialogs(
     end = time.monotonic() + watch_seconds
     seen = 0
     while time.monotonic() < end:
-        hit = False
-        # Order: unmatched-fields typically precedes the dupes confirm.
-        if _dismiss_dialog_if_present("unmatched_fields", "Unmatched Fields", logger):
-            hit = True; seen += 1
-        if _dismiss_dialog_if_present("dupes_warning", "Check for Dupes Warning", logger):
-            hit = True; seen += 1
+        # Use the same complete dismissal pass as the later unattended poll.
+        # This includes the Accessibility-based OK click when image matching
+        # misses because of display scaling.  Previously this initial watcher
+        # tried only the screenshots, leaving both alerts blocked until the
+        # later wait loop (or an operator) cleared them.
+        hit = _dismiss_import_dialogs_once(logger)
+        if hit:
+            seen += 1
         # Once the progress bar is up, the gating dialogs are done — stop early.
         if not hit and _locate_safe(_img(OPTIONAL_DIALOG_SCREENSHOTS["importing_text"])) is not None:
             logger.info("        Import progress bar visible — dialogs cleared.")
@@ -1344,30 +1950,57 @@ def _watch_and_dismiss_import_dialogs(
         logger.info(f"        Auto-dismissed {seen} import dialog(s).")
 
 
-def _report_embed_log_window(logger: logging.Logger) -> None:
-    """
-    After embed, Soundminer shows a log window listing any files that were
-    NOT scanned during embedding.  We don't auto-resolve this (it needs the
-    operator to confirm the files exist and decide whether to re-embed), but
-    if the log-window crop is on screen we surface clear guidance.
-    """
+def _soundminer_log_window_visible(logger: logging.Logger) -> bool:
+    """Return True when Soundminer's scan/import failure log is open."""
+    script = (
+        f'tell application "System Events"\n'
+        f'  tell process "{SOUNDMINER_APP}"\n'
+        f'    repeat with w in windows\n'
+        f'      try\n'
+        f'        if name of w contains "Soundminer Log Window" then '
+        f'return "visible"\n'
+        f'      end try\n'
+        f'    end repeat\n'
+        f'  end tell\n'
+        f'end tell\n'
+        f'return "none"'
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.stdout.strip() == "visible":
+            return True
+    except Exception as exc:
+        logger.debug(f"        (log-window Accessibility check failed: {exc})")
+
     fn = OPTIONAL_DIALOG_SCREENSHOTS.get("log_window")
-    if not fn or not Path(_img(fn)).exists():
-        return
-    if _locate_safe(_img(fn)) is None:
-        return
-    _save_step_screenshot("embed_log_window", logger)
-    logger.warning(
-        "        ⚠ Embed log window detected — it lists files that were NOT\n"
-        "          scanned during embedding.  Before continuing:\n"
-        "            1. Review the listed files; confirm each exists in the\n"
-        "               audio source folder.\n"
-        "            2. Re-run the embed (12.5) for the missing ones.\n"
-        "            3. Repeat until no further files are reported.  If the\n"
-        "               list stops shrinking across several tries, the\n"
-        "               metadata CSV is likely incorrect — investigate that\n"
-        "               rather than retrying further.\n"
-        "          A snapshot was saved to the soundminer step-screenshots dir."
+    return bool(
+        fn
+        and Path(_img(fn)).exists()
+        and _locate_safe(_img(fn)) is not None
+    )
+
+
+def _raise_if_soundminer_log_window(
+    logger: logging.Logger,
+    *,
+    phase: str,
+) -> bool:
+    """Fail closed when Soundminer reports any scan/import problem.
+
+    The caller deliberately does not close the log.  It remains visible for
+    diagnosis and the outer workflow captures a failure screenshot before
+    returning a non-zero status.
+    """
+    if not _soundminer_log_window_visible(logger):
+        return False
+    _save_step_screenshot(f"{phase}_scan_failure_log", logger)
+    raise _SoundminerError(
+        f"Soundminer Log Window appeared during {phase}; processing stopped "
+        f"before the next phase. Review the visible log and the captured "
+        f"failure screenshot to identify the missing or invalid CSV row."
     )
 
 
@@ -1541,6 +2174,11 @@ def _wait_for_screen_idle(
                 if on_poll():
                     last_change  = now
                     saw_activity = True
+            except _SoundminerError:
+                # Phase guards use this to stop immediately on a visible
+                # Soundminer scan/import failure log.  Never downgrade that
+                # correctness failure to a debug message and continue.
+                raise
             except Exception as exc:
                 logger.debug(f"        (dialog dismiss on_poll failed: {exc})")
 
@@ -1800,9 +2438,8 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
 
     p.add_argument("--attended", action="store_true",
                    help="Run ATTENDED: pause for Enter after each scan/import/"
-                        "embed and to confirm the Mirror Settings dialog before "
-                        "OK.  Default is fully unattended.  Use for a first run "
-                        "on a new machine to confirm the mirror settings persist.")
+                        "embed and to review the automatically applied Mirror "
+                        "Settings before OK. Default is fully unattended.")
     p.add_argument("--unattended", action="store_true",
                    help="Deprecated / no-op: unattended is the default now. "
                         "Kept for backward compatibility (use --attended to "

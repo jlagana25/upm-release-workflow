@@ -19,8 +19,8 @@ setting up a new machine, work through Part 2 top to bottom.
   (On **USMPSMDHDF1**, run it in a console / Screen Sharing Terminal with an
   active GUI session for the Soundminer and UniSync steps.)
 - Examples use **May 2026, Part 1** (`--year 2026 --month 5 --part 1`). Swap in your real release.
-- `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05`
-- `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Release - NBC`
+- `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05-P1`
+- `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Part 1 Release - NBC`
 - The workflow can be launched from **either machine**. Step 12 (Soundminer) is
   the only machine-specific step: it runs **inline** (automatically) when you
   launch on the **Soundminer machine (USMPSMDHDF1)**, and switches to a
@@ -96,8 +96,8 @@ missing-report path, the log-file path, and the overall status).
 ## A previous-month release (full month, no Part split)
 
 Use this for the monthly full-month export. It covers the whole prior calendar
-month (1st → last day), names folders with the plain "Month YYYY" form (no Part
-suffix), and tells Domo to use its built-in **"Previous Month"** preset.
+month (1st → last day), uses the explicit `UPM-YYYY-MM-FULL` / `Month YYYY Full`
+naming, and tells Domo to use its built-in **"Previous Month"** preset.
 
 ```bash
 # Auto — previous month relative to today's date:
@@ -191,7 +191,8 @@ Confirms the Part 2 date window (15th → final calendar day) computes correctly
   - Same all-`[DRY RUN]` behavior as Test 1; `Overall status: ✓ completed`.
 - **Inspect:**
   - Date range end = last day of the month. Spot-check edge months: February (`--month 2`) should end `-28` (or `-29` in a leap year like 2024); April should end `-30`.
-  - Folder/paths in the log use the Part 2 naming (e.g. "… Release - NBC … Part 2" where applicable).
+  - Folder/paths in the log use `UPM-2026-05-P2` and explicit
+    `… May 2026 Part 2 Release - NBC` naming.
 - **Rollback/cleanup:** None — dry-run only.
 
 ---
@@ -388,25 +389,25 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
   # Plan only — confirms the source→dest pairs and settings, touches nothing:
   python3 soundminer.py --sourceaudio --year 2026 --month 5 --part 1 --dry-run
 
-  # Supervised first run: --attended pauses at the Mirror Settings dialog so you
-  # can confirm the AIFF settings before OK (Soundminer persists them afterward):
+  # --attended supervises scan progress and optionally lets you review the
+  # automatically applied Mirror Settings before the script clicks OK:
   python3 soundminer.py --sourceaudio --attended --year 2026 --month 5 --part 1
 
-  # Normal run: UNATTENDED is the default (no pauses) once you trust the
-  # persisted mirror settings:
+  # Normal run: the SourceAudio profile is applied automatically before each
+  # mirror, overriding any incompatible settings persisted by Step 12:
   python3 soundminer.py --sourceaudio --year 2026 --month 5 --part 1
   ```
-  - Runs **unattended by default**; add `--attended` for the supervised pause above. (`--unattended` still exists but is a deprecated no-op.)
+  - Runs **unattended by default** and explicitly applies the complete SourceAudio profile before every mirror. Add `--attended` to review the applied settings and supervise the other long-running phases. (`--unattended` still exists but is a deprecated no-op.)
   - `--sourceaudio-db-shortcut` defaults to `"8"` (⌘8); pass a different number only if your SourceAudio DB is on another slot.
   - Add `--capture-steps` for per-step screenshots.
 - **What it does:** for each (source → destination) pair it deletes all records → Scan Sounds into Database → Mirror to AIFF:
   1. `WAV w COVERS/MEDIA` → `…Release - SourceAudio/Music`
   2. `2-STAGING/SME WAV ExUS/MEDIA` → `…Release - SourceAudio Ex-US/Music`
 
-  The mirror uses the SourceAudio settings (AIFF, Build Using Library then Volume, Filename:1). Soundminer persists one set of mirror settings, so the attended pause lets you confirm them before OK on the first pass.
+  The mirror uses the SourceAudio settings (AIFF, Build Using Library then Volume, `<Filename:1>`). Soundminer persists one global set of mirror settings, so Step 11 explicitly overwrites all controls before every pass. Step 12 likewise applies its NBC/Broadcast Wave profile before mirroring. Step 11 also rejects WAV files already present in either SourceAudio destination and stops immediately if a mirror begins producing WAV instead of AIFF.
 - **Expected output:**
   - Header `─── Step 11 — Soundminer SourceAudio (AIFF) workflow ───`.
-  - Per pair: records cleared → scan → mirror dialog → settings pause → OK → destination picker → mirror runs to completion.
+  - Per pair: records cleared → scan → mirror dialog → SourceAudio settings applied and checkboxes verified → OK → destination picker → mirror runs to completion.
   - `✓` on full success; any hard failure returns non-zero and names the failing pair.
 - **Inspect:**
   - `find "{specials}/3-FINAL PACKAGING/Universal Production Music * Release - SourceAudio/Music" -name "*.aif*" | wc -l` — AIFF count matches the US (WAV w COVERS) track count.
@@ -449,8 +450,15 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
 - **Expected output:**
   - `12.2` database switch → `✓ verified` or `⚠ proceeding` (both OK; ⌘6 is deterministic).
   - `12.3` `✓ Records cleared`.
-  - `12.4` import → both pickers navigate; attended pause until you confirm import done (`✓ Import complete`).
+  - `12.4` creates a runtime-only import CSV without Domo's `GRAND TOTAL`
+    footer, then both pickers navigate; attended pause until you confirm import
+    done (`✓ Import complete`). The original Domo CSV remains unchanged.
+    Normal runs require no Enter: expected confirmation dialogs are accepted
+    automatically and a conservative record-count-scaled wait prevents a
+    static UI from being mistaken for a completed import.
   - `12.5` embed via Database menu → attended pause until embed done (`✓ Embed complete`).
+  - A visible **Soundminer Log Window** during import or embed is a hard failure:
+    the workflow stops, leaves the log open, and saves a diagnostic screenshot.
   - `12.6` mirror dialog → settings checklist pause → OK clicked → destination picker → mirror runs.
   - `12.7` polling shows the `.wav` count climbing then stabilizing → `✓ Step 12 complete`.
 - **Inspect:**
@@ -563,8 +571,8 @@ Validates the SoundExchange export → ISRC ingest-form split (`split_se_ingest_
 
 ## 16. SoundMouse delivery test (Step 16)
 
-Validates the separate SoundMouse delivery: tracklist + bucket exports,
-ActivationRange folders, WAV download, flat covers, and only the metadata
+Validates the separate SoundMouse delivery: tracklist + bucket exports, one
+workflow-period folder, WAV download, flat covers, and only the metadata
 workbooks selected by the bucket.
 
 - **Offline logic test:**
@@ -579,6 +587,11 @@ workbooks selected by the bucket.
 - **Expected full-month naming (June 2026 example):**
   - Tracklist: `Soundmouse 06-01-26 to 07-01-26.csv` (exclusive upper bound).
   - Delivery: `2026-06-01_to_2026-06-30/{MEDIA,Covers,Metadata}` (inclusive range).
+    This directory is derived from the workflow period; raw `ActivationRange`
+    values in Domo do not split or rename the delivery.
+  - UniSync routes rows present in the canonical US tracklist to United States,
+    sends the remaining rows to Rest of World, and uses Japan only as a
+    fallback. All passes share the same `MEDIA` directory.
   - Metadata contains only the `SoundMouseMetadata NN - … .xlsx` files named
     by the SoundMouse bucket card. Each remains an XLSX workbook, but its Domo
     formatting is removed; values, formulas, and worksheet names are retained.
@@ -587,7 +600,7 @@ workbooks selected by the bucket.
     `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in
     `SoundMouse <ActivationRange>_Missing.csv`; a clean report is header-only.
 - **Part naming:** Part 1 uses `06-01-26 to 06-15-26`; Part 2 uses
-  `06-15-26 to 07-01-26`. The corresponding ActivationRange directories remain
+  `06-15-26 to 07-01-26`. The corresponding workflow-period directories remain
   inclusive (`01_to_14` and `15_to_30`).
 
 ---
@@ -627,9 +640,11 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
   python3 upm_release_workflow.py --previous-month               # real run
   ```
   Confirm the header shows the correct prior month and a `2026-05-01 → 2026-05-31`
-  full-month range, folders use the plain "Month YYYY" form (no Part suffix), and
+  full-month range, folders use explicit `UPM-2026-05-FULL` and
+  `May 2026 Full` naming, and
   Domo uses its "Previous Month" preset. Inspect the same deliverables as below,
-  under the plain-named folders (e.g. `UPM-2026-05`, `… May 2026 Release - NBC`).
+  under the full-month folders (e.g. `UPM-2026-05-FULL`,
+  `… May 2026 Full Release - NBC`).
 - **Expected output:**
   - Each step logs start → end with a status; no `✗ FAILED` lines.
   - Final summary shows the full field list, every requested step `✓ completed` (Soundminer/MP3/rename `✓` after the hand-off or inline run), `Overall status: ✓ completed`, exit code `0`.

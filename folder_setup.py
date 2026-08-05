@@ -143,7 +143,7 @@ def _is_domo_csv_skeleton(dst: Path) -> bool:
     Step 1 (Domo exports) writes the NBC / Japan / Tunesat metadata CSVs to
     paths *inside* the Specials tree, creating their parent folders via
     ``mkdir(parents=True)``.  So by the time Step 2 runs, a partial
-    ``UPM-YYYY-MM/`` skeleton already exists — but it holds only those CSVs,
+    ``UPM-YYYY-MM-P1/`` skeleton already exists — but it holds only those CSVs,
     not the baseline content.  Treating that as "destination already exists"
     would wrongly block the baseline copy and leave the release tree (e.g. the
     NBC release folder) missing.
@@ -159,6 +159,13 @@ def _is_domo_csv_skeleton(dst: Path) -> bool:
         if p.is_file() and p.suffix.lower() != ".csv":
             return False
     return True
+
+
+def _has_unresolved_placeholder_names(dst: Path) -> bool:
+    """True when an existing Specials tree is visibly an incomplete copy."""
+    if not dst.exists():
+        return False
+    return any(PLACEHOLDER in path.name for path in dst.rglob("*"))
 
 
 def _merge_baseline_additive(
@@ -228,6 +235,14 @@ def _safe_copytree(
                 f"merging the baseline in around them (existing CSVs kept):\n"
                 f"    {dst}"
             )
+        elif _has_unresolved_placeholder_names(dst):
+            merge_into_skeleton = True
+            logger.warning(
+                f"  Destination contains unresolved {PLACEHOLDER!r} names "
+                f"[{label}] — treating it as an interrupted baseline copy and "
+                f"resuming additively (existing files kept):\n"
+                f"    {dst}"
+            )
         else:
             logger.error(
                 f"  ✗  Destination already exists [{label}]: {dst}\n"
@@ -269,6 +284,19 @@ def _safe_copytree(
                 dst,
                 ignore=shutil.ignore_patterns("*.bat", "*.exe"),
             )
+        except KeyboardInterrupt:
+            logger.error(
+                f"  ✗ Copy interrupted [{label}] — archiving the partial "
+                f"destination so the next run starts clean."
+            )
+            if dst.exists() and not _archive_existing(
+                dst, dry_run=False, logger=logger
+            ):
+                logger.error(
+                    f"     ⚠ Could not archive the partial copy at {dst}.\n"
+                    f"     Rename it manually before retrying."
+                )
+            raise
         except Exception as exc:
             logger.error(
                 f"  ✗ Copy failed [{label}]: {type(exc).__name__}: {exc}"

@@ -1529,6 +1529,18 @@ def _report_not_found(
     """
     n = len(missing)
     ids = _filenames_to_workaudioids(job["csv"], ext, missing, logger)
+    fallback = job.get("fallback_territory")
+    if fallback:
+        logger.info(
+            f"  ↪  {n} track(s) are unavailable in '{job['territory']}'. "
+            f"The {fallback} fallback will try them next."
+        )
+        if ids:
+            shown = ", ".join(ids[:60]) + (
+                f"  (+{len(ids) - 60} more)" if len(ids) > 60 else ""
+            )
+            logger.info(f"     workAudioIds: {shown}")
+        return
     logger.warning(
         f"  ⚠  {n} track(s) not delivered for '{job['name']}' — UniSync reports "
         f"these as NOT FOUND in UPM."
@@ -1785,7 +1797,7 @@ def _wait_for_job_output(
     )
     logger.info(
         f"    Pre-existing in client folder: {initial_have}/{total} "
-        f"(not counted as deliveries — only writes since now are tracked)."
+        "(included in the total; new arrivals are tracked from this point)."
     )
 
     deadline      = job_start + JOB_TIMEOUT

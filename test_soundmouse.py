@@ -10,8 +10,11 @@ from pathlib import Path
 
 from config import ReleaseContext
 from soundmouse import (
+    _partition_soundmouse_rows,
+    _soundmouse_unisync_jobs,
     activation_ranges_from_tracklist,
     create_soundmouse_directories,
+    install_soundmouse_metadata,
     metadata_codes_from_bucket,
     strip_xlsx_formatting,
     validate_soundmouse_delivery,
@@ -29,6 +32,18 @@ class SoundMouseTests(unittest.TestCase):
 
     def test_context_names_full_month_and_parts(self) -> None:
         full = ReleaseContext(2026, 6, 1, previous_month=True)
+        self.assertEqual(full.release_id, "UPM-2026-06-FULL")
+        self.assertEqual(full.specials_root, "UPM-2026-06-FULL")
+        self.assertEqual(full.hd_folder, "UPM-2026-06-FULL")
+        self.assertEqual(full.month_display_folder, "June 2026 Full")
+        self.assertEqual(
+            full.us_tracklist_csv.name,
+            "UPM-US-2026-06-FULL-Tracklist.csv",
+        )
+        self.assertEqual(
+            full.pinned_cli_args(),
+            ["--previous-month", "--year", "2026", "--month", "7"],
+        )
         self.assertEqual(
             full.soundmouse_tracklist_csv.name,
             "Soundmouse 06-01-26 to 07-01-26.csv",
@@ -37,25 +52,68 @@ class SoundMouseTests(unittest.TestCase):
 
         part1 = ReleaseContext(2026, 6, 1)
         part2 = ReleaseContext(2026, 6, 2)
+        self.assertEqual(part1.release_id, "UPM-2026-06-P1")
+        self.assertEqual(part2.release_id, "UPM-2026-06-P2")
+        self.assertEqual(part1.month_display_folder, "June 2026 Part 1")
+        self.assertEqual(part2.month_display_folder, "June 2026 Part 2")
+        self.assertIn(
+            "Universal Production Music June 2026 Part 1 Release - NBC",
+            str(part1.partner_dirs["nbc_music_root"]),
+        )
+        self.assertEqual(
+            part2.pinned_cli_args(),
+            ["--year", "2026", "--month", "6", "--part", "2"],
+        )
+        self.assertEqual(part1.soundmouse_activation_range, "2026-06-01_to_2026-06-14")
+        self.assertEqual(part2.soundmouse_activation_range, "2026-06-15_to_2026-06-30")
         self.assertEqual(part1.soundmouse_tracklist_csv.name, "Soundmouse 06-01-26 to 06-15-26.csv")
         self.assertEqual(part2.soundmouse_tracklist_csv.name, "Soundmouse 06-15-26 to 07-01-26.csv")
 
-    def test_directories_come_from_activation_range(self) -> None:
+    def test_soundmouse_audio_uses_all_three_territories(self) -> None:
+        ctx = ReleaseContext(2026, 6, 1, previous_month=True)
+        jobs = _soundmouse_unisync_jobs(ctx)
+        self.assertEqual(
+            [job["territory"] for job in jobs],
+            ["United States", "Rest of World", "Japan"],
+        )
+        self.assertEqual(len({job["client_path"] for job in jobs}), 1)
+        self.assertTrue(jobs[0]["client_path"].endswith("2026-06-01_to_2026-06-30/MEDIA"))
+        self.assertEqual(jobs[1]["fallback_territory"], "Japan")
+
+    def test_soundmouse_rows_are_partitioned_by_us_tracklist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            tracklist = self._csv(
-                root, "tracklist.csv", ["workAudioId", "ActivationRange"],
+            soundmouse = self._csv(
+                root,
+                "soundmouse.csv",
+                ["Filename", "workAudioId"],
                 [
-                    {"workAudioId": "1", "ActivationRange": "2026-06-01_to_2026-06-30"},
-                    {"workAudioId": "2", "ActivationRange": "2026-06-01_to_2026-06-30"},
+                    {"Filename": "US_One", "workAudioId": "1"},
+                    {"Filename": "EXUS_Two.wav", "workAudioId": "2"},
+                    {"Filename": "US_Three.WAV", "workAudioId": "3"},
                 ],
             )
-            roots = create_soundmouse_directories(
-                tracklist, root / "SoundMouse", False, logging.getLogger("test")
+            us = self._csv(
+                root,
+                "us.csv",
+                ["Filename"],
+                [{"Filename": "US_One.wav"}, {"Filename": "US_Three"}],
             )
-            self.assertEqual(len(roots), 1)
+            fields, us_rows, exus_rows = _partition_soundmouse_rows(soundmouse, us)
+            self.assertEqual(fields, ["Filename", "workAudioId"])
+            self.assertEqual([row["workAudioId"] for row in us_rows], ["1", "3"])
+            self.assertEqual([row["workAudioId"] for row in exus_rows], ["2"])
+
+    def test_directory_comes_from_workflow_period(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release = root / "SoundMouse" / "2026-06-01_to_2026-06-30"
+            created = create_soundmouse_directories(
+                release, False, logging.getLogger("test")
+            )
+            self.assertEqual(created, release)
             for child in ("Covers", "Metadata", "MEDIA"):
-                self.assertTrue((roots[0] / child).is_dir())
+                self.assertTrue((release / child).is_dir())
 
     def test_invalid_activation_range_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +219,30 @@ class SoundMouseTests(unittest.TestCase):
             ))
             with report.open(encoding="utf-8-sig", newline="") as handle:
                 self.assertEqual(list(csv.DictReader(handle)), [])
+
+    def test_full_month_metadata_is_installed_without_range_splitting(self) -> None:
+        from openpyxl import Workbook, load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "SoundMouseMetadata 01 - ALL.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["Filename", "ALBUM ARTWORK FILE NAME", "Formula"])
+            sheet.append(["First.wav", "first.jpg", "=1+1"])
+            sheet.append(["Second.wav", "second.jpg", "=2+2"])
+            workbook.save(source)
+            workbook.close()
+
+            outputs = install_soundmouse_metadata(
+                [source], root / "delivery" / "Metadata", logging.getLogger("test")
+            )
+            self.assertEqual(len(outputs), 1)
+            installed = load_workbook(outputs[0], data_only=False)
+            values = list(installed.active.iter_rows(values_only=True))
+            installed.close()
+            self.assertEqual(values[1], ("First.wav", "first.jpg", "=1+1"))
+            self.assertEqual(values[2], ("Second.wav", "second.jpg", "=2+2"))
 
 
 if __name__ == "__main__":

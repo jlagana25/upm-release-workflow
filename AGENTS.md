@@ -139,14 +139,21 @@ is skipped entirely (e.g. `--start-at 13`), `verify_failed` defaults to `False`,
 so the finalization steps are **not** blocked.
 
 Step **16 is independent of the Step 9 gate**. It exports the SoundMouse
-tracklist and bucket, builds each safe `ActivationRange` directory, runs a WAV
-UniSync job into `MEDIA`, downloads flat covers, and exports only metadata
-workbooks selected by bucket codes 01–10. Those metadata exports remain XLSX,
+tracklist and bucket, builds one directory from the resolved workflow start and
+end dates, runs additive US/Rest-of-World/Japan WAV UniSync jobs into `MEDIA`,
+downloads flat covers, and exports only metadata workbooks selected by bucket
+codes 01–10. Those metadata exports remain XLSX,
 but Step 16 removes their Domo workbook formatting after download while keeping
-cell values, formulas, worksheet names, and workbook structure. Its final gate
+cell values, formulas, worksheet names, and workbook structure. Raw Domo
+`ActivationRange` values never control or split the delivery directory. Its final gate
 unions the audio and cover filenames across every selected metadata workbook,
 checks them against `MEDIA` and `Covers`, writes an auditable missing-items CSV,
 and fails Step 16 when a referenced file is absent.
+
+SoundMouse territory routing uses the canonical US tracklist as its partition:
+matching rows go to United States, remaining rows go to Rest of World, and Japan
+is a final fallback. Do not revert to sending the complete CSV to every
+territory; that creates false not-found warnings and multi-minute stalls.
 
 **SoundExchange note:** `split_se_ingest_forms.py` runs automatically as the
 **second phase of Step 10** via `run_soundexchange_split(ctx, dry_run, logger)`.
@@ -187,6 +194,11 @@ python3 upm_release_workflow.py --previous-month --only 10
 python3 upm_release_workflow.py ... --dry-run
 ```
 
+`--previous-month` is the full-month shortcut. Every run has a canonical ID:
+`UPM-2026-07-P1`, `UPM-2026-07-P2`, or `UPM-2026-07-FULL`. Partner-facing
+folders use explicit `Part 1`, `Part 2`, or `Full` labels and always describe
+the release/content month, even when processing happens in the next month.
+
 - **Selectors** (mutually exclusive): `--start-at <token>`, `--only <token>`.
   Tokens come from `_STEP_UNITS` (e.g. `1,2,4,5,6,9,10,11,12,12.7,13,14,15,16`).
 - **Per-step skips**: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
@@ -198,8 +210,11 @@ python3 upm_release_workflow.py ... --dry-run
   `actually_delete = not args.dry_run`, so `--dry-run` is the preview/safety
   guard. `--delete-non-maintracks` is deprecated and ignored; it remains only
   so older commands do not error. Folder overwrite still requires `--overwrite`.
-- Soundminer steps run **unattended by default**; `--soundminer-attended` re-adds
-  the settings-confirmation pauses.
+- Soundminer runs **unattended by default**; `--soundminer-attended` re-adds
+  optional supervision pauses. Because Soundminer persists one global Mirror
+  Settings state, Step 11 explicitly applies the SourceAudio AIFF profile and
+  Step 12 explicitly applies the NBC Broadcast Wave profile before every
+  mirror; neither flow may trust the previously persisted state.
 
 When adding a step: update `_STEP_UNITS`, add the block in the orchestrator, set a
 `results[...]` status in every branch (run/skip/blocked), add a summary row in
@@ -258,6 +273,11 @@ inline or are handed off.
   (e.g. `--only 10` explicitly un-skips SoundExchange).
 - **Column detection** goes through `tracklist_columns.py`. Don't hardcode column
   names in individual modules.
+- **Interrupted Step 2 copies are recoverable.** `_safe_copytree` archives a
+  partially copied Specials destination on `KeyboardInterrupt`. If an older
+  partial tree already exists with unresolved `MMMM YYYY` names, Step 2 treats
+  it as incomplete and resumes the baseline merge additively instead of
+  classifying it as a completed prior release.
 
 ---
 

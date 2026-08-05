@@ -429,7 +429,10 @@ def verify_final_packaging_metadata(
                         logger.info("      ✓ Covers present.")
 
     # ---- Report + summary ---------------------------------------------------
-    if report_rows and not dry_run:
+    # Always refresh the report on a real run.  A clean header-only file makes
+    # the pass auditable and prevents a discrepancy CSV from an earlier failed
+    # attempt being mistaken for the current result.
+    if not dry_run:
         from datetime import date
         stamp = date.today().strftime("%m-%d-%Y")
         report_path = (
@@ -444,7 +447,10 @@ def verify_final_packaging_metadata(
                 )
                 w.writeheader()
                 w.writerows(report_rows)
-            logger.info(f"\n  Discrepancy report: {report_path}")
+            logger.info(
+                f"\n  Discrepancy report: {report_path} "
+                f"({'header only — clean' if not report_rows else f'{len(report_rows)} row(s)'})"
+            )
         except OSError as exc:
             logger.error(f"  Could not write discrepancy report: {exc}")
 

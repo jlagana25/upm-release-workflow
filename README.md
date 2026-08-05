@@ -42,6 +42,12 @@ python3 upm_release_workflow.py --previous-month --only 16           # SoundMous
 python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --start-at 12.7
 ```
 
+Release names always describe the content period. Each run has one canonical
+internal ID: `UPM-2026-07-P1`, `UPM-2026-07-P2`, or `UPM-2026-07-FULL`.
+Partner-facing folders are equally explicit, such as
+`Universal Production Music July 2026 Full Release - NBC`. A July run retains
+July naming even when processed in August.
+
 A normal run **deletes** non-maintracks at Step 13; `--dry-run` is the only thing
 that holds back to a preview. Steps 10–15 are gated behind Step 9 verification
 (escape with `--skip-verify`). See `TESTING_CHECKLIST.md` for the per-step
@@ -108,7 +114,12 @@ Then the other machine installs with `pip install -r requirements.lock`.
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`.
 - `soundmouse.py` — Step 16: SoundMouse tracklist/bucket exports, release
-  directories, WAVs, covers, and bucket-selected metadata workbooks. Metadata
+  period directory, WAVs from the US/Rest-of-World/Japan UniSync territories,
+  covers, and bucket-selected metadata workbooks. The
+  directory dates come from the resolved workflow period, never from raw Domo
+  `ActivationRange` values. Audio rows found in the canonical US tracklist are
+  requested from the US territory; remaining rows go to Rest of World, with
+  Japan retained as a fallback. Metadata
   remains XLSX but all downloaded workbook formatting is removed automatically.
   The step then validates every audio and cover filename referenced across the
   selected metadata workbooks and fails with a missing-items CSV if needed.

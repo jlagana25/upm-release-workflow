@@ -551,8 +551,8 @@ def remove_non_maintracks(
         )
         return True
 
-    # ---- Dry-run report (always shown, both directions) ---------------------
-    logger.info("  Dry-run preview:")
+    # ---- Planned reconciliation (always shown, both directions) ------------
+    logger.info("  Reconciliation plan:")
 
     # 1. Missing keepers we'd copy in
     if recoverable_missing:

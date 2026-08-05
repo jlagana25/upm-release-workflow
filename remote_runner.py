@@ -145,9 +145,7 @@ def build_soundminer_remote_command(
     # The soundminer.py invocation, as a shell command line run from repo.
     sm_args = [
         python, "soundminer.py", "--test",
-        "--year",  str(ctx.year),
-        "--month", str(ctx.month),
-        "--part",  str(ctx.part),
+        *ctx.pinned_cli_args(),
         *extra_args,
     ]
     # cd into the repo (quoted — it has spaces) then run soundminer.

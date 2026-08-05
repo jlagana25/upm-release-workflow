@@ -1,10 +1,11 @@
 """
 soundmouse.py — Step 16: Build the SoundMouse release delivery.
 
-The step exports the SoundMouse tracklist and bucket from Domo, creates the
-ActivationRange/Covers/Metadata/MEDIA tree, downloads WAVs with UniSync and
-cover art from the tracklist, then exports only the metadata workbooks named
-by the bucket card.
+The step exports the SoundMouse tracklist and bucket from Domo, creates one
+workflow-period directory with Covers/Metadata/MEDIA children, downloads WAVs
+with UniSync and cover art from the tracklist, then exports only the metadata
+workbooks named by the bucket card.  Raw Domo ActivationRange values never
+control delivery-directory naming.
 
 All browser and GUI dependencies remain lazy so this module imports headless.
 """
@@ -15,6 +16,7 @@ import argparse
 import csv
 import logging
 import re
+import shutil
 import tempfile
 from copy import copy
 from pathlib import Path
@@ -38,6 +40,7 @@ from tracklist_columns import (
 ACTIVATION_RANGE_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}_to_\d{4}-\d{2}-\d{2}$"
 )
+DOMO_PROFILE_DIR = Path.home() / ".upm_release_workflow" / "domo_browser_profile"
 
 # code -> (territory label, territory set).  The set lets us recognize either
 # a bucket label ("02 UK DE SE OZ") or a raw Territory List value.
@@ -316,26 +319,30 @@ def activation_ranges_from_tracklist(path: Path) -> list[str]:
 
 
 def create_soundmouse_directories(
-    tracklist_csv: Path,
-    base_directory: Path,
+    release_directory: Path,
     dry_run: bool,
     logger: logging.Logger,
-) -> list[Path]:
-    """Headless replacement for SM-create_new_directories.py."""
-    ranges = activation_ranges_from_tracklist(tracklist_csv)
-    if not ranges:
-        logger.warning("  SoundMouse tracklist has no ActivationRange values.")
-        return []
+) -> Path:
+    """Create the one delivery root resolved by the workflow period.
 
-    roots = [base_directory / value for value in ranges]
-    for root in roots:
-        for child in (root, root / "Covers", root / "Metadata", root / "MEDIA"):
-            if dry_run:
-                logger.info(f"  [DRY RUN] Would create: {child}")
-            else:
-                child.mkdir(parents=True, exist_ok=True)
-        logger.info(f"  {'Would prepare' if dry_run else 'Prepared'}: {root}")
-    return roots
+    Domo's ``ActivationRange`` values describe upstream activation windows and
+    may not match this workflow's Part 1/Part 2/full-month boundaries.  They
+    therefore never control the delivery directory name.
+    """
+    for child in (
+        release_directory,
+        release_directory / "Covers",
+        release_directory / "Metadata",
+        release_directory / "MEDIA",
+    ):
+        if dry_run:
+            logger.info(f"  [DRY RUN] Would create: {child}")
+        else:
+            child.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        f"  {'Would prepare' if dry_run else 'Prepared'}: {release_directory}"
+    )
+    return release_directory
 
 
 def _territory_set(value: str) -> frozenset[str]:
@@ -365,7 +372,12 @@ def metadata_codes_from_bucket(path: Path) -> list[str]:
     return sorted(found, key=int)
 
 
-def _domo_configs(ctx: ReleaseContext, codes: list[str] | None = None) -> list[dict]:
+def _domo_configs(
+    ctx: ReleaseContext,
+    codes: list[str] | None = None,
+    *,
+    metadata_dir: Path | None = None,
+) -> list[dict]:
     if codes is None:
         return [
             {
@@ -384,6 +396,7 @@ def _domo_configs(ctx: ReleaseContext, codes: list[str] | None = None) -> list[d
             },
         ]
 
+    output_dir = metadata_dir or (ctx.soundmouse_release_dir / "Metadata")
     return [
         {
             "key": f"soundmouse_metadata_{code}",
@@ -391,8 +404,7 @@ def _domo_configs(ctx: ReleaseContext, codes: list[str] | None = None) -> list[d
             "page_id": SOUNDMOUSE_DOMO_PAGE_ID,
             "description": f"SoundMouse Metadata {code}",
             "output_fn": (
-                lambda _ctx, c=code: ctx.soundmouse_release_dir
-                / "Metadata" / metadata_filename(c)
+                lambda _ctx, c=code: output_dir / metadata_filename(c)
             ),
             "format": "xlsx",
             "strip_formatting": True,
@@ -422,14 +434,25 @@ def _export_domo_cards(
     domo.TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     domo._require_playwright()
     ok = True
+    DOMO_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     with domo.sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=False, downloads_path=str(domo.TEMP_DOWNLOAD_DIR)
+        browser_ctx = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(DOMO_PROFILE_DIR),
+            headless=False,
+            downloads_path=str(domo.TEMP_DOWNLOAD_DIR),
+            accept_downloads=True,
         )
-        browser_ctx = browser.new_context(accept_downloads=True)
         page = browser_ctx.new_page()
         try:
-            domo._authenticate(page, logger)
+            try:
+                domo._authenticate(page, logger)
+            except domo.PlaywrightTimeoutError:
+                logger.error(
+                    "  ✗ Domo authentication timed out. Complete the Microsoft "
+                    "sign-in in the opened browser, then rerun with "
+                    "--reuse-domo-seeds."
+                )
+                return False
             for card in cards:
                 output = card["output_fn"](ctx)
                 logger.info(f"  Exporting {card['description']} → {output}")
@@ -442,21 +465,98 @@ def _export_domo_cards(
                     logger.error(f"  ✗ {card['description']} failed: {exc}")
                     ok = False
         finally:
-            browser.close()
+            browser_ctx.close()
     return ok
 
 
-def _rows_by_range(path: Path) -> tuple[list[str], dict[str, list[dict[str, str]]]]:
-    fields, rows = _read_csv(path)
-    activation_col = _find_column(fields, ["ACTIVATIONRANGE"])
-    if not activation_col:
-        raise ValueError("SoundMouse tracklist has no ActivationRange column")
-    grouped: dict[str, list[dict[str, str]]] = {}
+def install_soundmouse_metadata(
+    source_workbooks: list[Path],
+    metadata_directory: Path,
+    logger: logging.Logger,
+) -> list[Path]:
+    """Atomically install cleaned full-period workbooks in the delivery."""
+    metadata_directory.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    for source in source_workbooks:
+        destination = metadata_directory / source.name
+        temporary = destination.with_name(f".{destination.name}.tmp")
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        outputs.append(destination)
+        logger.info(f"  Installed metadata: {destination.name}")
+    return outputs
+
+
+def _wav_name(value: str) -> str:
+    """Return a case-insensitive WAV leaf name for tracklist comparisons."""
+    name = Path(str(value).strip()).name
+    if name and not name.casefold().endswith(".wav"):
+        name += ".wav"
+    return name.casefold()
+
+
+def _partition_soundmouse_rows(
+    soundmouse_csv: Path,
+    us_tracklist_csv: Path,
+) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
+    """Split SoundMouse rows into US and non-US UniSync requests."""
+    fields, rows = _read_csv(soundmouse_csv)
+    filename_col = _find_column(fields, ["FILENAME", "FILE"])
+    us_fields, us_rows = _read_csv(us_tracklist_csv)
+    us_filename_col = _find_column(us_fields, ["FILENAME", "FILE"])
+    if not filename_col or not us_filename_col:
+        raise ValueError("SoundMouse and US tracklists both need a Filename column")
+
+    us_names = {
+        _wav_name(row.get(us_filename_col, ""))
+        for row in us_rows
+        if str(row.get(us_filename_col, "")).strip()
+    }
+    routed_us: list[dict[str, str]] = []
+    routed_exus: list[dict[str, str]] = []
     for row in rows:
-        value = str(row.get(activation_col, "")).strip()
-        if value:
-            grouped.setdefault(value, []).append(row)
-    return fields, grouped
+        destination = routed_us if _wav_name(row.get(filename_col, "")) in us_names else routed_exus
+        destination.append(row)
+    return fields, routed_us, routed_exus
+
+
+def _write_soundmouse_request_csv(
+    path: Path,
+    fields: list[str],
+    rows: list[dict[str, str]],
+) -> None:
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _soundmouse_unisync_jobs(
+    ctx: ReleaseContext,
+    us_request_csv: Path | None = None,
+    exus_request_csv: Path | None = None,
+) -> list[dict[str, str]]:
+    """Build the additive territory jobs used by the SoundMouse delivery."""
+    jobs = [
+        {
+            "name": f"SoundMouse {label} WAV ({ctx.soundmouse_activation_range})",
+            "territory": territory,
+            "cache_path": str(UPM_CACHE_WAV),
+            "client_path": str(ctx.soundmouse_release_dir / "MEDIA"),
+            "csv": str(request_csv or ctx.soundmouse_tracklist_csv),
+        }
+        for label, territory, request_csv in (
+            ("US", "United States", us_request_csv),
+            ("Ex-US", "Rest of World", exus_request_csv),
+            ("Japan", "Japan", None),
+        )
+    ]
+    jobs[1]["fallback_territory"] = "Japan"
+    return jobs
 
 
 def run_soundmouse_unisync(
@@ -465,64 +565,61 @@ def run_soundmouse_unisync(
     overwrite: bool,
     logger: logging.Logger,
 ) -> bool:
-    """Run one isolated UniSync WAV job per ActivationRange."""
+    """Run all three WAV territories into the workflow-period directory.
+
+    SoundMouse's selected metadata workbooks can reference US, Rest-of-World,
+    and Japan-only tracks.  A United States-only pass silently tops out at the
+    US delivery count, so all territories must contribute to the same MEDIA
+    folder.  UniSync's skip-existing behavior makes the later passes additive.
+    """
     if dry_run:
         logger.info(
-            f"  [DRY RUN] Would run SoundMouse WAV UniSync → "
-            f"{ctx.soundmouse_release_dir / 'MEDIA'}"
+            "  [DRY RUN] Would route SoundMouse WAVs through US, "
+            f"Rest of World, then Japan fallback → {ctx.soundmouse_release_dir / 'MEDIA'}"
         )
         return True
 
-    fields, grouped = _rows_by_range(ctx.soundmouse_tracklist_csv)
-    temp_paths: list[Path] = []
-    jobs: list[dict] = []
-    try:
-        for activation_range, rows in grouped.items():
-            csv_path = ctx.soundmouse_tracklist_csv
-            if len(grouped) > 1:
-                handle = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".csv", prefix="soundmouse_",
-                    encoding="utf-8-sig", newline="", delete=False,
-                )
-                with handle:
-                    writer = csv.DictWriter(handle, fieldnames=fields)
-                    writer.writeheader()
-                    writer.writerows(rows)
-                csv_path = Path(handle.name)
-                temp_paths.append(csv_path)
-            jobs.append({
-                "name": f"SoundMouse WAV ({activation_range})",
-                "territory": "United States",
-                "cache_path": str(UPM_CACHE_WAV),
-                "client_path": str(SOUNDMOUSE_BASE / activation_range / "MEDIA"),
-                "csv": str(csv_path),
-            })
+    from unisync_automation import STATUS_FAILED, run_all_unisync_jobs
+    with tempfile.TemporaryDirectory(prefix="soundmouse_unisync_") as tmp:
+        request_dir = Path(tmp)
+        try:
+            fields, us_rows, exus_rows = _partition_soundmouse_rows(
+                ctx.soundmouse_tracklist_csv, ctx.us_tracklist_csv
+            )
+            us_csv = request_dir / "SoundMouse-US.csv"
+            exus_csv = request_dir / "SoundMouse-ExUS.csv"
+            _write_soundmouse_request_csv(us_csv, fields, us_rows)
+            _write_soundmouse_request_csv(exus_csv, fields, exus_rows)
+            logger.info(
+                f"  SoundMouse territory routing: {len(us_rows)} US, "
+                f"{len(exus_rows)} Rest-of-World/Japan fallback row(s)."
+            )
+            jobs = _soundmouse_unisync_jobs(ctx, us_csv, exus_csv)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                f"  Could not partition SoundMouse requests ({exc}); "
+                "falling back to full-list territory passes."
+            )
+            jobs = _soundmouse_unisync_jobs(ctx)
 
         class _Jobs:
             unisync_jobs = jobs
 
-        from unisync_automation import STATUS_FAILED, run_all_unisync_jobs
         results = run_all_unisync_jobs(
             _Jobs(), dry_run=dry_run, logger=logger, overwrite=overwrite
         )
-        return bool(results) and not any(v == STATUS_FAILED for v in results.values())
-    finally:
-        for path in temp_paths:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+    return bool(results) and not any(v == STATUS_FAILED for v in results.values())
 
 
 def download_soundmouse_covers(
     tracklist_csv: Path,
-    base_directory: Path,
+    release_directory: Path,
     dry_run: bool,
     overwrite: bool,
     logger: logging.Logger,
 ) -> bool:
-    """Download each unique cover into its row's ActivationRange/Covers."""
-    fields, grouped = _rows_by_range(tracklist_csv)
+    """Download unique covers into the workflow period's delivery root."""
+    fields, rows = _read_csv(tracklist_csv)
     cover_col = _find_column(fields, POSSIBLE_COVER_COLS)
     url_col = _find_column(fields, POSSIBLE_URL_COLS)
     if not cover_col or not url_col:
@@ -533,33 +630,34 @@ def download_soundmouse_covers(
         import requests
 
     ok = True
-    for activation_range, rows in grouped.items():
-        seen: set[str] = set()
-        for row in rows:
-            name = Path(str(row.get(cover_col, "")).strip()).name
-            url = str(row.get(url_col, "")).strip()
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            destination = base_directory / activation_range / "Covers" / name
-            if destination.exists() and not overwrite:
-                continue
-            if not url:
-                logger.warning(f"  No cover URL for {name}")
-                ok = False
-                continue
-            if dry_run:
-                logger.info(f"  [DRY RUN] Would download cover: {destination}")
-                continue
-            try:
-                response = requests.get(url, timeout=45)
-                response.raise_for_status()
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(response.content)
-            except Exception as exc:
-                logger.error(f"  ✗ Cover download failed ({name}): {exc}")
-                ok = False
-        logger.info(f"  SoundMouse covers for {activation_range}: {len(seen)}")
+    seen: set[str] = set()
+    for row in rows:
+        name = Path(str(row.get(cover_col, "")).strip()).name
+        url = str(row.get(url_col, "")).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        destination = release_directory / "Covers" / name
+        if destination.exists() and not overwrite:
+            continue
+        if not url:
+            logger.warning(f"  No cover URL for {name}")
+            ok = False
+            continue
+        if dry_run:
+            logger.info(f"  [DRY RUN] Would download cover: {destination}")
+            continue
+        try:
+            response = requests.get(url, timeout=45)
+            response.raise_for_status()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(response.content)
+        except Exception as exc:
+            logger.error(f"  ✗ Cover download failed ({name}): {exc}")
+            ok = False
+    logger.info(
+        f"  SoundMouse covers for {release_directory.name}: {len(seen)}"
+    )
     return ok
 
 
@@ -568,9 +666,11 @@ def run_soundmouse_step(
     dry_run: bool,
     overwrite: bool,
     logger: logging.Logger,
+    *,
+    reuse_domo_seeds: bool = False,
 ) -> bool:
     logger.info(f"  Tracklist: {ctx.soundmouse_tracklist_csv}")
-    logger.info(f"  Release:   {ctx.soundmouse_release_dir}")
+    logger.info(f"  Release base: {SOUNDMOUSE_BASE}")
 
     if dry_run:
         _export_domo_cards(ctx, _domo_configs(ctx), True, logger)
@@ -589,28 +689,30 @@ def run_soundmouse_step(
         )
         return True
 
-    if not _export_domo_cards(ctx, _domo_configs(ctx), False, logger):
+    if reuse_domo_seeds:
+        missing_seeds = [
+            path for path in (
+                ctx.soundmouse_tracklist_csv,
+                ctx.soundmouse_bucket_csv,
+            )
+            if not path.is_file()
+        ]
+        if missing_seeds:
+            logger.error(
+                "  ✗ Cannot reuse SoundMouse Domo seed exports; missing: "
+                + ", ".join(str(path) for path in missing_seeds)
+            )
+            return False
+        logger.info("  ↩ Reusing existing SoundMouse tracklist and bucket exports.")
+    elif not _export_domo_cards(ctx, _domo_configs(ctx), False, logger):
         return False
     try:
-        roots = create_soundmouse_directories(
-            ctx.soundmouse_tracklist_csv, SOUNDMOUSE_BASE, False, logger
+        root = create_soundmouse_directories(
+            ctx.soundmouse_release_dir, False, logger
         )
     except (OSError, ValueError) as exc:
         logger.error(f"  ✗ SoundMouse directory setup failed: {exc}")
         return False
-    if ctx.soundmouse_release_dir not in roots:
-        logger.error(
-            f"  ✗ Tracklist does not contain the requested ActivationRange "
-            f"{ctx.soundmouse_activation_range}."
-        )
-        return False
-    if not run_soundmouse_unisync(ctx, False, overwrite, logger):
-        return False
-    if not download_soundmouse_covers(
-        ctx.soundmouse_tracklist_csv, SOUNDMOUSE_BASE, False, overwrite, logger
-    ):
-        return False
-
     try:
         codes = metadata_codes_from_bucket(ctx.soundmouse_bucket_csv)
     except (OSError, ValueError) as exc:
@@ -623,16 +725,42 @@ def run_soundmouse_step(
         )
         return False
     logger.info(f"  SoundMouse metadata buckets: {', '.join(codes)}")
-    if not _export_domo_cards(ctx, _domo_configs(ctx, codes), False, logger):
-        return False
-    metadata_paths = [
-        ctx.soundmouse_release_dir / "Metadata" / metadata_filename(code)
-        for code in codes
-    ]
+    with tempfile.TemporaryDirectory(prefix="soundmouse_metadata_") as tmp:
+        staging_dir = Path(tmp)
+        if not _export_domo_cards(
+            ctx,
+            _domo_configs(ctx, codes, metadata_dir=staging_dir),
+            False,
+            logger,
+        ):
+            return False
+        source_workbooks = [
+            staging_dir / metadata_filename(code) for code in codes
+        ]
+        if not run_soundmouse_unisync(ctx, False, overwrite, logger):
+            return False
+        if not download_soundmouse_covers(
+            ctx.soundmouse_tracklist_csv,
+            root,
+            False,
+            overwrite,
+            logger,
+        ):
+            return False
+        try:
+            metadata_paths = install_soundmouse_metadata(
+                source_workbooks,
+                root / "Metadata",
+                logger,
+            )
+        except (OSError, ValueError) as exc:
+            logger.error(f"  ✗ Could not install SoundMouse metadata: {exc}")
+            return False
+
     return validate_soundmouse_delivery(
         metadata_paths,
-        ctx.soundmouse_release_dir / "MEDIA",
-        ctx.soundmouse_release_dir / "Covers",
+        root / "MEDIA",
+        root / "Covers",
         ctx.soundmouse_validation_report,
         False,
         logger,
@@ -659,6 +787,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--previous-month", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--reuse-domo-seeds",
+        action="store_true",
+        help=(
+            "Reuse the existing SoundMouse tracklist and bucket CSVs; "
+            "metadata cards are still refreshed."
+        ),
+    )
     return parser
 
 
@@ -671,7 +807,11 @@ def main() -> int:
         return 1
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
     return 0 if run_soundmouse_step(
-        ctx, args.dry_run, args.overwrite, logging.getLogger("soundmouse")
+        ctx,
+        args.dry_run,
+        args.overwrite,
+        logging.getLogger("soundmouse"),
+        reuse_domo_seeds=args.reuse_domo_seeds,
     ) else 1
 
 

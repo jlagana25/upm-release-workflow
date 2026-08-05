@@ -73,7 +73,7 @@ NAV_WAIT          = 4.0
 PICKER_WAIT       = 2.0
 DROPDOWN_WAIT     = 1.0
 EXPORT_WAIT       = 2.0
-LOGIN_TIMEOUT     = 120_000
+LOGIN_TIMEOUT     = 300_000
 NAV_TIMEOUT       = 30_000
 DOWNLOAD_TIMEOUT  = 90_000
 
@@ -284,6 +284,35 @@ def _authenticate(page, logger: logging.Logger) -> None:
         f"https://{DOMO_INSTANCE}/auth/index?lang=en",
         wait_until="domcontentloaded",
     )
+    # Domo's landing page does not redirect to Microsoft until its orange
+    # SIGN IN control is activated.  Waiting for the post-auth URL without
+    # clicking it leaves unattended runs parked on the public landing page.
+    # If a retained browser session redirects immediately, the control is not
+    # present and the short lookup simply falls through.
+    try:
+        sign_in = page.get_by_role("button", name="SIGN IN", exact=True)
+        sign_in.click(timeout=5_000)
+        logger.info("  Clicked Domo SIGN IN.")
+    except PlaywrightTimeoutError:
+        try:
+            page.locator(
+                'input[type="submit"][value="SIGN IN" i], '
+                'a:has-text("SIGN IN"), [role="button"]:has-text("SIGN IN")'
+            ).first.click(timeout=5_000)
+            logger.info("  Clicked Domo SIGN IN (fallback locator).")
+        except PlaywrightTimeoutError:
+            try:
+                # The current Domo landing page renders the orange control as
+                # visible text inside a non-semantic element (not a button or
+                # link), so text matching is the final reliable fallback.
+                page.get_by_text("SIGN IN", exact=True).first.click(
+                    timeout=5_000
+                )
+                logger.info("  Clicked Domo SIGN IN (text locator).")
+            except PlaywrightTimeoutError:
+                logger.info(
+                    "  Domo SIGN IN was not shown; checking retained session."
+                )
     logger.info("  >>> Complete Microsoft login in the browser window <<<")
     page.wait_for_function(
         f"() => window.location.hostname === '{DOMO_INSTANCE}'"

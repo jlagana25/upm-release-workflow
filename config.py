@@ -7,9 +7,10 @@ All paths, naming tokens, and constants are derived here from
 Usage:
     from config import ReleaseContext
     ctx = ReleaseContext(year=2026, month=5, part=1)
-    print(ctx.specials_root)        # UPM-2026-05
-    print(ctx.hd_folder)            # 2026-05 (May)
-    print(ctx.us_tracklist_csv)     # Path(…/UPM-US-May2026-Tracklist.csv)
+    print(ctx.release_id)           # UPM-2026-05-P1
+    print(ctx.specials_root)        # UPM-2026-05-P1
+    print(ctx.hd_folder)            # UPM-2026-05-P1
+    print(ctx.us_tracklist_csv)     # Path(…/UPM-US-2026-05-P1-Tracklist.csv)
 """
 
 from __future__ import annotations
@@ -248,7 +249,7 @@ REMOTE_SOUNDMINER: dict[str, str] = {
 
 
 # Placeholder string used throughout the baseline folder/template files; it is
-# replaced with the release's month display string (e.g. "May 2026") during
+# replaced with the release's display string (e.g. "May 2026 Part 1") during
 # folder setup (Step 2/3) and album-list generation (Step 4).
 PLACEHOLDER = "MMMM YYYY"
 
@@ -326,54 +327,44 @@ class ReleaseContext:
 
         # ---- Basic name tokens -----------------------------------------------
         self.month_name = run_date.strftime("%B")   # May
-        self.month_abbr = run_date.strftime("%b")   # May
         self.year_str   = run_date.strftime("%Y")   # 2026
         self.month_num  = run_date.strftime("%m")   # 05
 
         # Previous-month mode is always a single full-month run, never Part 2.
-        self.is_part2 = (part == 2) and not previous_month
-        self.tracklist_suffix = "-2" if self.is_part2 else ""
-
-        # e.g.  May2026  or  May2026-2
+        # Keep it explicitly named so it cannot collide with the normal Part 1
+        # release for the same calendar month.
+        self.is_full_month = previous_month
+        self.release_variant = "FULL" if self.is_full_month else f"P{self.part}"
+        self.release_id = (
+            f"UPM-{self.year_str}-{self.month_num}-{self.release_variant}"
+        )
+        # e.g. 2026-05-P1, 2026-05-P2, or 2026-05-FULL
         self.tracklist_token = (
-            f"{self.month_abbr}{self.year_str}{self.tracklist_suffix}"
+            f"{self.year_str}-{self.month_num}-{self.release_variant}"
         )
 
         # ---- Display strings -------------------------------------------------
         # May 2026
         self.month_display = f"{self.month_name} {self.year_str}"
 
-        # May 2026  or  May 2026 Part 2  (used for folder names — no parens
-        # so paths stay filesystem-friendly).  Previous-month mode uses the
-        # plain "May 2026" form (full month, no Part suffix).
+        # May 2026 Part 1, May 2026 Part 2, or May 2026 Full.
         self.month_display_folder = (
-            f"{self.month_name} {self.year_str} Part 2"
-            if self.is_part2
-            else f"{self.month_name} {self.year_str}"
+            f"{self.month_name} {self.year_str} Full"
+            if self.is_full_month
+            else f"{self.month_name} {self.year_str} Part {self.part}"
         )
 
-        # May 2026  or  May 2026 (Part 2)  (used for human-readable text inside
-        # documents — parens around "Part 2" for readability)
+        # May 2026 (Part 1), May 2026 (Part 2), or May 2026 (Full).
         self.month_display_text = (
-            f"{self.month_name} {self.year_str} (Part 2)"
-            if self.is_part2
-            else f"{self.month_name} {self.year_str}"
+            f"{self.month_name} {self.year_str} (Full)"
+            if self.is_full_month
+            else f"{self.month_name} {self.year_str} (Part {self.part})"
         )
 
         # ---- Folder names ----------------------------------------------------
-        # UPM-2026-05  or  UPM-2026-05_2  (previous-month → plain UPM-2026-05)
-        self.specials_root = (
-            f"UPM-{self.year_str}-{self.month_num}_2"
-            if self.is_part2
-            else f"UPM-{self.year_str}-{self.month_num}"
-        )
-
-        # 2026-05 (May)  or  2026-05 (May Part 2)
-        self.hd_folder = (
-            f"{self.year_str}-{self.month_num} ({self.month_name} Part 2)"
-            if self.is_part2
-            else f"{self.year_str}-{self.month_num} ({self.month_name})"
-        )
+        # Both internal roots use the canonical release ID.
+        self.specials_root = self.release_id
+        self.hd_folder = self.release_id
 
         # ---- Release date range ---------------------------------------------
         last_day = monthrange(year, month)[1]
@@ -444,13 +435,13 @@ class ReleaseContext:
             self.specials_dir
             / "3-FINAL PACKAGING"
             / _japan_folder
-            / f"{self.month_display}{self.tracklist_suffix} NTT Data Metadata.csv"
+            / f"{self.month_display_folder} NTT Data Metadata.csv"
         )
         self.nbc_metadata_csv = (
             self.specials_dir
             / "1-ORIGINAL"
             / "Metadata"
-            / f"UPM-US NBCUniversal Metadata Export{self.tracklist_suffix}.csv"
+            / f"UPM-US NBCUniversal Metadata Export-{self.release_variant}.csv"
         )
 
         # ---- Album list document paths --------------------------------------
@@ -520,7 +511,8 @@ class ReleaseContext:
         - If they are omitted, it is computed relative to TODAY's real date.
 
         Either way, the result is a single full-month context (no Part split):
-        date range = 1st → last day, folders use the plain "Month YYYY" form.
+        date range = 1st → last day, and names use the explicit
+        "Month YYYY Full" form.
 
         Handles the January → December year rollover.
         """
@@ -547,6 +539,29 @@ class ReleaseContext:
             prev_year, prev_month = ref_year, ref_month - 1
 
         return cls(year=prev_year, month=prev_month, part=1, previous_month=True)
+
+    def pinned_cli_args(self) -> list[str]:
+        """Return CLI arguments that recreate this exact release context.
+
+        ``--previous-month --year/--month`` accepts a reference month, so a
+        resolved full-month context must pass the following month when handed
+        to another machine. This prevents a Full run from reopening Part 1.
+        """
+        if self.is_full_month:
+            if self.month == 12:
+                ref_year, ref_month = self.year + 1, 1
+            else:
+                ref_year, ref_month = self.year, self.month + 1
+            return [
+                "--previous-month",
+                "--year", str(ref_year),
+                "--month", str(ref_month),
+            ]
+        return [
+            "--year", str(self.year),
+            "--month", str(self.month),
+            "--part", str(self.part),
+        ]
 
     # -------------------------------------------------------------------------
     # Internal builders
@@ -706,9 +721,10 @@ class ReleaseContext:
     # -------------------------------------------------------------------------
     def summary(self) -> str:
         lines = [
+            f"  Release ID:       {self.release_id}",
             f"  Year:             {self.year}",
             f"  Month:            {self.month_name} ({self.month_num})",
-            f"  Part:             {self.part}",
+            f"  Release type:     {'Full' if self.is_full_month else f'Part {self.part}'}",
             f"  Release range:    {self.release_start} → {self.release_end}",
             f"  Tracklist token:  {self.tracklist_token}",
             f"  Specials root:    {self.specials_root}",
@@ -725,7 +741,7 @@ class ReleaseContext:
     def __repr__(self) -> str:
         return (
             f"ReleaseContext(year={self.year}, month={self.month}, "
-            f"part={self.part}, specials_root={self.specials_root!r})"
+            f"part={self.part}, release_id={self.release_id!r})"
         )
 
 

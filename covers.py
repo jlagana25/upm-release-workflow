@@ -572,13 +572,31 @@ def distribute_covers_into_album_folders(
 
         label_dir = dest_root / label
 
-        # Look for any existing "{albumno} - <whatever>" folder to reuse
+        # Look for an existing "{albumno} - <whatever>" folder to reuse.  A
+        # prior interrupted/legacy run can leave two title variants behind:
+        # one populated by UniSync and one cover-only folder created from the
+        # tracklist spelling.  Prefer the folder that actually contains audio
+        # instead of whichever directory the filesystem happens to return
+        # first; otherwise the split is perpetuated on every rerun.
         existing: Optional[Path] = None
         if label_dir.is_dir():
-            for entry in label_dir.iterdir():
-                if entry.is_dir() and entry.name.startswith(f"{albumno} -"):
-                    existing = entry
-                    break
+            matches = sorted(
+                (
+                    entry for entry in label_dir.iterdir()
+                    if entry.is_dir()
+                    and entry.name.startswith(f"{albumno} -")
+                ),
+                key=lambda entry: (
+                    -sum(
+                        1 for child in entry.iterdir()
+                        if child.is_file()
+                        and child.suffix.lower() in {".wav", ".aif", ".aiff", ".mp3"}
+                    ),
+                    entry.name.casefold(),
+                ),
+            )
+            if matches:
+                existing = matches[0]
 
         if existing is not None:
             album_dir = existing

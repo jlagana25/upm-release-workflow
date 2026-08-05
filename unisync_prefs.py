@@ -171,7 +171,7 @@ def write_unisync_xml_prefs(
 #   # dry-run a change (prints the new values, writes nothing)
 #   python3 unisync_prefs.py --territory "United States" \
 #       --cache-path "/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/WAV" \
-#       --client-path "/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05/1-ORIGINAL/Music/WAV"
+#       --client-path "/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05-P1/1-ORIGINAL/Music/WAV"
 #
 #   # actually write it, then QUIT-and-relaunch UniSync and check the fields
 #   python3 unisync_prefs.py --apply --territory "United States" \
