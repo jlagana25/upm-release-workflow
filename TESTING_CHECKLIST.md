@@ -433,6 +433,8 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
 **Prerequisites on USMPSMDHDF1:**
 - Terminal has **Accessibility** + **Screen Recording** granted.
 - The four/three reference crops exist (`python3 make_soundminer_crops.py` if not).
+  If one live control changes, recapture only that host-specific crop with
+  `python3 recapture_crop.py <crop_filename.png>` while the control is visible.
 - The NBC metadata CSV exists at `{specials}/1-ORIGINAL/Metadata/UPM-US NBCUniversal Metadata Export.csv`.
 - The staged WAVs exist at `{specials}/2-STAGING/SME WAV 48K NBC/MEDIA/`.
 - The remote has the **current code** (verify by byte size, e.g. `wc -c soundminer.py`).
