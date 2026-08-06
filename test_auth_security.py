@@ -93,6 +93,7 @@ class AuthSecurityTests(unittest.TestCase):
                 "_attempt_keychain_microsoft_login",
                 return_value=False,
             ),
+            patch.object(domo_exports, "_verify_domo_workspace"),
         ):
             domo_exports._authenticate(page, Mock())
         timeout = page.wait_for_function.call_args.kwargs["timeout"]
@@ -111,6 +112,7 @@ class AuthSecurityTests(unittest.TestCase):
                 "_attempt_keychain_microsoft_login",
                 return_value=False,
             ),
+            patch.object(domo_exports, "_verify_domo_workspace"),
         ):
             domo_exports._authenticate(page, Mock(), allow_interactive=True)
         timeout = page.wait_for_function.call_args.kwargs["timeout"]

@@ -44,6 +44,8 @@ Setup is the only interactive authentication operation. Normal workflow runs:
 - never prompt for a password, MFA response, or an Enter keypress; and
 - allow up to three minutes for UMG's unattended Microsoft→Domo redirect, then
   fail with a redacted setup command if interactive reauthentication is needed.
+- verify the result by opening a known protected Domo workspace page; merely
+  returning to the Domo hostname is not counted as a successful login.
 
 This provides unattended authentication without making a password available in
 the repository, filesystem configuration, environment, process arguments, or

@@ -95,6 +95,7 @@ LOGIN_TIMEOUT     = 300_000
 # when no operator action is required, so allow three minutes before deciding
 # the retained session truly needs interactive re-enrollment.
 SILENT_LOGIN_TIMEOUT = 180_000
+DOMO_VERIFY_TIMEOUT = 45_000
 NAV_TIMEOUT       = 30_000
 DOWNLOAD_TIMEOUT  = 90_000
 
@@ -115,6 +116,27 @@ def _domo_session_is_authenticated(url: str) -> bool:
         return parsed.hostname == DOMO_INSTANCE and "/auth" not in parsed.path
     except Exception:
         return False
+
+
+def _verify_domo_workspace(page, logger: logging.Logger) -> None:
+    """Prove authentication by opening a known protected Domo workspace page."""
+    protected_url = f"https://{DOMO_INSTANCE}/page/{DOMO_PAGE_ID}"
+    logger.info("  Verifying access to a protected Domo workspace page…")
+    page.goto(protected_url, wait_until="domcontentloaded")
+    try:
+        page.wait_for_function(
+            f"() => window.location.hostname === '{DOMO_INSTANCE}'"
+            f"   && window.location.pathname.startsWith('/page/{DOMO_PAGE_ID}')",
+            timeout=DOMO_VERIFY_TIMEOUT,
+            polling=500,
+        )
+    except PlaywrightTimeoutError as exc:
+        raise PlaywrightTimeoutError(
+            "Microsoft returned to Domo, but the protected workspace did not "
+            "open; authentication is not verified. "
+            f"URL={_safe_url_for_log(page.url)}"
+        ) from exc
+    logger.info("  Protected Domo workspace access verified.")
 
 
 def _visible(locator) -> bool:
@@ -427,6 +449,7 @@ def _authenticate(
         wait_until="domcontentloaded",
     )
     if _domo_session_is_authenticated(page.url):
+        _verify_domo_workspace(page, logger)
         logger.info("  Logged in using the retained private Domo session.")
         time.sleep(NAV_WAIT)
         return
@@ -507,6 +530,7 @@ def _authenticate(
             "Domo/Microsoft authentication did not recover within the timeout. "
             f"URL={_safe_url_for_log(page.url)}; screenshot={screenshot}. {remedy}"
         )
+    _verify_domo_workspace(page, logger)
     logger.info("  Logged in using the private per-user session.")
     time.sleep(NAV_WAIT)
 

@@ -249,7 +249,9 @@ workflow run must not wait for manual account/password entry.
   noted write XLSX (passthrough — the Domo workbook is kept as-is, not converted).
 - **Expected output:**
   - Browser opens; log says `Attempting unattended Domo/Microsoft silent SSO…`,
-    then `Logged in using the private per-user session.`
+    then `Protected Domo workspace access verified.` and
+    `Logged in using the private per-user session.` A return to the Domo host
+    alone is not accepted as success.
   - When Microsoft shows the saved-account tile/password form, the log reports
     redacted Keychain account selection and password submission. Neither value
     appears in the log, screenshot name, URL, process list, or report.

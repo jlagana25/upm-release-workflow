@@ -235,6 +235,11 @@ def setup_domo(logger: logging.Logger) -> bool:
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 domo._authenticate(page, logger, allow_interactive=True)
+                logger.info(
+                    "Protected Domo workspace verified; leaving the browser "
+                    "visible for 10 seconds for confirmation."
+                )
+                time.sleep(10)
             finally:
                 context.close()
         secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
