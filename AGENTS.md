@@ -278,6 +278,10 @@ inline or are submitted to HDF1's login-session agent.
   Login Keychain items and fail rather than pausing for MFA. Credential values
   must never enter argv, logs, URLs, screenshots, reports, or repository files.
   UniSync reuses its own current-user Keychain session.
+- **MTV-Viacom is retired.** The shared Specials baseline may still contain its
+  historical folder, so both fresh `copytree` and additive baseline merges must
+  filter names through `config.is_retired_partner_name()`. Do not delete old
+  release folders as part of setup.
 - **Every `--skip-*` flag** must appear in `_ALL_SKIP_ATTRS` (enforced by
   `smoke_test.py`). Sub-phase flags without their own step token (like
   `--skip-soundexchange`) may need special handling in `_apply_step_selectors`

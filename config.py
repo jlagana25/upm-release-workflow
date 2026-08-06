@@ -59,6 +59,17 @@ UPM_CACHE_MP3 = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/MP3")
 UPM_CACHE_WAV = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/WAV")
 SOUNDMOUSE_BASE = Path("/Volumes/Pegasus32 R8 - 2/SoundMouse")
 
+# Retired partner folders can remain in the shared Specials baseline for
+# historical releases. New release trees must not inherit them. Matching is
+# punctuation/case-insensitive so both "MTV-Viacom" and layout variants are
+# excluded without depending on a particular dated folder prefix.
+RETIRED_PARTNER_TOKENS: frozenset[str] = frozenset({"mtvviacom"})
+
+
+def is_retired_partner_name(name: str) -> bool:
+    normalized = "".join(ch.lower() for ch in name if ch.isalnum())
+    return any(token in normalized for token in RETIRED_PARTNER_TOKENS)
+
 # HDF1-local coordination area used by the login-session Soundminer agent.
 # HDF2 transports JSON requests/status over SSH; SSH never launches or drives
 # the GUI. Keeping the queue local avoids macOS background-process stalls when

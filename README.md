@@ -101,6 +101,11 @@ Partner-facing folders are equally explicit, such as
 `Universal Production Music July 2026 Full Release - NBC`. A July run retains
 July naming even when processed in August.
 
+MTV-Viacom is retired from the workflow. Folder setup filters any matching
+legacy folder out of the shared Specials baseline, so fresh and additively
+resumed release trees do not create that delivery. Existing historical release
+folders are left untouched.
+
 A normal run **deletes** non-maintracks at Step 13; `--dry-run` is the only thing
 that holds back to a preview. Steps 10–15 are gated behind Step 9 verification
 (escape with `--skip-verify`). See `TESTING_CHECKLIST.md` for the per-step

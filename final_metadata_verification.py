@@ -47,7 +47,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from config import ReleaseContext, context_from_cli_args, EXPORTS_DIR
+from config import (
+    EXPORTS_DIR,
+    ReleaseContext,
+    context_from_cli_args,
+    is_retired_partner_name,
+)
 from tracklist_columns import (
     _find_column,
     POSSIBLE_LABEL_COLS,
@@ -315,7 +320,11 @@ def _report_unchecked_partner_folders(
         if rel.parts:
             covered.add(rel.parts[0])
 
-    existing = {d.name for d in fp_root.iterdir() if d.is_dir()}
+    existing = {
+        d.name
+        for d in fp_root.iterdir()
+        if d.is_dir() and not is_retired_partner_name(d.name)
+    }
     unchecked = sorted(existing - covered)
     if unchecked:
         logger.info(

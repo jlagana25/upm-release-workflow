@@ -37,6 +37,7 @@ from config import (
     VOLUMES,
     ReleaseContext,
     context_from_cli_args,
+    is_retired_partner_name,
 )
 
 
@@ -180,7 +181,13 @@ def _merge_baseline_additive(
     of files copied.  Skips *.bat / *.exe to match _safe_copytree's ignore.
     """
     copied = 0
-    for root, _dirs, files in os.walk(src):
+    for root, directories, files in os.walk(src):
+        # Do not descend into retired partner trees inherited from the shared
+        # baseline. Mutating `directories` is the documented os.walk pruning
+        # mechanism and also protects additive/skeleton-resume copies.
+        directories[:] = [
+            name for name in directories if not is_retired_partner_name(name)
+        ]
         rel = os.path.relpath(root, str(src))
         target_dir = dst if rel == "." else dst / rel
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -279,11 +286,15 @@ def _safe_copytree(
             f"    → {dst}"
         )
         try:
-            shutil.copytree(
-                src,
-                dst,
-                ignore=shutil.ignore_patterns("*.bat", "*.exe"),
-            )
+            def _ignore(_directory: str, names: list[str]) -> set[str]:
+                return {
+                    name
+                    for name in names
+                    if name.lower().endswith((".bat", ".exe"))
+                    or is_retired_partner_name(name)
+                }
+
+            shutil.copytree(src, dst, ignore=_ignore)
         except KeyboardInterrupt:
             logger.error(
                 f"  ✗ Copy interrupted [{label}] — archiving the partial "

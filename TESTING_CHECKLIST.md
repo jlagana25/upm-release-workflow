@@ -216,6 +216,8 @@ Validates Steps 2 & 3 (Specials folder tree + HD update folders).
   - Real run logs each `mkdir`; existing folders are reported as already present (idempotent), not errors.
 - **Inspect:**
   - `ls -la "{specials}"` — the `1-ORIGINAL`, `2-STAGING`, `3-FINAL PACKAGING` (etc.) subtree exists.
+  - No MTV-Viacom folder exists anywhere in the newly generated tree; legacy
+    baseline copies are filtered during both fresh and additive setup.
   - The HD update folders exist at their configured location.
 - **Rollback/cleanup:**
   - If you created folders only for the test, remove the top-level release folder you created:
