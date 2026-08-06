@@ -27,6 +27,24 @@ python3 auth_manager.py --status
 - macOS Keychain remains owned by the application and the current user. The
   workflow never reads, exports, logs, or deletes Keychain secrets.
 
+## Unattended release runs
+
+Setup is the only interactive authentication operation. Normal workflow runs:
+
+- reuse the private Domo profile and allow Microsoft/Domo silent SSO to finish;
+- reuse UniSync's current-user application/Keychain session after each relaunch;
+- never prompt for a password, MFA response, or an Enter keypress; and
+- fail promptly with a redacted setup command if UMG requires interactive
+  reauthentication.
+
+This provides unattended authentication without making a retrievable password
+available to the workflow. Microsoft can still invalidate a session or require
+MFA under UMG policy. That cannot safely be bypassed: rerun the corresponding
+`auth_manager.py --setup ...` command outside the release run, then resume the
+workflow. Running `python3 auth_manager.py --status` before a scheduled release
+confirms that local enrollment exists, but cannot guarantee that a remote SSO
+session has not expired.
+
 Directories are forced to mode `0700`; auth/preference files and diagnostic
 screenshots are forced to `0600`. Browser children inherit a restrictive
 creation mask so new cookie databases are private immediately.

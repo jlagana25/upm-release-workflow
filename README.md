@@ -42,6 +42,12 @@ python3 auth_manager.py --setup unisync
 python3 auth_manager.py --status
 ```
 
+This is a one-time interactive enrollment. Normal release runs reuse Domo's
+private persistent browser session and UniSync's app/Keychain session without
+login prompts or Enter pauses. If UMG invalidates a session or requires fresh
+MFA, the run fails promptly and tells the operator which setup command to run
+outside the release workflow; it never stores or types a password.
+
 No credential or browser profile is stored in Git or on Pegasus. Local auth
 directories are mode `0700`, files are `0600`, status/log output is redacted,
 and the installed pre-commit scanner blocks identities, cookie databases,

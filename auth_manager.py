@@ -78,7 +78,8 @@ def secure_auth_permissions() -> None:
             secure_private_directory(logs, recursive=True)
 
 
-def _has_unisync_identity() -> bool:
+def unisync_auth_configured() -> bool:
+    """Return only whether UniSync has per-user login configuration."""
     try:
         text = UNISYNC_XML_PATH.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -111,7 +112,7 @@ def auth_status() -> dict[str, dict[str, object]]:
             "location": str(DOMO_PROFILE_DIR),
         },
         "unisync": {
-            "state": "configured" if _has_unisync_identity() else "missing",
+            "state": "configured" if unisync_auth_configured() else "missing",
             "private_permissions": unisync_private,
             "location": str(UNISYNC_XML_PATH),
         },
@@ -134,7 +135,7 @@ def setup_domo(logger: logging.Logger) -> bool:
                 )
             page = context.pages[0] if context.pages else context.new_page()
             try:
-                domo._authenticate(page, logger)
+                domo._authenticate(page, logger, allow_interactive=True)
             finally:
                 context.close()
         secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
@@ -152,7 +153,7 @@ def setup_unisync(logger: logging.Logger) -> bool:
     if not app.exists():
         logger.error("UniSync is not installed at %s", app)
         return False
-    if _has_unisync_identity():
+    if unisync_auth_configured():
         secure_private_file(UNISYNC_XML_PATH)
         logger.info("UniSync login is already configured for this macOS user (identity redacted).")
         return True
@@ -166,7 +167,7 @@ def setup_unisync(logger: logging.Logger) -> bool:
     )
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
-        if _has_unisync_identity():
+        if unisync_auth_configured():
             secure_private_file(UNISYNC_XML_PATH)
             logger.info("UniSync login detected and local preferences secured (identity redacted).")
             return True

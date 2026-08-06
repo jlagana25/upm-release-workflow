@@ -272,6 +272,10 @@ inline or are submitted to HDF1's login-session agent.
   the 10 UniSync crops; the Soundminer machine (HDF1) needs those plus 3 required
   + 4 optional Soundminer crops. There are no root-level shared crops.
 - **Lazy GUI/browser imports** (see §2) — never move them to module top level.
+- **Authentication is unattended only through retained per-user sessions.**
+  Interactive Domo/Microsoft MFA is allowed only in `auth_manager.py --setup`;
+  normal workflow runs use bounded silent SSO and fail rather than pausing or
+  collecting credentials. UniSync reuses its own current-user Keychain session.
 - **Every `--skip-*` flag** must appear in `_ALL_SKIP_ATTRS` (enforced by
   `smoke_test.py`). Sub-phase flags without their own step token (like
   `--skip-soundexchange`) may need special handling in `_apply_step_selectors`

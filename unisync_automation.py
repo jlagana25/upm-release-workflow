@@ -52,7 +52,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import ReleaseContext, UNISYNC_XML_PATH as CONFIG_UNISYNC_XML_PATH, current_hostname
-from auth_manager import secure_private_file
+from auth_manager import secure_private_file, unisync_auth_configured
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -343,6 +343,22 @@ def run_all_unisync_jobs(
     `overwrite=True` to force every job to run regardless.
     """
     secure_private_file(Path(UNISYNC_XML_PATH))
+
+    # UniSync owns its session in this macOS user's preferences/Keychain.  The
+    # workflow never asks for or types a password.  Direct Step 5 runs get the
+    # same fail-fast behavior as the orchestrator preflight, before any GUI
+    # clicks can leave an unattended run parked at a login screen.
+    if not dry_run and not unisync_auth_configured():
+        logger.error(
+            "UniSync's private per-user login is not configured. The workflow "
+            "did not pause. Outside the release run, execute: "
+            "python3 auth_manager.py --setup unisync"
+        )
+        return {job["name"]: STATUS_FAILED for job in ctx.unisync_jobs}
+    if not dry_run:
+        logger.info(
+            "  UniSync will reuse its private app/Keychain session unattended."
+        )
 
     # Screenshot preflight
     if not verify_screenshots(logger):

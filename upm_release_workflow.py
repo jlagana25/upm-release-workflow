@@ -183,20 +183,31 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
     try:
         secure_auth_permissions()
         private_auth = auth_status()
-        if _active("skip_domo"):
+        # Step 16 also performs Domo exports even when Step 1 was selected out.
+        if _active("skip_domo") or _active("skip_soundmouse"):
             domo_state = private_auth["domo"]
             if domo_state["state"] == "configured" and domo_state["private_permissions"]:
-                logger.info("  ✓  Domo per-user session profile configured and private")
-            else:
-                logger.warning(
-                    "  !  Domo per-user session is not configured. The first "
-                    "browser run will require this user's Microsoft login/MFA; "
-                    "or run: python3 auth_manager.py --setup domo"
+                logger.info(
+                    "  ✓  Domo per-user session configured for unattended silent SSO"
                 )
+            else:
+                message = (
+                    "  ✗  Domo is not enrolled for unattended use by this "
+                    "macOS user. Run outside the workflow: "
+                    "python3 auth_manager.py --setup domo"
+                )
+                if bool(getattr(args, "dry_run", False)):
+                    logger.warning(message)
+                else:
+                    logger.error(message)
+                    ok = False
         if _active("skip_unisync"):
             unisync_state = private_auth["unisync"]
             if unisync_state["state"] == "configured" and unisync_state["private_permissions"]:
-                logger.info("  ✓  UniSync per-user login preferences configured and private")
+                logger.info(
+                    "  ✓  UniSync per-user app/Keychain session configured "
+                    "for unattended reuse"
+                )
             else:
                 logger.error(
                     "  ✗  UniSync is not configured for this macOS user. Run: "

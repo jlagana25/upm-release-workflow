@@ -83,6 +83,10 @@ PICKER_WAIT       = 2.0
 DROPDOWN_WAIT     = 1.0
 EXPORT_WAIT       = 2.0
 LOGIN_TIMEOUT     = 300_000
+# Normal workflow runs never wait for a person.  This window is only for the
+# retained Domo/Microsoft session to redirect through silent SSO.  Interactive
+# MFA is deliberately confined to `auth_manager.py --setup domo`.
+SILENT_LOGIN_TIMEOUT = 45_000
 NAV_TIMEOUT       = 30_000
 DOWNLOAD_TIMEOUT  = 90_000
 
@@ -94,6 +98,15 @@ def _safe_url_for_log(url: str) -> str:
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     except Exception:
         return "(URL redacted)"
+
+
+def _domo_session_is_authenticated(url: str) -> bool:
+    """Recognize a post-login Domo URL without inspecting any auth values."""
+    try:
+        parsed = urlsplit(url)
+        return parsed.hostname == DOMO_INSTANCE and "/auth" not in parsed.path
+    except Exception:
+        return False
 
 # ---------------------------------------------------------------------------
 # Card configuration
@@ -300,12 +313,28 @@ def verify_exports_exist(
 # Authentication
 # ---------------------------------------------------------------------------
 
-def _authenticate(page, logger: logging.Logger) -> None:
-    logger.info("  Navigating to Domo login page…")
+def _authenticate(
+    page,
+    logger: logging.Logger,
+    *,
+    allow_interactive: bool = False,
+) -> None:
+    """Restore Domo authentication from the current user's private profile.
+
+    Workflow callers use the default unattended mode: cached Domo/Microsoft
+    state may complete silent SSO, but this function never pauses for a person.
+    `auth_manager --setup domo` opts into the longer interactive enrollment
+    window used for the one-time login/MFA ceremony.
+    """
+    logger.info("  Restoring the private per-user Domo session…")
     page.goto(
         f"https://{DOMO_INSTANCE}/auth/index?lang=en",
         wait_until="domcontentloaded",
     )
+    if _domo_session_is_authenticated(page.url):
+        logger.info("  Logged in using the retained private Domo session.")
+        time.sleep(NAV_WAIT)
+        return
     # Domo's landing page does not redirect to Microsoft until its orange
     # SIGN IN control is activated.  Waiting for the post-auth URL without
     # clicking it leaves unattended runs parked on the public landing page.
@@ -338,12 +367,19 @@ def _authenticate(page, logger: logging.Logger) -> None:
                 logger.info(
                     "  Domo SIGN IN was not shown; checking retained session."
                 )
-    logger.info("  >>> Complete Microsoft login in the browser window <<<")
+    if allow_interactive:
+        logger.info(
+            "  One-time setup: complete Microsoft login/MFA in the browser window…"
+        )
+        timeout = LOGIN_TIMEOUT
+    else:
+        logger.info("  Attempting unattended Domo/Microsoft silent SSO…")
+        timeout = SILENT_LOGIN_TIMEOUT
     try:
         page.wait_for_function(
             f"() => window.location.hostname === '{DOMO_INSTANCE}'"
             f"   && !window.location.href.includes('/auth')",
-            timeout=LOGIN_TIMEOUT,
+            timeout=timeout,
             polling=1000,
         )
     except PlaywrightTimeoutError:
@@ -355,13 +391,22 @@ def _authenticate(page, logger: logging.Logger) -> None:
             secure_private_file(screenshot)
         except Exception:
             screenshot = Path("(screenshot unavailable)")
+        if allow_interactive:
+            remedy = (
+                "One-time Domo setup did not complete. Finish Microsoft "
+                "sign-in/MFA and rerun: python3 auth_manager.py --setup domo."
+            )
+        else:
+            remedy = (
+                "The saved session requires interactive reauthentication. "
+                "The workflow did not pause. Outside the release run, execute: "
+                "python3 auth_manager.py --setup domo."
+            )
         raise PlaywrightTimeoutError(
             "Domo/Microsoft authentication did not recover within the timeout. "
-            f"URL={_safe_url_for_log(page.url)}; screenshot={screenshot}. Complete the one-time "
-            "Microsoft sign-in in this persistent profile, then future runs "
-            "will reuse it unattended."
+            f"URL={_safe_url_for_log(page.url)}; screenshot={screenshot}. {remedy}"
         )
-    logger.info("  Logged in.")
+    logger.info("  Logged in using the private per-user session.")
     time.sleep(NAV_WAIT)
 
 

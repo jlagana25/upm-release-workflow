@@ -449,9 +449,10 @@ def _export_domo_cards(
                 domo._authenticate(page, logger)
             except domo.PlaywrightTimeoutError:
                 logger.error(
-                    "  ✗ Domo authentication timed out. Complete the Microsoft "
-                    "sign-in in the opened browser, then rerun with "
-                    "--reuse-domo-seeds."
+                    "  ✗ The private Domo session requires reauthentication. "
+                    "The workflow did not pause. Run "
+                    "python3 auth_manager.py --setup domo outside the release "
+                    "run, then rerun with --reuse-domo-seeds."
                 )
                 return False
             for card in cards:

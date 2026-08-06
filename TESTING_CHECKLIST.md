@@ -226,7 +226,9 @@ Validates Steps 2 & 3 (Specials folder tree + HD update folders).
 
 ## 4. Domo export test
 
-Validates Step 1 (browser-driven Domo card exports → CSV/XLSX). Requires a Microsoft login in the opened browser.
+Validates Step 1 (browser-driven Domo card exports → CSV/XLSX). Requires the
+current user to have completed the one-time `auth_manager.py --setup domo`
+enrollment first. A normal workflow run must not wait for manual login.
 
 - **Command (one card first, then all):**
   ```bash
@@ -245,7 +247,11 @@ Validates Step 1 (browser-driven Domo card exports → CSV/XLSX). Requires a Mic
   (**.xlsx**), `soundexchange_ztunes` (**.xlsx**). Most write CSV; the three
   noted write XLSX (passthrough — the Domo workbook is kept as-is, not converted).
 - **Expected output:**
-  - Browser opens; log says `>>> Complete Microsoft login in the browser window <<<`, then `Logged in.`
+  - Browser opens; log says `Attempting unattended Domo/Microsoft silent SSO…`,
+    then `Logged in using the private per-user session.`
+  - If the saved session is expired or MFA is required, Step 1 fails after the
+    bounded silent-SSO window and reports `auth_manager.py --setup domo`; it
+    does not pause for operator input.
   - Per card: navigation, date-range set (`05/01/2026 → 05/14/2026`), download, then `Output: …csv` or `…xlsx`.
   - Summary shows each card `✓` and the written path.
 - **Inspect:**
