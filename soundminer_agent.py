@@ -363,6 +363,8 @@ def _build_command(request: dict[str, Any]) -> list[str]:
     command = [sys.executable, str(FILES_DIR / "soundminer.py")]
     if workflow in {"sourceaudio", "nbc"}:
         command.append(f"--{workflow}")
+    elif workflow == "probe":
+        command.extend(["--nbc", "--preflight-only"])
     command.extend(str(value) for value in request.get("pinned_args", []))
     options = request.get("options", {})
     if options.get("capture_steps"):
@@ -372,6 +374,102 @@ def _build_command(request: dict[str, Any]) -> list[str]:
     if workflow == "sourceaudio" and options.get("db_shortcut"):
         command.extend(["--sourceaudio-db-shortcut", str(options["db_shortcut"])])
     return command
+
+
+def _run_in_login_terminal(
+    command: list[str],
+    request: dict[str, Any],
+    status_path: Path,
+    log_path: Path,
+    logger: logging.Logger,
+) -> tuple[int, str]:
+    """Run GUI automation under Terminal's existing macOS TCC grants.
+
+    The LaunchAgent owns the queue but cannot itself capture the display.
+    Opening a short ``.command`` file in the logged-in Terminal keeps execution
+    in the Aqua session and attributes Screen Recording/Accessibility to the
+    already-approved Terminal app. The agent tails progress and remains the
+    sole authority that marks the request complete or failed.
+    """
+    request_id = str(request["request_id"])
+    wrapper = AGENT_LOG_DIR / f"{request_id}.command"
+    result_path = AGENT_LOG_DIR / f"{request_id}.exit"
+    result_tmp = result_path.with_suffix(".exit.tmp")
+    for stale in (wrapper, result_path, result_tmp):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+    shell_lines = [
+        "#!/bin/zsh",
+        f"cd {shlex.quote(str(FILES_DIR))}",
+        f"{shlex.join(command)} > {shlex.quote(str(log_path))} 2>&1",
+        "upm_exit_code=$?",
+        f"printf '%s\\n' \"$upm_exit_code\" > {shlex.quote(str(result_tmp))}",
+        f"mv {shlex.quote(str(result_tmp))} {shlex.quote(str(result_path))}",
+        "exit \"$upm_exit_code\"",
+    ]
+    wrapper.write_text("\n".join(shell_lines) + "\n", encoding="utf-8")
+    wrapper.chmod(0o700)
+    opened = subprocess.run(
+        ["open", "-a", "Terminal", str(wrapper)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if opened.returncode:
+        raise RuntimeError(
+            "Could not dispatch GUI job to HDF1 Terminal: "
+            + opened.stderr.strip()
+        )
+
+    started = time.monotonic()
+    last_position = 0
+    last_phase = "running in HDF1 Terminal"
+    failure_screenshot = ""
+    next_heartbeat = 0.0
+    while time.monotonic() - started <= SOUNDMINER_AGENT_JOB_TIMEOUT:
+        if log_path.exists():
+            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(last_position)
+                while True:
+                    raw = handle.readline()
+                    if not raw:
+                        break
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    last_phase = line[-500:]
+                    logger.info("[%s] %s", request_id, line)
+                    if "Failure screenshot saved:" in line:
+                        failure_screenshot = line.split(
+                            "Failure screenshot saved:", 1
+                        )[1].strip()
+                last_position = handle.tell()
+        now = time.monotonic()
+        if now >= next_heartbeat:
+            _status_update(
+                status_path, request, "running", last_phase,
+                command=command, log_path=str(log_path),
+                failure_screenshot=failure_screenshot,
+            )
+            next_heartbeat = now + 10
+        if result_path.exists():
+            try:
+                exit_code = int(result_path.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                time.sleep(1)
+                continue
+            try:
+                wrapper.unlink()
+                result_path.unlink()
+            except OSError:
+                pass
+            return exit_code, failure_screenshot
+        time.sleep(1)
+    raise RuntimeError(
+        f"HDF1 Terminal job exceeded {SOUNDMINER_AGENT_JOB_TIMEOUT}s"
+    )
 
 
 def _process_request(request_path: Path, root: Path, logger: logging.Logger) -> None:
@@ -396,48 +494,23 @@ def _process_request(request_path: Path, root: Path, logger: logging.Logger) -> 
             raise RuntimeError(
                 f"Agent must run on {SOUNDMINER_HOSTNAME}, not {current_hostname()}"
             )
-        if request.get("workflow") == "probe":
-            from soundminer import run_soundminer_gui_preflight
-            ok = run_soundminer_gui_preflight(logger)
-            detail = "Soundminer GUI/crop/Accessibility preflight passed"
-            if not ok:
-                raise RuntimeError("Soundminer GUI/crop/Accessibility preflight failed")
-            _status_update(status_path, request, "completed", detail, log_path=str(log_path), exit_code=0)
-            exit_code = 0
-            return
-
         command = _build_command(request)
         _status_update(
             status_path, request, "running", "launching Soundminer workflow",
             command=command, log_path=str(log_path),
         )
-        with log_path.open("w", encoding="utf-8", buffering=1) as log_handle:
-            process = subprocess.Popen(
-                command,
-                cwd=str(FILES_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            assert process.stdout is not None
-            for raw in process.stdout:
-                log_handle.write(raw)
-                line = raw.strip()
-                if line:
-                    logger.info("[%s] %s", request_id, line)
-                    if "Failure screenshot saved:" in line:
-                        failure_screenshot = line.split("Failure screenshot saved:", 1)[1].strip()
-                    _status_update(
-                        status_path, request, "running", line[-500:],
-                        command=command, log_path=str(log_path),
-                        failure_screenshot=failure_screenshot,
-                    )
-            exit_code = process.wait()
+        exit_code, failure_screenshot = _run_in_login_terminal(
+            command, request, status_path, log_path, logger
+        )
         if exit_code:
             raise RuntimeError(f"soundminer.py exited {exit_code}")
+        detail = (
+            "Soundminer GUI/crop/Accessibility preflight passed"
+            if request.get("workflow") == "probe"
+            else "Soundminer workflow completed"
+        )
         _status_update(
-            status_path, request, "completed", "Soundminer workflow completed",
+            status_path, request, "completed", detail,
             command=command, log_path=str(log_path), exit_code=0,
         )
     except Exception as exc:

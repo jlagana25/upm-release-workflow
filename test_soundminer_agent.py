@@ -73,6 +73,16 @@ class SoundminerAgentTests(unittest.TestCase):
             request_id, self.logger, root=self.root, timeout=1
         ))
 
+    def test_probe_command_is_non_destructive_preflight(self):
+        command = soundminer_agent._build_command({
+            "workflow": "probe",
+            "pinned_args": ["--year", "2026", "--month", "7", "--part", "1"],
+            "options": {},
+        })
+        self.assertIn("--preflight-only", command)
+        self.assertIn("--nbc", command)
+        self.assertNotIn("--sourceaudio", command)
+
 
 if __name__ == "__main__":
     unittest.main()

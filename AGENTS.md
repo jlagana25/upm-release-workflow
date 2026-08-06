@@ -287,7 +287,10 @@ inline or are submitted to HDF1's login-session agent.
   GUI imports lazy so the queue/client remains testable headless. The installer
   deploys a runtime copy under HDF1's `~/Library/Application Support` because
   macOS denies a background LaunchAgent direct access to code in `Documents`;
-  re-run `--install` after syncing code changes.
+  re-run `--install` after syncing code changes. The LaunchAgent dispatches the
+  actual GUI command into the logged-in Terminal so Screen Recording and
+  Accessibility use Terminal's existing TCC grants; it tails the job log and
+  alone marks queue status complete/failed.
 - **Interrupted Step 2 copies are recoverable.** `_safe_copytree` archives a
   partially copied Specials destination on `KeyboardInterrupt`. If an older
   partial tree already exists with unresolved `MMMM YYYY` names, Step 2 treats
