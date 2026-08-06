@@ -28,6 +28,9 @@ from config import (
 )
 
 LOCAL_DIAGNOSTICS_DIR = Path(__file__).resolve().parent.parent / "_logs"
+DOMO_KEYCHAIN_ACCOUNT = "current-macos-user"
+DOMO_KEYCHAIN_USERNAME_SERVICE = "com.upm-release-workflow.domo.username"
+DOMO_KEYCHAIN_PASSWORD_SERVICE = "com.upm-release-workflow.domo.password"
 
 
 @contextmanager
@@ -89,6 +92,101 @@ def unisync_auth_configured() -> bool:
     return bool(match and match.group(1).strip())
 
 
+def domo_keychain_configured() -> bool:
+    """Confirm both workflow Keychain items contain readable nonempty values."""
+    return load_domo_keychain_credentials() is not None
+
+
+def _read_keychain_secret(service: str) -> str | None:
+    result = subprocess.run(
+        [
+            "/usr/bin/security", "find-generic-password",
+            "-a", DOMO_KEYCHAIN_ACCOUNT, "-s", service, "-w",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        return None
+    value = result.stdout.rstrip("\r\n")
+    return value or None
+
+
+def load_domo_keychain_credentials() -> tuple[str, str] | None:
+    """Load Domo credentials into memory only; callers must never log them."""
+    username = _read_keychain_secret(DOMO_KEYCHAIN_USERNAME_SERVICE)
+    password = _read_keychain_secret(DOMO_KEYCHAIN_PASSWORD_SERVICE)
+    if not username or not password:
+        return None
+    return username, password
+
+
+def _prompt_and_store_keychain_secret(service: str, description: str) -> bool:
+    """Let macOS Keychain collect and confirm a value directly from the TTY."""
+    print(
+        f"\nKeychain enrollment: enter your {description} at both hidden "
+        "prompts (value, then retype).",
+        flush=True,
+    )
+    # `-w` is deliberately the final option with no argv value. The security
+    # tool reads and confirms the value directly from /dev/tty, so Python never
+    # receives the enrollment value and it never appears in process arguments.
+    result = subprocess.run(
+        [
+            "/usr/bin/security", "add-generic-password", "-U",
+            "-a", DOMO_KEYCHAIN_ACCOUNT, "-s", service,
+            "-T", "/usr/bin/security", "-w",
+        ],
+    )
+    return result.returncode == 0
+
+
+def enroll_domo_keychain(logger: logging.Logger) -> bool:
+    """Have macOS Keychain collect credentials directly through hidden prompts."""
+    if not sys.stdin.isatty():
+        logger.error("Domo Keychain enrollment must be run in an interactive Terminal.")
+        return False
+    username_ok = bool(_read_keychain_secret(DOMO_KEYCHAIN_USERNAME_SERVICE))
+    if username_ok:
+        logger.info("Existing Domo Keychain email is readable; keeping it (value redacted).")
+    else:
+        username_ok = _prompt_and_store_keychain_secret(
+            DOMO_KEYCHAIN_USERNAME_SERVICE, "UMG email"
+        )
+    # Always refresh the password when enrollment is explicitly requested.
+    password_ok = username_ok and _prompt_and_store_keychain_secret(
+        DOMO_KEYCHAIN_PASSWORD_SERVICE, "UMG password"
+    )
+    if not (username_ok and password_ok and domo_keychain_configured()):
+        logger.error(
+            "Could not store readable nonempty Domo credentials in macOS Keychain."
+        )
+        return False
+    logger.info("Domo unattended credentials stored in macOS Keychain (values redacted).")
+    return True
+
+
+def delete_domo_keychain_credentials(logger: logging.Logger) -> bool:
+    """Delete only the two Keychain items created by this workflow."""
+    ok = True
+    for service in (DOMO_KEYCHAIN_USERNAME_SERVICE, DOMO_KEYCHAIN_PASSWORD_SERVICE):
+        result = subprocess.run(
+            [
+                "/usr/bin/security", "delete-generic-password",
+                "-a", DOMO_KEYCHAIN_ACCOUNT, "-s", service,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode not in (0, 44):
+            ok = False
+    if ok:
+        logger.info("Workflow-owned Domo Keychain credentials deleted.")
+    else:
+        logger.error("One or more workflow-owned Domo Keychain items could not be deleted.")
+    return ok
+
+
 def auth_status() -> dict[str, dict[str, object]]:
     """Return state only; never return usernames, cookie values, or tokens."""
     cookie_candidates = (
@@ -108,6 +206,7 @@ def auth_status() -> dict[str, dict[str, object]]:
         "domo": {
             "state": "configured" if domo_files else "missing",
             "cookie_store_present": any(path.exists() for path in cookie_candidates),
+            "keychain_credentials_present": domo_keychain_configured(),
             "private_permissions": domo_private,
             "location": str(DOMO_PROFILE_DIR),
         },
@@ -220,6 +319,14 @@ def _main(argv: list[str] | None = None) -> int:
     action.add_argument("--status", action="store_true", help="Show redacted auth state")
     action.add_argument("--permissions", action="store_true", help="Repair private file permissions")
     action.add_argument("--setup", choices=("domo", "unisync", "all"), help="Configure this user's login")
+    action.add_argument(
+        "--enroll-domo-keychain", action="store_true",
+        help="Store Domo email/password using hidden prompts in macOS Keychain",
+    )
+    action.add_argument(
+        "--delete-domo-keychain", action="store_true",
+        help="Delete workflow-owned Domo credentials from macOS Keychain",
+    )
     action.add_argument("--reset", choices=("domo", "unisync", "all"), help="Move local auth state to Trash")
     parser.add_argument("--confirm-reset", action="store_true", help="Required with --reset")
     parser.add_argument("--json", action="store_true", help="Machine-readable redacted status")
@@ -234,10 +341,16 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps(status, indent=2, sort_keys=True))
         else:
             for name, detail in status.items():
+                extra = ""
+                if name == "domo":
+                    extra = (
+                        "; unattended_credentials="
+                        f"{detail['keychain_credentials_present']}"
+                    )
                 print(
                     f"{name}: {detail['state']}; "
                     f"private_permissions={detail['private_permissions']}; "
-                    f"location={detail['location']}"
+                    f"location={detail['location']}{extra}"
                 )
         return 0
     if args.permissions:
@@ -248,6 +361,13 @@ def _main(argv: list[str] | None = None) -> int:
         if not args.confirm_reset:
             parser.error("--reset requires --confirm-reset; artifacts are moved to Trash")
         return 0 if reset_auth(args.reset, logger) else 1
+
+    if args.enroll_domo_keychain:
+        return 0 if enroll_domo_keychain(logger) else 1
+    if args.delete_domo_keychain:
+        if not args.confirm_reset:
+            parser.error("--delete-domo-keychain requires --confirm-reset")
+        return 0 if delete_domo_keychain_credentials(logger) else 1
 
     ok = True
     if args.setup in {"domo", "all"}:

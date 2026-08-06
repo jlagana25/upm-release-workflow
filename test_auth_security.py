@@ -50,6 +50,21 @@ class AuthSecurityTests(unittest.TestCase):
             self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
             self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
 
+    def test_keychain_enrollment_uses_direct_hidden_security_prompt(self):
+        completed = Mock(returncode=0)
+        with (
+            patch.object(auth_manager.subprocess, "run", return_value=completed) as run,
+            patch("builtins.print"),
+        ):
+            self.assertTrue(
+                auth_manager._prompt_and_store_keychain_secret(
+                    "test-service", "test value"
+                )
+            )
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[-1], "-w")
+        self.assertNotIn("input", run.call_args.kwargs)
+
     def test_domo_log_url_drops_auth_query_and_fragment(self):
         safe = domo_exports._safe_url_for_log(
             "https://login.example.invalid/path?code=sensitive#session"
@@ -71,21 +86,83 @@ class AuthSecurityTests(unittest.TestCase):
 
     def test_normal_domo_auth_uses_short_unattended_sso_window(self):
         page = self._domo_page_that_completes_sso()
-        with patch.object(domo_exports.time, "sleep"):
+        with (
+            patch.object(domo_exports.time, "sleep"),
+            patch.object(
+                domo_exports,
+                "_attempt_keychain_microsoft_login",
+                return_value=False,
+            ),
+        ):
             domo_exports._authenticate(page, Mock())
-        self.assertEqual(
-            page.wait_for_function.call_args.kwargs["timeout"],
-            domo_exports.SILENT_LOGIN_TIMEOUT,
+        timeout = page.wait_for_function.call_args.kwargs["timeout"]
+        self.assertLessEqual(timeout, domo_exports.SILENT_LOGIN_TIMEOUT)
+        self.assertGreater(
+            timeout,
+            domo_exports.SILENT_LOGIN_TIMEOUT - 1_000,
         )
 
     def test_domo_setup_explicitly_enables_interactive_enrollment_window(self):
         page = self._domo_page_that_completes_sso()
-        with patch.object(domo_exports.time, "sleep"):
+        with (
+            patch.object(domo_exports.time, "sleep"),
+            patch.object(
+                domo_exports,
+                "_attempt_keychain_microsoft_login",
+                return_value=False,
+            ),
+        ):
             domo_exports._authenticate(page, Mock(), allow_interactive=True)
-        self.assertEqual(
-            page.wait_for_function.call_args.kwargs["timeout"],
-            domo_exports.LOGIN_TIMEOUT,
+        timeout = page.wait_for_function.call_args.kwargs["timeout"]
+        self.assertLessEqual(timeout, domo_exports.LOGIN_TIMEOUT)
+        self.assertGreater(
+            timeout,
+            domo_exports.LOGIN_TIMEOUT - 1_000,
         )
+
+    def test_keychain_domo_login_selects_structural_account_and_password(self):
+        account = Mock()
+        account.first = account
+        account.is_visible.return_value = True
+        password_field = Mock()
+        password_field.first = password_field
+        password_field.is_visible.return_value = True
+        submit = Mock()
+        submit.first = submit
+        submit.is_visible.return_value = True
+
+        page = Mock()
+        page.url = "https://login.microsoftonline.com/tenant/saml2"
+
+        def locator(selector):
+            if selector.startswith("#tilesHolder"):
+                return account
+            if "passwd" in selector:
+                return password_field
+            return submit
+
+        page.locator.side_effect = locator
+        submit.click.side_effect = lambda: setattr(
+            page, "url", f"https://{domo_exports.DOMO_INSTANCE}/home"
+        )
+        logger = Mock()
+        with patch.object(
+            domo_exports,
+            "load_domo_keychain_credentials",
+            return_value=("test-user", "test-value"),
+        ):
+            self.assertTrue(
+                domo_exports._attempt_keychain_microsoft_login(page, logger)
+            )
+        account.click.assert_called_once_with()
+        password_field.fill.assert_called_once_with("test-value")
+        rendered_logs = " ".join(
+            str(arg)
+            for call in logger.method_calls
+            for arg in call.args
+        )
+        self.assertNotIn("test-user", rendered_logs)
+        self.assertNotIn("test-value", rendered_logs)
 
     def test_auth_status_redacts_unisync_identity(self):
         with tempfile.TemporaryDirectory() as raw:

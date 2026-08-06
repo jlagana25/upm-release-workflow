@@ -11,21 +11,29 @@ Run these commands while logged into the recipient's own macOS account:
 ```bash
 cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
 make install
+python3 auth_manager.py --enroll-domo-keychain
 python3 auth_manager.py --setup domo
 python3 auth_manager.py --setup unisync
 python3 auth_manager.py --status
 ```
 
+- `--enroll-domo-keychain` asks macOS Keychain itself to collect and confirm the
+  UMG email, then the password, through labeled hidden Terminal prompts. Python
+  never receives the enrollment values, and they never enter command arguments.
+  They are stored as two workflow-owned items in the current user's Login
+  Keychain.
 - Domo opens an isolated Playwright profile and waits for that user's Microsoft
   SSO/MFA. The resulting cookies stay under
-  `~/.upm_release_workflow/domo_browser_profile`.
+  `~/.upm_release_workflow/domo_browser_profile`. Normal runs can select the
+  enrolled account and fill the password from Keychain entirely in memory.
 - UniSync opens its installed app. The user signs in there; the workflow never
   collects the credential. UniSync's local preferences stay at
   `~/Library/SMUniSync/UniSync.xml`.
 - Status output is deliberately redacted. It reports only configured/missing
   and whether permissions are private.
-- macOS Keychain remains owned by the application and the current user. The
-  workflow never reads, exports, logs, or deletes Keychain secrets.
+- macOS Keychain remains owned by the current user. The workflow reads only its
+  two Domo items when a Microsoft account/password form is visible and never
+  exports or logs their values. UniSync continues to own its own Keychain data.
 
 ## Unattended release runs
 
@@ -37,9 +45,10 @@ Setup is the only interactive authentication operation. Normal workflow runs:
 - allow up to three minutes for UMG's unattended Microsoft→Domo redirect, then
   fail with a redacted setup command if interactive reauthentication is needed.
 
-This provides unattended authentication without making a retrievable password
-available to the workflow. Microsoft can still invalidate a session or require
-MFA under UMG policy. That cannot safely be bypassed: rerun the corresponding
+This provides unattended authentication without making a password available in
+the repository, filesystem configuration, environment, process arguments, or
+logs. Microsoft can still invalidate a session or require MFA under UMG policy.
+That cannot safely be bypassed: rerun the corresponding
 `auth_manager.py --setup ...` command outside the release run, then resume the
 workflow. Running `python3 auth_manager.py --status` before a scheduled release
 confirms that local enrollment exists, but cannot guarantee that a remote SSO
@@ -55,12 +64,14 @@ Quit UniSync and any workflow Domo browser, then use the recoverable reset:
 
 ```bash
 python3 auth_manager.py --reset all --confirm-reset
+python3 auth_manager.py --delete-domo-keychain --confirm-reset
 ```
 
-Artifacts are moved into a timestamped directory in `~/.Trash`, not permanently
-deleted. If UniSync still signs in automatically, use UniSync's own **Sign Out**
-command to remove any app-managed Keychain session. Then onboard the next user
-with the setup commands above.
+Browser/XML artifacts are moved into a timestamped directory in `~/.Trash`, not
+permanently deleted. The second command permanently deletes only the two Domo
+Keychain items created by this workflow. If UniSync still signs in
+automatically, use UniSync's own **Sign Out** command to remove its app-managed
+Keychain session. Then onboard the next user with the setup commands above.
 
 Never give another operator copies of your Domo browser profile, UniSync XML or
 backup, macOS Keychain, local Application Support, or auth-related screenshots.

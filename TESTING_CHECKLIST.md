@@ -228,7 +228,8 @@ Validates Steps 2 & 3 (Specials folder tree + HD update folders).
 
 Validates Step 1 (browser-driven Domo card exports → CSV/XLSX). Requires the
 current user to have completed the one-time `auth_manager.py --setup domo`
-enrollment first. A normal workflow run must not wait for manual login.
+enrollment and `auth_manager.py --enroll-domo-keychain` first. A normal
+workflow run must not wait for manual account/password entry.
 
 - **Command (one card first, then all):**
   ```bash
@@ -249,6 +250,9 @@ enrollment first. A normal workflow run must not wait for manual login.
 - **Expected output:**
   - Browser opens; log says `Attempting unattended Domo/Microsoft silent SSO…`,
     then `Logged in using the private per-user session.`
+  - When Microsoft shows the saved-account tile/password form, the log reports
+    redacted Keychain account selection and password submission. Neither value
+    appears in the log, screenshot name, URL, process list, or report.
   - Allow up to three minutes for the unattended Microsoft→Domo redirect. If
     the saved session is expired or MFA is required, Step 1 then fails and
     reports `auth_manager.py --setup domo`; it does not pause for operator input.

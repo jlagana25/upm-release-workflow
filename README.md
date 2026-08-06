@@ -37,16 +37,19 @@ require Accessibility + Screen Recording permissions on USMPSMDHDF1.
 Each operator configures private authentication under their own macOS account:
 
 ```bash
+python3 auth_manager.py --enroll-domo-keychain
 python3 auth_manager.py --setup domo
 python3 auth_manager.py --setup unisync
 python3 auth_manager.py --status
 ```
 
-This is a one-time interactive enrollment. Normal release runs reuse Domo's
-private persistent browser session and UniSync's app/Keychain session without
-login prompts or Enter pauses. If UMG invalidates a session or requires fresh
-MFA, the run fails promptly and tells the operator which setup command to run
-outside the release workflow; it never stores or types a password.
+This is a one-time interactive enrollment. Domo credentials are collected with
+hidden prompts and stored only as workflow-owned items in the current user's
+macOS Login Keychain; normal runs select the account and fill the password in
+memory. They also reuse Domo's private persistent browser session and UniSync's
+app/Keychain session without login prompts or Enter pauses. If UMG requires
+fresh MFA, the run fails and reports the setup command instead of attempting to
+bypass the challenge.
 The unattended Microsoft→Domo redirect is allowed up to three minutes because
 this environment can take roughly two minutes even with a valid retained session.
 

@@ -186,15 +186,21 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
         # Step 16 also performs Domo exports even when Step 1 was selected out.
         if _active("skip_domo") or _active("skip_soundmouse"):
             domo_state = private_auth["domo"]
-            if domo_state["state"] == "configured" and domo_state["private_permissions"]:
+            if (
+                domo_state["state"] == "configured"
+                and domo_state["private_permissions"]
+                and domo_state["keychain_credentials_present"]
+            ):
                 logger.info(
-                    "  ✓  Domo per-user session configured for unattended silent SSO"
+                    "  ✓  Domo private session and Keychain credentials "
+                    "configured for unattended sign-in"
                 )
             else:
                 message = (
                     "  ✗  Domo is not enrolled for unattended use by this "
-                    "macOS user. Run outside the workflow: "
-                    "python3 auth_manager.py --setup domo"
+                    "macOS user. Run outside the workflow: python3 "
+                    "auth_manager.py --enroll-domo-keychain, then python3 "
+                    "auth_manager.py --setup domo"
                 )
                 if bool(getattr(args, "dry_run", False)):
                     logger.warning(message)

@@ -274,8 +274,10 @@ inline or are submitted to HDF1's login-session agent.
 - **Lazy GUI/browser imports** (see §2) — never move them to module top level.
 - **Authentication is unattended only through retained per-user sessions.**
   Interactive Domo/Microsoft MFA is allowed only in `auth_manager.py --setup`;
-  normal workflow runs use bounded silent SSO and fail rather than pausing or
-  collecting credentials. UniSync reuses its own current-user Keychain session.
+  normal workflow runs use bounded silent SSO plus the two workflow-owned Domo
+  Login Keychain items and fail rather than pausing for MFA. Credential values
+  must never enter argv, logs, URLs, screenshots, reports, or repository files.
+  UniSync reuses its own current-user Keychain session.
 - **Every `--skip-*` flag** must appear in `_ALL_SKIP_ATTRS` (enforced by
   `smoke_test.py`). Sub-phase flags without their own step token (like
   `--skip-soundexchange`) may need special handling in `_apply_step_selectors`

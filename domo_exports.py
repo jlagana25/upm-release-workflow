@@ -71,7 +71,12 @@ from config import (
     ReleaseContext,
     context_from_cli_args,
 )
-from auth_manager import private_creation_umask, secure_private_directory, secure_private_file
+from auth_manager import (
+    load_domo_keychain_credentials,
+    private_creation_umask,
+    secure_private_directory,
+    secure_private_file,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -110,6 +115,93 @@ def _domo_session_is_authenticated(url: str) -> bool:
         return parsed.hostname == DOMO_INSTANCE and "/auth" not in parsed.path
     except Exception:
         return False
+
+
+def _visible(locator) -> bool:
+    try:
+        return locator.first.is_visible()
+    except Exception:
+        return False
+
+
+def _attempt_keychain_microsoft_login(page, logger: logging.Logger) -> bool:
+    """Handle Microsoft's account/password screens using macOS Keychain.
+
+    Credential values exist only in local variables and Playwright form-fill
+    calls. They are never interpolated into logs, URLs, screenshots, or errors.
+    MFA/Conditional Access pages are intentionally not automated.
+    """
+    credentials = load_domo_keychain_credentials()
+    if credentials is None:
+        logger.info("  No workflow-owned Domo Keychain credentials are enrolled.")
+        return False
+
+    username, password = credentials
+    logger.info("  Domo Keychain credentials found; handling Microsoft sign-in.")
+    deadline = time.monotonic() + 90
+    account_selected = False
+    password_submitted = False
+    stay_signed_in_answered = False
+    try:
+        while time.monotonic() < deadline:
+            if _domo_session_is_authenticated(page.url):
+                return True
+
+            if not account_selected:
+                # The UMG Microsoft page exposes the saved account as the
+                # first role=button inside #tilesHolder. Select structurally so
+                # matching does not depend on the email's case or expose it in
+                # diagnostics. The named-role fallback covers layout variants.
+                account_tile = page.locator("#tilesHolder [role='button']").first
+                if not _visible(account_tile):
+                    account_tile = page.get_by_role(
+                        "button", name=username, exact=False
+                    )
+                if _visible(account_tile):
+                    account_tile.first.click()
+                    account_selected = True
+                    logger.info("  Selected the enrolled Microsoft account (identity redacted).")
+                    page.wait_for_timeout(750)
+                    continue
+
+                email = page.locator('input[type="email"], input[name="loginfmt"], #i0116')
+                if _visible(email):
+                    email.first.fill(username)
+                    next_button = page.locator('#idSIButton9, input[type="submit"]')
+                    if _visible(next_button):
+                        next_button.first.click()
+                    account_selected = True
+                    logger.info("  Entered the enrolled Microsoft account (identity redacted).")
+                    page.wait_for_timeout(750)
+                    continue
+
+            password_field = page.locator('input[name="passwd"], input[type="password"], #i0118')
+            if not password_submitted and _visible(password_field):
+                password_field.first.fill(password)
+                submit = page.locator('#idSIButton9, input[type="submit"]')
+                if _visible(submit):
+                    submit.first.click()
+                    password_submitted = True
+                    logger.info("  Submitted the Keychain password to Microsoft (value redacted).")
+                    page.wait_for_timeout(1500)
+                    continue
+
+            # Microsoft's "Stay signed in?" confirmation reuses idSIButton9.
+            # Answering Yes preserves the private session for future releases.
+            if password_submitted and not stay_signed_in_answered:
+                submit = page.locator('#idSIButton9')
+                if not _visible(password_field) and _visible(submit):
+                    submit.first.click()
+                    stay_signed_in_answered = True
+                    logger.info("  Confirmed Microsoft's retained-session prompt.")
+                    page.wait_for_timeout(750)
+                    continue
+
+            page.wait_for_timeout(1000)
+    finally:
+        username = password = ""
+        credentials = None
+    return _domo_session_is_authenticated(page.url)
 
 # ---------------------------------------------------------------------------
 # Card configuration
@@ -378,11 +470,16 @@ def _authenticate(
     else:
         logger.info("  Attempting unattended Domo/Microsoft silent SSO…")
         timeout = SILENT_LOGIN_TIMEOUT
+
+    auth_started = time.monotonic()
+    _attempt_keychain_microsoft_login(page, logger)
+    elapsed_ms = int((time.monotonic() - auth_started) * 1000)
+    remaining_timeout = max(1_000, timeout - elapsed_ms)
     try:
         page.wait_for_function(
             f"() => window.location.hostname === '{DOMO_INSTANCE}'"
             f"   && !window.location.href.includes('/auth')",
-            timeout=timeout,
+            timeout=remaining_timeout,
             polling=1000,
         )
     except PlaywrightTimeoutError:
@@ -403,6 +500,7 @@ def _authenticate(
             remedy = (
                 "The saved session requires interactive reauthentication. "
                 "The workflow did not pause. Outside the release run, execute: "
+                "python3 auth_manager.py --enroll-domo-keychain, then "
                 "python3 auth_manager.py --setup domo."
             )
         raise PlaywrightTimeoutError(

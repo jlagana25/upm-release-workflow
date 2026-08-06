@@ -450,8 +450,9 @@ def _export_domo_cards(
             except domo.PlaywrightTimeoutError:
                 logger.error(
                     "  ✗ The private Domo session requires reauthentication. "
-                    "The workflow did not pause. Run "
-                    "python3 auth_manager.py --setup domo outside the release "
+                    "The workflow did not pause. Run python3 auth_manager.py "
+                    "--enroll-domo-keychain, then python3 auth_manager.py "
+                    "--setup domo outside the release "
                     "run, then rerun with --reuse-domo-seeds."
                 )
                 return False
