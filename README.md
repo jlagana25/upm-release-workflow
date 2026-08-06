@@ -137,8 +137,8 @@ Then the other machine installs with `pip install -r requirements.lock`.
 - `upm_release_workflow.py` — orchestrator + CLI (canonical step registry is `_STEP_UNITS`).
 - `config.py` — release context, all paths, partner destinations.
 - `tracklist_columns.py` — shared CSV/XLSX column-name detection (one source for every module).
-- `soundminer_agent.py` — HDF1 Aqua LaunchAgent plus the shared-volume HDF2
-  request/heartbeat/result client.
+- `soundminer_agent.py` — HDF1 Aqua LaunchAgent plus the SSH JSON/status control
+  channel used by HDF2 (SSH never drives the GUI).
 - `workflow_report.py` — structured end-of-run JSON reports.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,

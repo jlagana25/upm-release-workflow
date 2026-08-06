@@ -23,7 +23,7 @@ setting up a new machine, work through Part 2 top to bottom.
 - `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Part 1 Release - NBC`
 - The workflow can be launched from **either machine**. On HDF1, Soundminer runs
   inline. On HDF2, Steps 11–12 are submitted to the HDF1 Aqua LaunchAgent and
-  monitored through the shared Pegasus queue—no Screen Sharing, Enter prompt,
+  monitored through HDF1's local queue over an SSH JSON/status channel—no Screen Sharing, Enter prompt,
   or Soundminer installation on HDF2. Detection is automatic by hostname.
 - **Golden rule:** run with `--dry-run` first wherever it is supported, inspect, then run for real.
 
@@ -426,7 +426,7 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
 Validates Step 12 (database switch → delete → import → embed → mirror). The UI process must execute in HDF1's login/Aqua session. Normally the persistent HDF1 LaunchAgent provides that session while HDF2 submits and monitors the job; direct commands remain useful for diagnostics.
 
 > **Inline vs. agent:** on HDF1, Step 12 runs inline. On HDF2, it writes an
-> atomic request under `_Specials/UPM/_AUTOMATION/soundminer-agent`, then polls
+> atomic request in HDF1's local Application Support queue over SSH, then polls
 > HDF1 heartbeats and phase/result JSON. SSH never drives the GUI. Use
 > `--no-soundminer-agent` only to restore the legacy manual handoff.
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Shared-volume Soundminer agent and HDF2 client.
+"""Login-session Soundminer agent and HDF2 control client.
 
 The daemon is installed as a per-user macOS LaunchAgent on HDF1.  That is the
 important distinction from SSH: launchd starts it inside the logged-in Aqua
 session, so Screen Recording and Accessibility can reach Soundminer.  HDF2
-submits atomic JSON requests through the shared Pegasus volume and monitors
-heartbeats/results without ever launching Soundminer locally.
+submits atomic JSON over SSH into HDF1's local queue and monitors results
+without ever launching Soundminer locally or attempting GUI work over SSH.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import logging
 import os
 import plistlib
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from config import (
+    REMOTE_SOUNDMINER,
     SOUNDMINER_AGENT_HEARTBEAT_TIMEOUT,
     SOUNDMINER_AGENT_JOB_TIMEOUT,
     SOUNDMINER_AGENT_POLL_SECONDS,
@@ -42,6 +44,20 @@ AGENT_LOG_DIR = REPO_ROOT / "_logs" / "soundminer_agent"
 INSTALLED_ROOT = Path.home() / "Library" / "Application Support" / "UPM Soundminer Agent"
 INSTALLED_FILES_DIR = INSTALLED_ROOT / "files"
 LAUNCH_AGENT_LOG_DIR = Path.home() / "Library" / "Logs" / "UPM Soundminer Agent"
+
+
+def _uses_remote_transport(root: Path) -> bool:
+    return root == SOUNDMINER_AGENT_ROOT and current_hostname() != SOUNDMINER_HOSTNAME.upper()
+
+
+def _remote_agent_command(*arguments: str) -> list[str]:
+    target = f"{REMOTE_SOUNDMINER['user']}@{REMOTE_SOUNDMINER['host']}"
+    remote = shlex.join([
+        "/usr/bin/python3",
+        str(INSTALLED_FILES_DIR / "soundminer_agent.py"),
+        *arguments,
+    ])
+    return ["ssh", target, remote]
 
 
 def _utc_now() -> str:
@@ -88,6 +104,18 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def agent_health(root: Path = SOUNDMINER_AGENT_ROOT) -> tuple[bool, str]:
+    if _uses_remote_transport(root):
+        try:
+            result = subprocess.run(
+                _remote_agent_command("--status"),
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except Exception as exc:
+            return False, f"could not query HDF1 agent over SSH: {exc}"
+        detail = (result.stdout or result.stderr).strip()
+        return result.returncode == 0, detail or f"HDF1 status exited {result.returncode}"
     paths = _paths(root)
     path = paths["agent"]
     if not path.exists():
@@ -138,24 +166,6 @@ def submit_request(
 ) -> str:
     if workflow not in {"sourceaudio", "nbc", "probe"}:
         raise ValueError(f"Unsupported Soundminer agent workflow: {workflow}")
-    paths = _ensure_dirs(root)
-    # If HDF2 was restarted while HDF1 kept working, attach to that request
-    # instead of queueing a duplicate destructive database run.
-    for directory in (paths["running"], paths["pending"]):
-        for existing_path in sorted(directory.glob("*.json")):
-            try:
-                existing = _read_json(existing_path)
-            except Exception:
-                continue
-            if (
-                existing.get("release_id") == ctx.release_id
-                and existing.get("workflow") == workflow
-            ):
-                existing_id = str(existing.get("request_id", existing_path.stem))
-                logger.warning(
-                    f"  ↻ Reattaching to existing HDF1 request: {existing_id}"
-                )
-                return existing_id
     request_id = (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-"
         f"{ctx.release_id.lower()}-{workflow}-{uuid.uuid4().hex[:8]}"
@@ -170,6 +180,53 @@ def submit_request(
         "pinned_args": ctx.pinned_cli_args(),
         "options": options or {},
     }
+    if _uses_remote_transport(root):
+        result = subprocess.run(
+            _remote_agent_command("--accept-request"),
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode:
+            raise RuntimeError(
+                "HDF1 rejected the Soundminer request: "
+                + (result.stderr or result.stdout).strip()
+            )
+        accepted_id = result.stdout.strip().splitlines()[-1]
+        logger.info(f"  Submitted HDF1 Soundminer request: {accepted_id}")
+        return accepted_id
+    return _accept_request(request, logger, root=root)
+
+
+def _accept_request(
+    request: dict[str, Any],
+    logger: logging.Logger,
+    *,
+    root: Path = SOUNDMINER_AGENT_ROOT,
+) -> str:
+    workflow = request.get("workflow")
+    if workflow not in {"sourceaudio", "nbc", "probe"}:
+        raise ValueError(f"Unsupported Soundminer agent workflow: {workflow}")
+    paths = _ensure_dirs(root)
+    # If HDF2 was restarted while HDF1 kept working, attach to that request
+    # instead of queueing a duplicate destructive database run.
+    for directory in (paths["running"], paths["pending"]):
+        for existing_path in sorted(directory.glob("*.json")):
+            try:
+                existing = _read_json(existing_path)
+            except Exception:
+                continue
+            if (
+                existing.get("release_id") == request.get("release_id")
+                and existing.get("workflow") == workflow
+            ):
+                existing_id = str(existing.get("request_id", existing_path.stem))
+                logger.warning(
+                    f"  ↻ Reattaching to existing HDF1 request: {existing_id}"
+                )
+                return existing_id
+    request_id = str(request["request_id"])
     _atomic_json(paths["pending"] / f"{request_id}.json", request)
     _atomic_json(paths["status"] / f"{request_id}.json", {
         "protocol": PROTOCOL_VERSION,
@@ -191,6 +248,20 @@ def wait_for_request(
     timeout: int = SOUNDMINER_AGENT_JOB_TIMEOUT,
     heartbeat_timeout: int = SOUNDMINER_AGENT_HEARTBEAT_TIMEOUT,
 ) -> bool:
+    if _uses_remote_transport(root):
+        process = subprocess.Popen(
+            _remote_agent_command("--wait-request", request_id),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for raw in process.stdout:
+            line = raw.strip()
+            if line:
+                logger.info(f"  HDF1 {line}")
+        return process.wait() == 0
     status_path = _paths(root)["status"] / f"{request_id}.json"
     started = time.monotonic()
     last_rendered: tuple[str, str] | None = None
@@ -229,7 +300,7 @@ def wait_for_request(
         if state == "running" and age > heartbeat_timeout:
             logger.error(
                 f"  ✗ HDF1 Soundminer heartbeat stopped for {int(age)}s. "
-                "The GUI agent may have crashed or the shared volume disconnected."
+                "The GUI agent may have crashed or its local queue stalled."
             )
             return False
         time.sleep(SOUNDMINER_AGENT_POLL_SECONDS)
@@ -516,6 +587,8 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="Process at most one queued request")
     parser.add_argument("--install", action="store_true", help="Install/start the HDF1 LaunchAgent")
     parser.add_argument("--status", action="store_true", help="Print current shared agent health")
+    parser.add_argument("--accept-request", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--wait-request", metavar="ID", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.install:
         path = install_launch_agent()
@@ -525,6 +598,18 @@ def _main(argv: list[str] | None = None) -> int:
         ok, detail = agent_health()
         print(detail)
         return 0 if ok else 1
+    if args.accept_request:
+        request = json.load(sys.stdin)
+        request_id = _accept_request(
+            request, logging.getLogger("soundminer_agent.accept")
+        )
+        print(request_id)
+        return 0
+    if args.wait_request:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        return 0 if wait_for_request(
+            args.wait_request, logging.getLogger("soundminer_agent.wait")
+        ) else 1
     if args.serve or args.once:
         return serve(once=args.once)
     parser.error("choose --serve, --once, --install, or --status")

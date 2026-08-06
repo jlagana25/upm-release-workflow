@@ -166,7 +166,7 @@ destinations), `tracklist_columns.py` (shared CSV/XLSX column-name detection —
 single source; don't reinvent per module), `logging_utils.py` (step logging
 helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 (`soundminer_agent.py` supersedes its SSH/manual path for normal runs),
-`soundminer_agent.py` (HDF1 Aqua LaunchAgent + shared request/status protocol),
+`soundminer_agent.py` (HDF1 Aqua LaunchAgent + SSH JSON/status protocol),
 `workflow_report.py` (structured JSON run report),
 `prune.py` (removes files from prior months the current tracklist no longer
 references — the counterpart to verification).
@@ -238,7 +238,7 @@ Both now use the **same path**, so any shell/git command is identical on either.
 Code locates its own files relative to `Path(__file__)` (`_REPO_ROOT` /
 `_FILES_DIR`), so moving the folder doesn't break anything. `config.py`'s
 `is_soundminer_machine()` uses the hostname to decide whether Steps 11–12 run
-inline or are submitted to HDF1's shared-volume agent.
+inline or are submitted to HDF1's login-session agent.
 
 ---
 
@@ -281,8 +281,9 @@ inline or are submitted to HDF1's shared-volume agent.
 - **Soundminer must fail closed.** Never restore count-only mirror success,
   generic OK/Yes clicking, or a no-activity timeout that proceeds anyway.
   Metadata/source and destination filename manifests are correctness gates.
-- **Agent requests are atomic JSON.** HDF2 writes only to `pending/`; HDF1
-  claims by rename, updates heartbeats/status, and archives the request. Keep
+- **Agent requests are atomic JSON.** HDF2 sends control JSON over SSH into
+  HDF1's local `pending/`; HDF1 claims by rename, updates heartbeats/status,
+  and archives the request. SSH never owns or drives the GUI. Keep
   GUI imports lazy so the queue/client remains testable headless. The installer
   deploys a runtime copy under HDF1's `~/Library/Application Support` because
   macOS denies a background LaunchAgent direct access to code in `Documents`;

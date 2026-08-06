@@ -58,11 +58,12 @@ UPM_CACHE_MP3 = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/MP3")
 UPM_CACHE_WAV = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/WAV")
 SOUNDMOUSE_BASE = Path("/Volumes/Pegasus32 R8 - 2/SoundMouse")
 
-# Shared coordination area used by the HDF1 login-session Soundminer agent.
-# HDF2 only writes JSON requests and reads status here; the GUI automation is
-# always executed by the agent inside HDF1's Aqua session.
+# HDF1-local coordination area used by the login-session Soundminer agent.
+# HDF2 transports JSON requests/status over SSH; SSH never launches or drives
+# the GUI. Keeping the queue local avoids macOS background-process stalls when
+# writing to the removable/shared Pegasus volume.
 SOUNDMINER_AGENT_ROOT = (
-    SPECIALS_BASE / "_AUTOMATION" / "soundminer-agent"
+    Path.home() / "Library" / "Application Support" / "UPM Soundminer Agent" / "queue"
 )
 SOUNDMINER_AGENT_ENABLED = True
 SOUNDMINER_AGENT_POLL_SECONDS = 5
