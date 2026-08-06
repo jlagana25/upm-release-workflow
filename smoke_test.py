@@ -29,7 +29,8 @@ MODULES = [
     "final_packaging", "cleanup", "audio_conversion", "domo_exports",
     "split_se_ingest_forms", "folder_setup", "album_list_doc", "soundminer",
     "make_soundminer_crops", "prune", "unisync_automation", "unisync_prefs",
-    "remote_runner", "soundmouse", "upm_release_workflow",
+    "remote_runner", "soundminer_agent", "workflow_report", "soundmouse",
+    "upm_release_workflow",
 ]
 
 failures: list[str] = []

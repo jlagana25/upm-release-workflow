@@ -70,7 +70,7 @@ It installs only the dependencies needed for code work and tests — the GUI
 (`pyautogui`, `opencv-python`, `Pillow`) and browser (`playwright`) packages are
 intentionally omitted because they can't run headless and every import of them is
 lazy. Core deps: `python-docx`, `pandas`, `openpyxl`, `numpy`, `requests`,
-`python-dateutil`.
+`python-dateutil`, plus `urllib3<2` for Apple system Python's LibreSSL runtime.
 
 ---
 
@@ -165,7 +165,9 @@ Supporting modules: `config.py` (release context + **all** paths + partner
 destinations), `tracklist_columns.py` (shared CSV/XLSX column-name detection — the
 single source; don't reinvent per module), `logging_utils.py` (step logging
 helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
-(hands the Soundminer steps from the pipeline machine to the Soundminer machine),
+(`soundminer_agent.py` supersedes its SSH/manual path for normal runs),
+`soundminer_agent.py` (HDF1 Aqua LaunchAgent + shared request/status protocol),
+`workflow_report.py` (structured JSON run report),
 `prune.py` (removes files from prior months the current tracklist no longer
 references — the counterpart to verification).
 
@@ -210,7 +212,10 @@ the release/content month, even when processing happens in the next month.
   `actually_delete = not args.dry_run`, so `--dry-run` is the preview/safety
   guard. `--delete-non-maintracks` is deprecated and ignored; it remains only
   so older commands do not error. Folder overwrite still requires `--overwrite`.
-- Soundminer runs **unattended by default**; `--soundminer-attended` re-adds
+- Soundminer runs **unattended by default**. From HDF2, the HDF1 login-session
+  agent must be healthy before preflight passes; never replace it with an
+  SSH-spawned GUI process (macOS TCC blocks that capture context).
+  `--soundminer-attended` re-adds
   optional supervision pauses. Because Soundminer persists one global Mirror
   Settings state, Step 11 explicitly applies the SourceAudio AIFF profile and
   Step 12 explicitly applies the NBC Broadcast Wave profile before every
@@ -226,14 +231,14 @@ When adding a step: update `_STEP_UNITS`, add the block in the orchestrator, set
 
 | Host | Role | Project path |
 |------|------|--------------|
-| **USMPSMDHDF2** | Pipeline machine (runs the orchestrator; hands off Soundminer) | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
-| **USMPSMDHDF1** | Soundminer machine (Steps 11–12 run here) | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
+| **USMPSMDHDF2** | Pipeline machine (submits/monitors Soundminer agent jobs) | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
+| **USMPSMDHDF1** | Soundminer machine (login-session agent executes Steps 11–12) | `~/Documents/Scripts/Python/UPM Release WorkFlow Automation/files` |
 
 Both now use the **same path**, so any shell/git command is identical on either.
 Code locates its own files relative to `Path(__file__)` (`_REPO_ROOT` /
 `_FILES_DIR`), so moving the folder doesn't break anything. `config.py`'s
 `is_soundminer_machine()` uses the hostname to decide whether Steps 11–12 run
-inline or are handed off.
+inline or are submitted to HDF1's shared-volume agent.
 
 ---
 
@@ -273,6 +278,12 @@ inline or are handed off.
   (e.g. `--only 10` explicitly un-skips SoundExchange).
 - **Column detection** goes through `tracklist_columns.py`. Don't hardcode column
   names in individual modules.
+- **Soundminer must fail closed.** Never restore count-only mirror success,
+  generic OK/Yes clicking, or a no-activity timeout that proceeds anyway.
+  Metadata/source and destination filename manifests are correctness gates.
+- **Agent requests are atomic JSON.** HDF2 writes only to `pending/`; HDF1
+  claims by rename, updates heartbeats/status, and archives the request. Keep
+  GUI imports lazy so the queue/client remains testable headless.
 - **Interrupted Step 2 copies are recoverable.** `_safe_copytree` archives a
   partially copied Specials destination on `KeyboardInterrupt`. If an older
   partial tree already exists with unresolved `MMMM YYYY` names, Step 2 treats

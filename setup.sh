@@ -22,6 +22,7 @@ python3 -m pip install \
   "openpyxl>=3.1.0" \
   "numpy>=1.24.0" \
   "requests>=2.31.0" \
+  "urllib3<2" \
   "python-dateutil>=2.9.0"
 
 echo "==> Sanity check: import every module + verify wiring"

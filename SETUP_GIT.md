@@ -60,7 +60,7 @@ you can delete later.
 git pull                        # ALWAYS start here — get the latest
 # ...make edits (by you, or Claude Code)...
 make smoke                      # or: python3 smoke_test.py
-git add -A
+git add <specific files>
 git commit -m "Short description of the change"
 git push
 # then on the other machine:
@@ -120,7 +120,9 @@ can run `python3 smoke_test.py` / `make verify` itself and iterate until green.
 git pull                        # start current
 claude                          # make changes by asking; review its diffs
 make smoke                      # (it can run this for you)
-git add -A && git commit -m "what changed" && git push
+git add <specific files>
+git commit -m "what changed"
+git push
 # other machine:  git pull
 ```
 

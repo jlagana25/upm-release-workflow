@@ -10,6 +10,8 @@ openpyxl>=3.1.0             # XLSX engine for pandas read_excel/to_excel AND
                             #   the ISRC ingest-form splitter.
 numpy>=1.24.0               # array ops for UniSync screen matching
 requests>=2.31.0            # Cover art download (Step 6)
+urllib3<2                   # Apple system Python 3.9 links LibreSSL 2.8.3;
+                            # urllib3 2.x rejects/warns on that TLS runtime
 
 # Domo export automation (Step 1)
 playwright>=1.43.0          # Browser automation

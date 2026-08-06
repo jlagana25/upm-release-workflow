@@ -58,6 +58,17 @@ UPM_CACHE_MP3 = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/MP3")
 UPM_CACHE_WAV = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/WAV")
 SOUNDMOUSE_BASE = Path("/Volumes/Pegasus32 R8 - 2/SoundMouse")
 
+# Shared coordination area used by the HDF1 login-session Soundminer agent.
+# HDF2 only writes JSON requests and reads status here; the GUI automation is
+# always executed by the agent inside HDF1's Aqua session.
+SOUNDMINER_AGENT_ROOT = (
+    SPECIALS_BASE / "_AUTOMATION" / "soundminer-agent"
+)
+SOUNDMINER_AGENT_ENABLED = True
+SOUNDMINER_AGENT_POLL_SECONDS = 5
+SOUNDMINER_AGENT_HEARTBEAT_TIMEOUT = 180
+SOUNDMINER_AGENT_JOB_TIMEOUT = 12 * 60 * 60
+
 # ---------------------------------------------------------------------------
 # Fixed user-side paths
 # ---------------------------------------------------------------------------
@@ -69,6 +80,7 @@ EXPORTS_DIR = Path(
 LOGS_DIR = Path(
     "/Users/hdfuser/Documents/Scripts/Python/_Logs/UPM Release Workflow"
 )
+DOMO_PROFILE_DIR = Path.home() / ".upm_release_workflow" / "domo_browser_profile"
 MISSING_COVER_REPORT = Path("/Volumes/UPM Builds/Missing_CDCover_Downloads.csv")
 
 # ---------------------------------------------------------------------------
@@ -153,12 +165,11 @@ SOUNDMOUSE_DOMO_CARDS: dict[str, str] = {
 # capturable display, so SSH-triggering is a non-starter here regardless of
 # sudo/launchctl/TCC tuning.
 #
-# Step 12 therefore runs in "hand-off" mode: the pipeline (Steps 1–11, 13, 14)
-# runs on the pipeline Mac, and Step 12 is run BY HAND on the Soundminer Mac
-# inside its Screen Sharing / console session, where capture works because
-# the process is in the real GUI session that owns the (virtual) display.
-# The shared Pegasus volumes (identical paths on both machines) make the
-# data hand-off automatic.
+# The supported unattended path is therefore NOT SSH. ``soundminer_agent.py``
+# is installed once as an HDF1 per-user LaunchAgent with Aqua session type.
+# HDF2 writes requests/status JSON through the shared Pegasus volume; the HDF1
+# agent drives Soundminer locally and reports heartbeats/results. The legacy
+# manual handoff remains available with ``--no-soundminer-agent``.
 #
 # If this ever moves to a non-managed Mac where SSH GUI automation is
 # permitted, set REMOTE_SOUNDMINER_ENABLED = True and the smoke test in
@@ -174,8 +185,8 @@ REMOTE_SOUNDMINER_ENABLED = False
 # running on by hostname and chooses how to run Step 12:
 #
 #   • On the Soundminer machine  → run Step 12 INLINE (drive the GUI locally).
-#   • On the pipeline machine    → HAND-OFF (pause; operator runs Step 12 on
-#                                   the Soundminer Mac), unless REMOTE_… is on.
+#   • On the pipeline machine    → submit to HDF1 login-session agent. Legacy
+#                                   manual handoff is recovery-only.
 #
 # Every other step rides on the shared Pegasus volumes (identical paths on both
 # machines), so they run the same from either host.

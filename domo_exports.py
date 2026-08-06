@@ -62,7 +62,14 @@ def _require_playwright() -> None:
             "Or run with --skip-domo if the exports already exist."
         )
 
-from config import DOMO_CARDS, DOMO_INSTANCE, DOMO_PAGE_ID, ReleaseContext, context_from_cli_args
+from config import (
+    DOMO_CARDS,
+    DOMO_INSTANCE,
+    DOMO_PAGE_ID,
+    DOMO_PROFILE_DIR,
+    ReleaseContext,
+    context_from_cli_args,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -221,12 +228,14 @@ def run_domo_exports(
 
     _require_playwright()
     with sync_playwright() as p:
-        browser = p.chromium.launch(
+        DOMO_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        ctx_pw = p.chromium.launch_persistent_context(
+            user_data_dir=str(DOMO_PROFILE_DIR),
             headless=False,
             downloads_path=str(TEMP_DOWNLOAD_DIR),
+            accept_downloads=True,
         )
-        ctx_pw = browser.new_context(accept_downloads=True)
-        page   = ctx_pw.new_page()
+        page = ctx_pw.pages[0] if ctx_pw.pages else ctx_pw.new_page()
 
         try:
             _authenticate(page, logger)
@@ -246,7 +255,7 @@ def run_domo_exports(
                     logger.error(f"     ✗ Failed '{card['description']}': {exc}")
                     results[card["key"]] = "failed"
         finally:
-            browser.close()
+            ctx_pw.close()
 
     try:
         if TEMP_DOWNLOAD_DIR.exists() and not any(TEMP_DOWNLOAD_DIR.iterdir()):
@@ -290,7 +299,10 @@ def _authenticate(page, logger: logging.Logger) -> None:
     # If a retained browser session redirects immediately, the control is not
     # present and the short lookup simply falls through.
     try:
-        sign_in = page.get_by_role("button", name="SIGN IN", exact=True)
+        # This Domo build renders a real <button> whose accessibility role/name
+        # is inexplicably absent, even though its visible innerText is SIGN IN.
+        # Target the concrete element before trying semantic fallbacks.
+        sign_in = page.locator("button:has-text('SIGN IN')").first
         sign_in.click(timeout=5_000)
         logger.info("  Clicked Domo SIGN IN.")
     except PlaywrightTimeoutError:
@@ -314,12 +326,27 @@ def _authenticate(page, logger: logging.Logger) -> None:
                     "  Domo SIGN IN was not shown; checking retained session."
                 )
     logger.info("  >>> Complete Microsoft login in the browser window <<<")
-    page.wait_for_function(
-        f"() => window.location.hostname === '{DOMO_INSTANCE}'"
-        f"   && !window.location.href.includes('/auth')",
-        timeout=LOGIN_TIMEOUT,
-        polling=1000,
-    )
+    try:
+        page.wait_for_function(
+            f"() => window.location.hostname === '{DOMO_INSTANCE}'"
+            f"   && !window.location.href.includes('/auth')",
+            timeout=LOGIN_TIMEOUT,
+            polling=1000,
+        )
+    except PlaywrightTimeoutError:
+        failure_dir = Path(__file__).resolve().parent.parent / "_logs" / "domo_failures"
+        failure_dir.mkdir(parents=True, exist_ok=True)
+        screenshot = failure_dir / f"domo_auth_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        try:
+            page.screenshot(path=str(screenshot))
+        except Exception:
+            screenshot = Path("(screenshot unavailable)")
+        raise PlaywrightTimeoutError(
+            "Domo/Microsoft authentication did not recover within the timeout. "
+            f"URL={page.url}; screenshot={screenshot}. Complete the one-time "
+            "Microsoft sign-in in this persistent profile, then future runs "
+            "will reuse it unattended."
+        )
     logger.info("  Logged in.")
     time.sleep(NAV_WAIT)
 
@@ -399,6 +426,14 @@ def _navigate_to_card(
         )
     except PlaywrightTimeoutError:
         pass
+    if "/auth" in page.url or page.url.startswith("https://login.microsoftonline.com"):
+        logger.warning("     Domo session expired mid-run; re-authenticating once…")
+        _authenticate(page, logger)
+        page.evaluate(f"window.location.replace('{url}')")
+        page.wait_for_function(
+            "() => window.location.href.includes('kpis/details')",
+            timeout=NAV_TIMEOUT, polling=500,
+        )
     time.sleep(NAV_WAIT)
 
 
@@ -791,11 +826,14 @@ def _run_test(args) -> None:
 
     _require_playwright()
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False, downloads_path=str(TEMP_DOWNLOAD_DIR),
+        DOMO_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        ctx_pw = p.chromium.launch_persistent_context(
+            user_data_dir=str(DOMO_PROFILE_DIR),
+            headless=False,
+            downloads_path=str(TEMP_DOWNLOAD_DIR),
+            accept_downloads=True,
         )
-        ctx_pw = browser.new_context(accept_downloads=True)
-        page   = ctx_pw.new_page()
+        page = ctx_pw.pages[0] if ctx_pw.pages else ctx_pw.new_page()
 
         keep_browser_open = False
         results: dict[str, str] = {}
@@ -841,7 +879,7 @@ def _run_test(args) -> None:
                 except KeyboardInterrupt:
                     pass
         finally:
-            browser.close()
+                ctx_pw.close()
 
     # Tidy the temp download dir if it ended up empty
     try:

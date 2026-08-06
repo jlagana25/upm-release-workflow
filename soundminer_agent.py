@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""Shared-volume Soundminer agent and HDF2 client.
+
+The daemon is installed as a per-user macOS LaunchAgent on HDF1.  That is the
+important distinction from SSH: launchd starts it inside the logged-in Aqua
+session, so Screen Recording and Accessibility can reach Soundminer.  HDF2
+submits atomic JSON requests through the shared Pegasus volume and monitors
+heartbeats/results without ever launching Soundminer locally.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import plistlib
+import socket
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from config import (
+    SOUNDMINER_AGENT_HEARTBEAT_TIMEOUT,
+    SOUNDMINER_AGENT_JOB_TIMEOUT,
+    SOUNDMINER_AGENT_POLL_SECONDS,
+    SOUNDMINER_AGENT_ROOT,
+    SOUNDMINER_HOSTNAME,
+    ReleaseContext,
+    current_hostname,
+)
+
+PROTOCOL_VERSION = 1
+AGENT_LABEL = "com.upm.soundminer-agent"
+FILES_DIR = Path(__file__).resolve().parent
+REPO_ROOT = FILES_DIR.parent
+AGENT_LOG_DIR = REPO_ROOT / "_logs" / "soundminer_agent"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _paths(root: Path = SOUNDMINER_AGENT_ROOT) -> dict[str, Path]:
+    return {
+        "root": root,
+        "pending": root / "pending",
+        "running": root / "running",
+        "completed": root / "completed",
+        "status": root / "status",
+        "agent": root / "agent.json",
+    }
+
+
+def _ensure_dirs(root: Path = SOUNDMINER_AGENT_ROOT) -> dict[str, Path]:
+    paths = _paths(root)
+    for key in ("pending", "running", "completed", "status"):
+        paths[key].mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temporary.replace(path)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object: {path}")
+    return value
+
+
+def agent_health(root: Path = SOUNDMINER_AGENT_ROOT) -> tuple[bool, str]:
+    paths = _paths(root)
+    path = paths["agent"]
+    if not path.exists():
+        return False, f"agent heartbeat does not exist: {path}"
+    try:
+        payload = _read_json(path)
+        age = (datetime.now(timezone.utc) - _parse_utc(payload["heartbeat_at"])).total_seconds()
+    except Exception as exc:
+        return False, f"agent heartbeat is unreadable: {exc}"
+    if payload.get("host", "").upper() != SOUNDMINER_HOSTNAME.upper():
+        return False, f"heartbeat came from unexpected host {payload.get('host')!r}"
+    if age > SOUNDMINER_AGENT_HEARTBEAT_TIMEOUT:
+        # The single-worker daemon waits synchronously for soundminer.py. Its
+        # idle heartbeat pauses during a job, while the request status is
+        # refreshed by each workflow progress line. Treat that fresh HDF1-owned
+        # status as authoritative so a restarted HDF2 can safely reattach.
+        for status_path in sorted(paths["status"].glob("*.json")):
+            try:
+                status = _read_json(status_path)
+                status_age = (
+                    datetime.now(timezone.utc)
+                    - _parse_utc(str(status["heartbeat_at"]))
+                ).total_seconds()
+            except Exception:
+                continue
+            if (
+                status.get("state") == "running"
+                and str(status.get("host", "")).upper() == SOUNDMINER_HOSTNAME.upper()
+                and status_age <= SOUNDMINER_AGENT_HEARTBEAT_TIMEOUT
+            ):
+                return (
+                    True,
+                    "HDF1 agent busy with "
+                    f"{status.get('request_id', status_path.stem)} "
+                    f"({int(status_age)}s progress heartbeat age)",
+                )
+        return False, f"agent heartbeat is stale ({int(age)}s old)"
+    return True, f"HDF1 agent online ({int(age)}s heartbeat age)"
+
+
+def submit_request(
+    ctx: ReleaseContext,
+    workflow: str,
+    logger: logging.Logger,
+    *,
+    options: dict[str, Any] | None = None,
+    root: Path = SOUNDMINER_AGENT_ROOT,
+) -> str:
+    if workflow not in {"sourceaudio", "nbc", "probe"}:
+        raise ValueError(f"Unsupported Soundminer agent workflow: {workflow}")
+    paths = _ensure_dirs(root)
+    # If HDF2 was restarted while HDF1 kept working, attach to that request
+    # instead of queueing a duplicate destructive database run.
+    for directory in (paths["running"], paths["pending"]):
+        for existing_path in sorted(directory.glob("*.json")):
+            try:
+                existing = _read_json(existing_path)
+            except Exception:
+                continue
+            if (
+                existing.get("release_id") == ctx.release_id
+                and existing.get("workflow") == workflow
+            ):
+                existing_id = str(existing.get("request_id", existing_path.stem))
+                logger.warning(
+                    f"  ↻ Reattaching to existing HDF1 request: {existing_id}"
+                )
+                return existing_id
+    request_id = (
+        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-"
+        f"{ctx.release_id.lower()}-{workflow}-{uuid.uuid4().hex[:8]}"
+    )
+    request = {
+        "protocol": PROTOCOL_VERSION,
+        "request_id": request_id,
+        "created_at": _utc_now(),
+        "created_by": current_hostname(),
+        "release_id": ctx.release_id,
+        "workflow": workflow,
+        "pinned_args": ctx.pinned_cli_args(),
+        "options": options or {},
+    }
+    _atomic_json(paths["pending"] / f"{request_id}.json", request)
+    _atomic_json(paths["status"] / f"{request_id}.json", {
+        "protocol": PROTOCOL_VERSION,
+        "request_id": request_id,
+        "state": "queued",
+        "phase": "waiting for HDF1 agent",
+        "heartbeat_at": _utc_now(),
+        "host": current_hostname(),
+    })
+    logger.info(f"  Submitted HDF1 Soundminer request: {request_id}")
+    return request_id
+
+
+def wait_for_request(
+    request_id: str,
+    logger: logging.Logger,
+    *,
+    root: Path = SOUNDMINER_AGENT_ROOT,
+    timeout: int = SOUNDMINER_AGENT_JOB_TIMEOUT,
+    heartbeat_timeout: int = SOUNDMINER_AGENT_HEARTBEAT_TIMEOUT,
+) -> bool:
+    status_path = _paths(root)["status"] / f"{request_id}.json"
+    started = time.monotonic()
+    last_rendered: tuple[str, str] | None = None
+    while time.monotonic() - started <= timeout:
+        try:
+            status = _read_json(status_path)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            time.sleep(SOUNDMINER_AGENT_POLL_SECONDS)
+            continue
+        state = str(status.get("state", "unknown"))
+        phase = str(status.get("phase", ""))
+        rendered = (state, phase)
+        if rendered != last_rendered:
+            logger.info(f"  HDF1 [{state}] {phase}".rstrip())
+            last_rendered = rendered
+        if state == "completed":
+            logger.info(f"  ✓ HDF1 Soundminer request completed: {request_id}")
+            return True
+        if state == "failed":
+            logger.error(
+                f"  ✗ HDF1 Soundminer request failed: {request_id}\n"
+                f"     {status.get('message', phase)}"
+            )
+            if status.get("failure_screenshot"):
+                logger.error(f"     Screenshot: {status['failure_screenshot']}")
+            if status.get("log_path"):
+                logger.error(f"     Agent log: {status['log_path']}")
+            return False
+        try:
+            age = (
+                datetime.now(timezone.utc)
+                - _parse_utc(str(status["heartbeat_at"]))
+            ).total_seconds()
+        except Exception:
+            age = heartbeat_timeout + 1
+        if state == "running" and age > heartbeat_timeout:
+            logger.error(
+                f"  ✗ HDF1 Soundminer heartbeat stopped for {int(age)}s. "
+                "The GUI agent may have crashed or the shared volume disconnected."
+            )
+            return False
+        time.sleep(SOUNDMINER_AGENT_POLL_SECONDS)
+    logger.error(f"  ✗ HDF1 Soundminer request exceeded {timeout}s: {request_id}")
+    return False
+
+
+def run_via_agent(
+    ctx: ReleaseContext,
+    workflow: str,
+    dry_run: bool,
+    logger: logging.Logger,
+    *,
+    options: dict[str, Any] | None = None,
+    root: Path = SOUNDMINER_AGENT_ROOT,
+) -> bool:
+    if dry_run:
+        logger.info(
+            f"  [DRY RUN] Would submit unattended HDF1 agent job: {workflow} "
+            f"for {ctx.release_id}."
+        )
+        return True
+    healthy, detail = agent_health(root)
+    if not healthy:
+        logger.error(
+            f"  ✗ HDF1 Soundminer agent unavailable: {detail}\n"
+            "     On HDF1, install/start it once with:\n"
+            "       python3 soundminer_agent.py --install"
+        )
+        return False
+    logger.info(f"  ✓ {detail}")
+    request_id = submit_request(ctx, workflow, logger, options=options, root=root)
+    return wait_for_request(request_id, logger, root=root)
+
+
+def _status_update(
+    status_path: Path,
+    request: dict[str, Any],
+    state: str,
+    phase: str,
+    **extra: Any,
+) -> None:
+    payload = {
+        "protocol": PROTOCOL_VERSION,
+        "request_id": request["request_id"],
+        "release_id": request.get("release_id"),
+        "workflow": request.get("workflow"),
+        "state": state,
+        "phase": phase,
+        "heartbeat_at": _utc_now(),
+        "host": current_hostname(),
+        "pid": os.getpid(),
+    }
+    payload.update(extra)
+    _atomic_json(status_path, payload)
+
+
+def _build_command(request: dict[str, Any]) -> list[str]:
+    workflow = request["workflow"]
+    command = [sys.executable, str(FILES_DIR / "soundminer.py")]
+    if workflow in {"sourceaudio", "nbc"}:
+        command.append(f"--{workflow}")
+    command.extend(str(value) for value in request.get("pinned_args", []))
+    options = request.get("options", {})
+    if options.get("capture_steps"):
+        command.append("--capture-steps")
+    if options.get("resume"):
+        command.append("--resume")
+    if workflow == "sourceaudio" and options.get("db_shortcut"):
+        command.extend(["--sourceaudio-db-shortcut", str(options["db_shortcut"])])
+    return command
+
+
+def _process_request(request_path: Path, root: Path, logger: logging.Logger) -> None:
+    paths = _ensure_dirs(root)
+    running_path = paths["running"] / request_path.name
+    try:
+        request_path.replace(running_path)
+    except FileNotFoundError:
+        return
+    request = _read_json(running_path)
+    status_path = paths["status"] / running_path.name
+    request_id = request.get("request_id", running_path.stem)
+    log_path = AGENT_LOG_DIR / f"{request_id}.log"
+    AGENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _status_update(status_path, request, "running", "agent accepted request", log_path=str(log_path))
+    exit_code = 1
+    failure_screenshot = ""
+    try:
+        if request.get("protocol") != PROTOCOL_VERSION:
+            raise ValueError(f"Unsupported protocol {request.get('protocol')!r}")
+        if current_hostname() != SOUNDMINER_HOSTNAME.upper():
+            raise RuntimeError(
+                f"Agent must run on {SOUNDMINER_HOSTNAME}, not {current_hostname()}"
+            )
+        if request.get("workflow") == "probe":
+            from soundminer import run_soundminer_gui_preflight
+            ok = run_soundminer_gui_preflight(logger)
+            detail = "Soundminer GUI/crop/Accessibility preflight passed"
+            if not ok:
+                raise RuntimeError("Soundminer GUI/crop/Accessibility preflight failed")
+            _status_update(status_path, request, "completed", detail, log_path=str(log_path), exit_code=0)
+            exit_code = 0
+            return
+
+        command = _build_command(request)
+        _status_update(
+            status_path, request, "running", "launching Soundminer workflow",
+            command=command, log_path=str(log_path),
+        )
+        with log_path.open("w", encoding="utf-8", buffering=1) as log_handle:
+            process = subprocess.Popen(
+                command,
+                cwd=str(FILES_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            for raw in process.stdout:
+                log_handle.write(raw)
+                line = raw.strip()
+                if line:
+                    logger.info("[%s] %s", request_id, line)
+                    if "Failure screenshot saved:" in line:
+                        failure_screenshot = line.split("Failure screenshot saved:", 1)[1].strip()
+                    _status_update(
+                        status_path, request, "running", line[-500:],
+                        command=command, log_path=str(log_path),
+                        failure_screenshot=failure_screenshot,
+                    )
+            exit_code = process.wait()
+        if exit_code:
+            raise RuntimeError(f"soundminer.py exited {exit_code}")
+        _status_update(
+            status_path, request, "completed", "Soundminer workflow completed",
+            command=command, log_path=str(log_path), exit_code=0,
+        )
+    except Exception as exc:
+        _status_update(
+            status_path, request, "failed", "Soundminer workflow failed",
+            message=f"{type(exc).__name__}: {exc}", log_path=str(log_path),
+            failure_screenshot=failure_screenshot, exit_code=exit_code,
+        )
+        logger.exception("Request %s failed", request_id)
+    finally:
+        destination = paths["completed"] / running_path.name
+        if running_path.exists():
+            running_path.replace(destination)
+
+
+def serve(
+    *,
+    root: Path = SOUNDMINER_AGENT_ROOT,
+    once: bool = False,
+    poll_seconds: int = SOUNDMINER_AGENT_POLL_SECONDS,
+) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+    )
+    logger = logging.getLogger("soundminer_agent")
+    paths = _ensure_dirs(root)
+    if current_hostname() != SOUNDMINER_HOSTNAME.upper():
+        logger.error("This daemon may only run on %s.", SOUNDMINER_HOSTNAME)
+        return 2
+    logger.info("Soundminer agent online; queue=%s", paths["pending"])
+
+    def heartbeat() -> None:
+        _atomic_json(paths["agent"], {
+            "protocol": PROTOCOL_VERSION,
+            "host": current_hostname(),
+            "pid": os.getpid(),
+            "state": "online",
+            "heartbeat_at": _utc_now(),
+            "queue": str(paths["pending"]),
+        })
+
+    while True:
+        heartbeat()
+        pending = sorted(paths["pending"].glob("*.json"))
+        if pending:
+            _process_request(pending[0], root, logger)
+            heartbeat()
+        if once:
+            return 0
+        time.sleep(max(1, poll_seconds))
+
+
+def install_launch_agent() -> Path:
+    if current_hostname() != SOUNDMINER_HOSTNAME.upper():
+        raise RuntimeError(f"Install this agent on {SOUNDMINER_HOSTNAME} only")
+    uid = os.getuid()
+    launch_dir = Path.home() / "Library" / "LaunchAgents"
+    launch_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = launch_dir / f"{AGENT_LABEL}.plist"
+    AGENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "Label": AGENT_LABEL,
+        "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--serve"],
+        "WorkingDirectory": str(FILES_DIR),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ProcessType": "Interactive",
+        "LimitLoadToSessionType": "Aqua",
+        "StandardOutPath": str(AGENT_LOG_DIR / "launchagent.out.log"),
+        "StandardErrorPath": str(AGENT_LOG_DIR / "launchagent.err.log"),
+    }
+    temporary = plist_path.with_suffix(".plist.tmp")
+    with temporary.open("wb") as handle:
+        plistlib.dump(payload, handle)
+    temporary.replace(plist_path)
+    domain = f"gui/{uid}"
+    subprocess.run(["launchctl", "bootout", domain, str(plist_path)], capture_output=True)
+    result = subprocess.run(
+        ["launchctl", "bootstrap", domain, str(plist_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeError(f"launchctl bootstrap failed: {result.stderr.strip()}")
+    subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{AGENT_LABEL}"], check=True)
+    return plist_path
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="HDF1 Soundminer login-session agent")
+    parser.add_argument("--serve", action="store_true", help="Run the persistent queue daemon")
+    parser.add_argument("--once", action="store_true", help="Process at most one queued request")
+    parser.add_argument("--install", action="store_true", help="Install/start the HDF1 LaunchAgent")
+    parser.add_argument("--status", action="store_true", help="Print current shared agent health")
+    args = parser.parse_args(argv)
+    if args.install:
+        path = install_launch_agent()
+        print(f"Installed and started: {path}")
+        return 0
+    if args.status:
+        ok, detail = agent_health()
+        print(detail)
+        return 0 if ok else 1
+    if args.serve or args.once:
+        return serve(once=args.once)
+    parser.error("choose --serve, --once, --install, or --status")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

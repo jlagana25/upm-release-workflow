@@ -124,8 +124,9 @@ POST_CSV_SETTLE    = 5.0    # seconds after CSV load before watching output
 #   • After the automatic retry cap, if files are still undelivered, PAUSES and
 #     lets the user press Enter to keep retrying ONLY the missing files until
 #     they are all in, before continuing to the copy/packaging steps.
-# When False (default, unattended), behaviour is unchanged: failures stop the
-# job and leftovers after the cap are deferred to verification.
+# When False (default, unattended), UI and zero-progress passes are retried a
+# bounded number of times with reduced CSVs; unresolved files then write an
+# exact report and fail the job instead of being deferred as apparent success.
 SUPERVISED         = False
 
 # DEFAULT ON: configure each job by writing its Territory/Cache/Client into
@@ -138,6 +139,8 @@ SUPERVISED         = False
 # reuse the already-running app (no relaunch).  Pass --no-unisync-xml-setup to
 # fall back to the on-screen UI path-entry.
 XML_SETUP          = True
+UNATTENDED_UI_RETRIES = 2
+UNATTENDED_ZERO_PROGRESS_RETRIES = 2
 # Location of UniSync's preferences file (holds the userPrefs cache/client).
 UNISYNC_XML_PATH   = "/Users/hdfuser/Library/SMUniSync/UniSync.xml"
 
@@ -523,6 +526,8 @@ def _run_single_job(
         prev_missing_count = len(missing0)   # zero-delivery first pass = no progress
         pass_no = 0
         force_setup = False
+        ui_failures = 0
+        zero_progress_passes = 0
 
         while True:
             # In XML-setup mode a relaunch is cheap (~7s) and always yields a
@@ -561,6 +566,15 @@ def _run_single_job(
 
             # --- UI failure (often accidental focus loss) --------------------
             if status == STATUS_FAILED:
+                if not SUPERVISED and ui_failures < UNATTENDED_UI_RETRIES:
+                    ui_failures += 1
+                    force_setup = True
+                    logger.warning(
+                        f"  ↻ UniSync UI failure; automatic recovery "
+                        f"{ui_failures}/{UNATTENDED_UI_RETRIES} will relaunch "
+                        "and retry the same reduced request."
+                    )
+                    continue
                 if SUPERVISED and _pause_retry_prompt(
                     f"A UniSync UI step failed for '{job['name']}'.\n"
                     f"This usually means the mouse/keyboard was touched or a window\n"
@@ -588,6 +602,7 @@ def _run_single_job(
 
             # --- New files arrived → keep going (unlimited while progress) ----
             if made_progress:
+                zero_progress_passes = 0
                 logger.warning(
                     f"  ⚠  {len(missing)}/{total} {ext} file(s) still undelivered."
                 )
@@ -598,6 +613,20 @@ def _run_single_job(
             # --- Zero new files this pass → not in the CURRENT list -----------
             # (download bug is fixed; undelivered now means genuinely not found).
             _report_not_found(job, missing, ext, logger)
+
+            if not SUPERVISED and (
+                zero_progress_passes < UNATTENDED_ZERO_PROGRESS_RETRIES
+            ):
+                zero_progress_passes += 1
+                logger.warning(
+                    f"  ↻ Zero-progress automatic retry "
+                    f"{zero_progress_passes}/{UNATTENDED_ZERO_PROGRESS_RETRIES} "
+                    f"for the remaining {len(missing)} {ext} file(s)."
+                )
+                to_request = missing
+                csv_to_use = _request_csv(to_request, pass_no)
+                force_setup = True
+                continue
 
             # Supervised: pause so you can refresh / re-export the tracklist,
             # then press Enter.  We re-read it, diff against the destination, and
@@ -638,7 +667,12 @@ def _run_single_job(
                 force_setup = True                  # clean reload after the pause
                 continue
 
-            return STATUS_OK
+            report = _write_unisync_missing_report(job, missing, ext, logger)
+            logger.error(
+                f"  ✗  UniSync exhausted automatic retries with "
+                f"{len(missing)}/{total} file(s) missing. Report: {report}"
+            )
+            return STATUS_FAILED
     finally:
         # Tidy up the transient request CSVs.
         for tc in temp_csvs:
@@ -670,6 +704,30 @@ def _pause_retry_prompt(reason: str, instruction: str, logger: logging.Logger) -
         logger.warning("  (no interactive input available — skipping)")
         return False
     return ans not in ("s", "skip", "n", "no", "q", "quit")
+
+
+def _write_unisync_missing_report(
+    job: dict,
+    missing: set[str],
+    ext: str,
+    logger: logging.Logger,
+) -> Path:
+    """Write the exact unresolved filename set after bounded retries."""
+    import csv
+    safe_name = "".join(
+        char if char.isalnum() else "_" for char in str(job["name"])
+    ).strip("_")
+    FAILURE_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = FAILURE_SCREENSHOTS_DIR / (
+        f"{safe_name}_missing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Job", "Extension", "Expected filename", "Client path"])
+        for filename in sorted(missing):
+            writer.writerow([job["name"], ext, filename, job["client_path"]])
+    logger.info(f"  UniSync missing-file report: {path}")
+    return path
 
 
 def _drive_unisync_for_csv(
@@ -1551,8 +1609,8 @@ def _report_not_found(
     logger.warning(
         "     This usually means they were de-activated or un-published in UPM\n"
         "     since the export was made.  Refresh the export CSV (Step 1 Domo)\n"
-        "     and re-run Step 5 if these tracks should still exist; otherwise\n"
-        "     they can be ignored."
+        "     and re-run Step 5. The unattended job will fail with an exact\n"
+        "     missing-file report if bounded retries cannot deliver them."
     )
 
 

@@ -21,13 +21,10 @@ setting up a new machine, work through Part 2 top to bottom.
 - Examples use **May 2026, Part 1** (`--year 2026 --month 5 --part 1`). Swap in your real release.
 - `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05-P1`
 - `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Part 1 Release - NBC`
-- The workflow can be launched from **either machine**. Step 12 (Soundminer) is
-  the only machine-specific step: it runs **inline** (automatically) when you
-  launch on the **Soundminer machine (USMPSMDHDF1)**, and switches to a
-  **hand-off pause** when you launch on the **pipeline machine (USMPSMDHDF2)** so
-  you can run Step 12 on the Soundminer Mac. Detection is automatic by hostname —
-  no flag needed. Every other step rides on the shared Pegasus volumes and runs
-  the same from either machine.
+- The workflow can be launched from **either machine**. On HDF1, Soundminer runs
+  inline. On HDF2, Steps 11–12 are submitted to the HDF1 Aqua LaunchAgent and
+  monitored through the shared Pegasus queue—no Screen Sharing, Enter prompt,
+  or Soundminer installation on HDF2. Detection is automatic by hostname.
 - **Golden rule:** run with `--dry-run` first wherever it is supported, inspect, then run for real.
 
 > **Before every run or test session:** confirm both Pegasus volumes are mounted
@@ -54,7 +51,7 @@ setting up a new machine, work through Part 2 top to bottom.
 
 ## What runs, and in what order
 
-Preflight → 1 Domo exports → 2/3 Folder setup → 4 Album list DOCX/PDF →
+Preflight → 2/3 Folder setup → 1 Domo exports → 4 Album list DOCX/PDF →
 5 UniSync → 6–8 Covers → 9 Verification → 10 Final packaging (+ SoundExchange forms) →
 11 SourceAudio AIFF → 12 Soundminer → 12.7 NBC WAV→MP3 →
 13 Non-maintrack cleanup → 14 NBC rename → 15 Final metadata cross-check →
@@ -82,9 +79,9 @@ missing-report path, the log-file path, and the overall status).
    ```bash
    python3 upm_release_workflow.py --year 2026 --month 5 --part 1
    ```
-   - On **USMPSMDHDF2**, the run pauses at Step 12 with a hand-off banner. Run
-     Soundminer on **USMPSMDHDF1** (see Step 11 in Part 2 for the exact command),
-     then press ENTER back on USMPSMDHDF2 to continue through conversion + rename.
+   - On **USMPSMDHDF2**, preflight first verifies the HDF1 agent heartbeat and
+     runs a non-destructive HDF1 GUI/crop/permission probe. The run then submits
+     and monitors both Soundminer jobs automatically.
    - On **USMPSMDHDF1**, Step 12 runs inline automatically — no pause — and the
      full pipeline completes in one pass.
    - Step 13 **deletes** the non-maintracks in a normal run. Use `--dry-run`
@@ -130,12 +127,15 @@ To recover:
   records it, names the step it happened in, prints the final summary, and exits
   non-zero — no raw traceback, and nothing left half-done that a re-run can't
   recover from.
+- For a Soundminer phase failure, add `--soundminer-resume`. Completed phases
+  are checkpointed, but a skip occurs only after the exact destination
+  filename manifest is revalidated.
 
 ## All flags
 
 `--year` `--month` `--part` · `--previous-month` · `--dry-run` · `--overwrite` ·
 `--delete-non-maintracks` (deprecated and ignored; retained only so old commands
-do not error)
+do not error), `--soundminer-resume`, `--no-soundminer-agent` (recovery only)
 
 Per-step skips: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
 `--skip-unisync`, `--skip-covers`, `--skip-verify`, `--skip-final-packaging`,
@@ -163,9 +163,8 @@ Confirms the whole pipeline plans correctly for a Part 1 window without touching
 
 - **Command:**
   ```bash
-  python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --dry-run --skip-soundminer
+  python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --dry-run
   ```
-  (`--skip-soundminer` avoids the interactive hand-off pause during a non-interactive dry run.)
 - **Expected output:**
   - Header shows `Release range: 2026-05-01 → 2026-05-14`.
   - Every step logs `[DRY RUN]` lines describing intended actions.
@@ -184,7 +183,7 @@ Confirms the Part 2 date window (15th → final calendar day) computes correctly
 
 - **Command:**
   ```bash
-  python3 upm_release_workflow.py --year 2026 --month 5 --part 2 --dry-run --skip-soundminer
+  python3 upm_release_workflow.py --year 2026 --month 5 --part 2 --dry-run
   ```
 - **Expected output:**
   - Header shows `Release range: 2026-05-15 → 2026-05-31`.
@@ -378,7 +377,7 @@ Validates Step 10 (copy originals into the final delivery package structure).
 
 ## 10. SourceAudio AIFF mirror test (Step 11)
 
-Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio deliveries. **Must run on the Soundminer machine (USMPSMDHDF1)** via Screen Sharing with an active GUI session — same machine and constraints as the NBC Soundminer test below. In a full pass Step 11 runs right before the NBC step (12).
+Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio deliveries. Direct testing runs on USMPSMDHDF1, but a normal HDF2 orchestrator run submits the work to HDF1's login-session agent and monitors it without a machine switch. In a full pass Step 11 runs right before the NBC step (12).
 
 **Prerequisites on USMPSMDHDF1:** same as the NBC Soundminer test (Accessibility + Screen Recording, reference crops, current code verified by byte size), plus the two source trees must exist:
 - `{specials}/1-ORIGINAL/Music/WAV w COVERS/MEDIA/` (US source)
@@ -396,6 +395,9 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
   # Normal run: the SourceAudio profile is applied automatically before each
   # mirror, overriding any incompatible settings persisted by Step 12:
   python3 soundminer.py --sourceaudio --year 2026 --month 5 --part 1
+
+  # Resume only phases whose checkpoint and destination manifest still agree:
+  python3 soundminer.py --sourceaudio --resume --year 2026 --month 5 --part 1
   ```
   - Runs **unattended by default** and explicitly applies the complete SourceAudio profile before every mirror. Add `--attended` to review the applied settings and supervise the other long-running phases. (`--unattended` still exists but is a deprecated no-op.)
   - `--sourceaudio-db-shortcut` defaults to `"8"` (⌘8); pass a different number only if your SourceAudio DB is on another slot.
@@ -421,14 +423,12 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
 
 ## 11. Soundminer test (runs on USMPSMDHDF1)
 
-Validates Step 12 (database switch → delete → import → embed → mirror). **Must run on the Soundminer machine, in its own Terminal via Screen Sharing**, with an active GUI session (the virtual display only exists while Screen Sharing is connected).
+Validates Step 12 (database switch → delete → import → embed → mirror). The UI process must execute in HDF1's login/Aqua session. Normally the persistent HDF1 LaunchAgent provides that session while HDF2 submits and monitors the job; direct commands remain useful for diagnostics.
 
-> **Inline vs. hand-off:** when you run the full orchestrator *on USMPSMDHDF1*,
-> Step 12 runs **inline** automatically (no hand-off pause) — the orchestrator
-> detects the hostname and drives Soundminer directly. When you run the
-> orchestrator on USMPSMDHDF2, Step 12 becomes a hand-off pause instead. This
-> test exercises `soundminer.py` directly, which is exactly the code path the
-> inline run uses, so validating it here validates both.
+> **Inline vs. agent:** on HDF1, Step 12 runs inline. On HDF2, it writes an
+> atomic request under `_Specials/UPM/_AUTOMATION/soundminer-agent`, then polls
+> HDF1 heartbeats and phase/result JSON. SSH never drives the GUI. Use
+> `--no-soundminer-agent` only to restore the legacy manual handoff.
 
 **Prerequisites on USMPSMDHDF1:**
 - Terminal has **Accessibility** + **Screen Recording** granted.
@@ -438,6 +438,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
 - The NBC metadata CSV exists at `{specials}/1-ORIGINAL/Metadata/UPM-US NBCUniversal Metadata Export.csv`.
 - The staged WAVs exist at `{specials}/2-STAGING/SME WAV 48K NBC/MEDIA/`.
 - The remote has the **current code** (verify by byte size, e.g. `wc -c soundminer.py`).
+- The agent is installed and online:
+  `python3 soundminer_agent.py --install` (one time), then
+  `python3 soundminer_agent.py --status`.
 
 - **Command (dry-run first, then attended real run):**
   ```bash
@@ -446,23 +449,31 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
 
   # Full attended run with per-step screenshots:
   python3 soundminer.py --test --year 2026 --month 5 --part 1 --capture-steps
+
+  # Non-destructive permissions/capture/crop diagnostic:
+  python3 soundminer.py --nbc --preflight-only --year 2026 --month 5 --part 1
   ```
   - To re-test only later phases (when records are already imported/embedded):
     `--skip-delete-records --skip-import --skip-embed` (jumps to mirror).
+  - Prefer `--resume` after a failure; the checkpoint skips a phase only after
+    the exact output manifest is revalidated.
 - **Expected output:**
   - `12.2` database switch → `✓ verified` or `⚠ proceeding` (both OK; ⌘6 is deterministic).
   - `12.3` `✓ Records cleared`.
   - `12.4` creates a runtime-only import CSV without Domo's `GRAND TOTAL`
     footer, then both pickers navigate; attended pause until you confirm import
     done (`✓ Import complete`). The original Domo CSV remains unchanged.
-    Normal runs require no Enter: expected confirmation dialogs are accepted
-    automatically and a conservative record-count-scaled wait prevents a
-    static UI from being mistaken for a completed import.
+    Normal runs require no Enter. The duplicate warning is accepted, but an
+    unmatched-fields dialog is accepted only for the audited
+    `is_SongBasedonLyrics`, `HasVocals`, and `Is_Explicit` set. A new field is
+    a hard failure. A phase that shows no positive UI activity also fails
+    instead of advancing on a fixed timeout.
   - `12.5` embed via Database menu → attended pause until embed done (`✓ Embed complete`).
   - A visible **Soundminer Log Window** during import or embed is a hard failure:
     the workflow stops, leaves the log open, and saves a diagnostic screenshot.
   - `12.6` mirror dialog → settings checklist pause → OK clicked → destination picker → mirror runs.
-  - `12.7` polling shows the `.wav` count climbing then stabilizing → `✓ Step 12 complete`.
+  - `12.7` polling shows the `.wav` count climbing, then compares the exact
+    expected/actual filename manifests. Equal counts with different files fail.
 - **Inspect:**
   - `find "{nbc}/Music/WAV" -name "*.wav" | wc -l` — expected record count (e.g. 2148).
   - Step screenshots in `…/Scripts/Python/UPM Release WorkFlow Automation/_logs/soundminer_debug_steps/`.

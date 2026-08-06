@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from config import (
@@ -60,7 +61,7 @@ from logging_utils import (
 # Preflight checks
 # ---------------------------------------------------------------------------
 
-def run_preflight(ctx: ReleaseContext, logger) -> bool:
+def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
     """
     Verify required volumes, baseline paths, and applications exist.
     Returns True if all checks pass; False otherwise (workflow must abort).
@@ -92,19 +93,39 @@ def run_preflight(ctx: ReleaseContext, logger) -> bool:
             logger.error(f"  ✗  {name} NOT FOUND: {path}")
             ok = False
 
+    def _active(skip_attr: str) -> bool:
+        return args is None or not bool(getattr(args, skip_attr, False))
+
     # -- Applications ---------------------------------------------------------
+    from config import SOUNDMINER_AGENT_ENABLED, is_soundminer_machine
     for app_name, app_path in REQUIRED_APPS.items():
         if app_path.startswith("/"):
             found = Path(app_path).exists()
         else:
             found = shutil.which(app_path) is not None
-        symbol = "✓" if found else "!"
-        level_fn = logger.info if found else logger.warning
+        required = (
+            (app_name == "UniSync" and _active("skip_unisync"))
+            or (
+                app_name == "Soundminer v5Pro"
+                and is_soundminer_machine()
+                and (
+                    _active("skip_sourceaudio")
+                    or (
+                        _active("skip_soundminer")
+                        and not bool(getattr(args, "skip_nbc_mirror", False))
+                    )
+                )
+            )
+            or (app_name == "ffmpeg" and _active("skip_soundminer"))
+        )
+        symbol = "✓" if found else ("✗" if required else "!")
+        level_fn = logger.info if found else (logger.error if required else logger.warning)
         level_fn(
             f"  {symbol}  App: {app_name}  "
-            f"({'found' if found else 'NOT FOUND — step may fail'})"
+            f"({'found' if found else 'NOT FOUND — required by an active step' if required else 'not needed by selected steps'})"
         )
-        # App absence is a warning, not a hard stop (steps can be skipped)
+        if required and not found:
+            ok = False
 
     # -- DOCX-to-PDF converter ------------------------------------------------
     pdf_converter = None
@@ -115,51 +136,84 @@ def run_preflight(ctx: ReleaseContext, logger) -> bool:
     if pdf_converter:
         logger.info(f"  ✓  DOCX→PDF converter: {pdf_converter}")
     else:
-        logger.warning(
+        required = _active("skip_album_list_doc")
+        (logger.error if required else logger.warning)(
             f"  !  No DOCX→PDF converter found "
             f"(tried: {', '.join(DOCX_TO_PDF_METHODS)}).\n"
             f"     Step 4 will fail unless LibreOffice is installed."
         )
+        if required:
+            ok = False
 
     # -- Python package dependencies -----------------------------------------
-    # import-name -> (pip-name, what-needs-it).  Missing deps are warnings, not
-    # a hard stop (the relevant steps can be skipped), but they surface here at
-    # preflight instead of failing deep inside a step.
+    # import-name -> (pip-name, why, relevant skip flags).  A dependency is a
+    # hard failure only when at least one of its consuming steps is active.
     _REQUIRED_IMPORTS = {
-        "pandas":     ("pandas", "CSV/XLSX tracklists & metadata (Steps 1, 6-9, 15)"),
-        "openpyxl":   ("openpyxl", "XLSX exports & SoundExchange ingest split (Step 1)"),
-        "docx":       ("python-docx", "DOCX album list / templates (Step 4, folder setup)"),
-        "requests":   ("requests", "cover-art download (Step 6)"),
-        "numpy":      ("numpy", "UniSync screen matching (Step 5)"),
-        "playwright": ("playwright", "Domo browser automation (Step 1)"),
+        "pandas":     ("pandas", "CSV/XLSX tracklists & metadata", ("skip_domo", "skip_covers", "skip_verify", "skip_final_metadata_check")),
+        "openpyxl":   ("openpyxl", "XLSX exports and ingest forms", ("skip_domo", "skip_final_packaging", "skip_soundmouse")),
+        "docx":       ("python-docx", "DOCX album list/templates", ("skip_folder_setup", "skip_album_list_doc")),
+        "requests":   ("requests", "cover-art download", ("skip_covers", "skip_soundmouse")),
+        "numpy":      ("numpy", "UniSync screen matching", ("skip_unisync",)),
+        "playwright": ("playwright", "Domo browser automation", ("skip_domo", "skip_soundmouse")),
     }
     missing_deps = []
-    for import_name, (pip_name, why) in _REQUIRED_IMPORTS.items():
+    for import_name, (pip_name, why, skip_attrs) in _REQUIRED_IMPORTS.items():
+        required = any(_active(attr) for attr in skip_attrs)
         try:
             __import__(import_name)
             logger.info(f"  ✓  {pip_name} available")
         except ImportError:
-            missing_deps.append(pip_name)
-            logger.warning(f"  !  {pip_name} NOT installed — needed for {why}")
+            if required:
+                missing_deps.append(pip_name)
+                logger.error(f"  ✗  {pip_name} NOT installed — needed for {why}")
+                ok = False
+            else:
+                logger.info(f"  —  {pip_name} not installed (selected steps do not need it)")
     if missing_deps:
         logger.warning(
             "     Install missing dependencies with:  "
             "pip install -r requirements.txt"
         )
 
-    # -- ffmpeg ---------------------------------------------------------------
-    if shutil.which("ffmpeg"):
-        logger.info("  ✓  ffmpeg available")
-    else:
-        logger.warning(
-            "  !  ffmpeg not found. Step 12.7 (WAV→MP3) will fail.\n"
-            "     Install with:  brew install ffmpeg"
-        )
+    # -- HDF1 login-session agent --------------------------------------------
+    needs_soundminer = _active("skip_sourceaudio") or (
+        _active("skip_soundminer")
+        and not bool(getattr(args, "skip_nbc_mirror", False))
+    )
+    use_agent = (
+        needs_soundminer
+        and not is_soundminer_machine()
+        and SOUNDMINER_AGENT_ENABLED
+        and not bool(getattr(args, "no_soundminer_agent", False))
+    )
+    if use_agent:
+        from soundminer_agent import agent_health
+        healthy, detail = agent_health()
+        if healthy:
+            logger.info(f"  ✓  {detail}")
+            if not bool(getattr(args, "dry_run", False)):
+                from soundminer_agent import run_via_agent
+                if not run_via_agent(ctx, "probe", False, logger):
+                    logger.error(
+                        "  ✗  HDF1 agent is online but its Aqua GUI preflight "
+                        "failed; refusing to start the release."
+                    )
+                    ok = False
+        elif bool(getattr(args, "dry_run", False)):
+            logger.warning(f"  !  HDF1 agent unavailable during dry-run: {detail}")
+        else:
+            logger.error(
+                f"  ✗  HDF1 Soundminer agent unavailable: {detail}\n"
+                "     Install/start once on HDF1 with: "
+                "python3 soundminer_agent.py --install"
+            )
+            ok = False
 
     if not ok:
         logger.error(
-            "\nPreflight FAILED — one or more required volumes or baselines "
-            "are missing.\nResolve the issues above and re-run."
+            "\nPreflight FAILED — one or more required storage, application, "
+            "dependency, or remote-agent checks failed.\n"
+            "Resolve the specific issues above and re-run."
         )
     else:
         logger.info("\nPreflight passed.")
@@ -381,6 +435,7 @@ def _render_final_summary(
     results: "StepResults",
     log_path,
     logger,
+    started_at: datetime,
 ) -> None:
     """
     Print the final summary in the exact field order required by the spec.
@@ -395,6 +450,9 @@ def _render_final_summary(
         results.status("8 Covers → WAV w COVERS"),
     )
     overall = STATUS_FAILED if results.any_failed() else STATUS_COMPLETED
+
+    from workflow_report import write_workflow_report
+    report_path = write_workflow_report(ctx, args, results, log_path, started_at)
 
     # (label, value) rows — value is either a plain string or a status label.
     rows: list[tuple[str, str]] = [
@@ -422,6 +480,7 @@ def _render_final_summary(
         ("SoundMouse",             _status_label(results.status("16 SoundMouse"))),
         ("SoundMouse missing report", str(ctx.soundmouse_validation_report)),
         ("Log file",               str(log_path)),
+        ("Structured report",      str(report_path)),
         ("Overall status",         _status_label(overall)),
     ]
 
@@ -459,6 +518,8 @@ def run_workflow(args: argparse.Namespace) -> int:
     Execute the full UPM release workflow.
     Returns exit code (0 = success, 1 = failure).
     """
+
+    run_started_at = datetime.now().astimezone()
 
     # ---- Build release context ----------------------------------------------
     try:
@@ -511,9 +572,16 @@ def run_workflow(args: argparse.Namespace) -> int:
         machine_role,
         is_soundminer_machine,
         REMOTE_SOUNDMINER_ENABLED,
+        SOUNDMINER_AGENT_ENABLED,
     )
     if args.skip_soundminer:
         _sm_mode = "skipped (--skip-soundminer)"
+    elif (
+        SOUNDMINER_AGENT_ENABLED
+        and not is_soundminer_machine()
+        and not getattr(args, "no_soundminer_agent", False)
+    ):
+        _sm_mode = "unattended HDF1 login-session agent"
     elif REMOTE_SOUNDMINER_ENABLED:
         _sm_mode = "remote via SSH"
     elif is_soundminer_machine():
@@ -534,14 +602,14 @@ def run_workflow(args: argparse.Namespace) -> int:
 
     # ---- Preflight ----------------------------------------------------------
     log_section(logger, "Preflight")
-    if not run_preflight(ctx, logger):
+    if not run_preflight(ctx, logger, args):
         results.set("preflight", STATUS_FAILED)
         logger.error(
             "\n  ✗ Preflight failed — halting before any step ran.\n"
             "    Fix the issues above (usually a missing/unmounted volume) and "
             "re-run the same command; nothing was changed."
         )
-        _render_final_summary(ctx, args, results, log_path, logger)
+        _render_final_summary(ctx, args, results, log_path, logger, run_started_at)
         return 1
     results.set("preflight", STATUS_COMPLETED)
 
@@ -830,6 +898,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                 from config import (
                     REMOTE_SOUNDMINER_ENABLED,
                     REMOTE_SOUNDMINER,
+                    SOUNDMINER_AGENT_ENABLED,
                     is_soundminer_machine,
                 )
                 sa_dests = [
@@ -848,6 +917,20 @@ def run_workflow(args: argparse.Namespace) -> int:
                         ctx, args.dry_run, logger,
                         unattended=(not args.soundminer_attended),
                         db_shortcut=args.sourceaudio_db_shortcut,
+                        resume=args.soundminer_resume,
+                    )
+                elif (
+                    SOUNDMINER_AGENT_ENABLED
+                    and not args.no_soundminer_agent
+                ):
+                    from soundminer_agent import run_via_agent
+                    ok_sa = run_via_agent(
+                        ctx, "sourceaudio", args.dry_run, logger,
+                        options={
+                            "capture_steps": args.capture_steps,
+                            "resume": args.soundminer_resume,
+                            "db_shortcut": args.sourceaudio_db_shortcut,
+                        },
                     )
                 else:
                     # Pipeline Mac: Soundminer lives on a separate managed Mac
@@ -898,6 +981,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                 from config import (
                     REMOTE_SOUNDMINER_ENABLED,
                     REMOTE_SOUNDMINER,
+                    SOUNDMINER_AGENT_ENABLED,
                     is_soundminer_machine,
                 )
                 if args.skip_nbc_mirror:
@@ -924,6 +1008,19 @@ def run_workflow(args: argparse.Namespace) -> int:
                             "at the WAV→MP3 conversion."
                         )
                         ok_nbc = True
+                elif (
+                    SOUNDMINER_AGENT_ENABLED
+                    and not is_soundminer_machine()
+                    and not args.no_soundminer_agent
+                ):
+                    from soundminer_agent import run_via_agent
+                    ok_nbc = run_via_agent(
+                        ctx, "nbc", args.dry_run, logger,
+                        options={
+                            "capture_steps": args.capture_steps,
+                            "resume": args.soundminer_resume,
+                        },
+                    )
                 elif REMOTE_SOUNDMINER_ENABLED:
                     # SSH-triggered remote execution (only viable on an unmanaged Mac
                     # where GUI automation over SSH is permitted).
@@ -941,6 +1038,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                     ok_nbc = run_soundminer_nbc_workflow(
                         ctx, args.dry_run, logger,
                         unattended=(not args.soundminer_attended),
+                        resume=args.soundminer_resume,
                     )
                 else:
                     # Hand-off mode.  We're on the pipeline Mac; Soundminer runs on a
@@ -1076,7 +1174,7 @@ def run_workflow(args: argparse.Namespace) -> int:
         results.set(where, STATUS_FAILED, f"{type(exc).__name__}: {exc}")
 
     # ---- Final summary -------------------------------------------------------
-    _render_final_summary(ctx, args, results, log_path, logger)
+    _render_final_summary(ctx, args, results, log_path, logger, run_started_at)
 
     # Exit non-zero if any step hard-failed (makes the run scriptable and the
     # restart decision unambiguous).
@@ -1291,6 +1389,18 @@ def build_parser() -> argparse.ArgumentParser:
              "the Mirror Settings dialog is auto-accepted (its settings persist "
              "between releases). Use this flag for a first run on a new machine "
              "to eyeball that the persisted mirror settings are correct.",
+    )
+    p.add_argument(
+        "--no-soundminer-agent",
+        action="store_true",
+        help="Disable the shared HDF1 login-session agent and use the legacy "
+             "manual/SSH Soundminer path. Intended only for recovery.",
+    )
+    p.add_argument(
+        "--soundminer-resume",
+        action="store_true",
+        help="Resume Soundminer from its last validated phase checkpoint for "
+             "this release instead of repeating completed phases.",
     )
     p.add_argument(
         "--sourceaudio-unattended",

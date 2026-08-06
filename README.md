@@ -15,8 +15,11 @@ Both machines now use the **same** project path (`~/Documents/Scripts/Python/UPM
 Release WorkFlow Automation/files`), so any `cd` / git command is identical on
 either one.
 
-The full pipeline can run end-to-end on either; on USMPSMDHDF2 it pauses to hand
-off the Soundminer steps. Shared storage is the two Pegasus volumes
+The full pipeline can run end-to-end from USMPSMDHDF2 without switching Macs.
+An HDF1 login-session agent watches a JSON queue on the shared Pegasus volume,
+runs Steps 11–12 inside HDF1's real Aqua session, and streams heartbeat/result
+status back to HDF2. Soundminer is never installed or launched on HDF2. Shared
+storage is the two Pegasus volumes
 (`/Volumes/Pegasus32 R8 - 1` and `- 2`), which live **outside** the repo.
 
 ## Setup
@@ -30,6 +33,18 @@ pip install -r requirements.lock
 `ffmpeg` must be on PATH for Step 12.7 (`brew install ffmpeg`). Soundminer steps
 require Accessibility + Screen Recording permissions on USMPSMDHDF1.
 
+Install the unattended Soundminer agent once, from HDF1's logged-in session:
+
+```bash
+cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
+python3 soundminer_agent.py --install
+python3 soundminer_agent.py --status
+```
+
+The LaunchAgent starts automatically at login. HDF2 preflight refuses to begin
+a real run if its heartbeat is missing or stale. `--no-soundminer-agent`
+restores the legacy manual handoff only for recovery.
+
 ## Running
 
 ```bash
@@ -41,6 +56,12 @@ python3 upm_release_workflow.py --previous-month --only 15           # run one s
 python3 upm_release_workflow.py --previous-month --only 16           # SoundMouse only
 python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --start-at 12.7
 ```
+
+Every run writes a structured JSON report under
+`~/Documents/Scripts/Python/_Logs/UPM Release Workflow/reports/<release-id>/`
+with step results, timing, diagnostics, artifact paths, and key output counts.
+Use `--soundminer-resume` after a failed HDF1 phase; each checkpoint is trusted
+only after its destination manifest is revalidated.
 
 Release names always describe the content period. Each run has one canonical
 internal ID: `UPM-2026-07-P1`, `UPM-2026-07-P2`, or `UPM-2026-07-FULL`.
@@ -73,7 +94,7 @@ copying files by hand.
 ```bash
 # one-time, on the canonical machine:
 git init
-git add -A
+git add <specific files>
 git commit -m "Initial commit: UPM release workflow"
 git branch -M main
 git remote add origin git@github.com:<org-or-user>/upm-release-workflow.git
@@ -89,7 +110,9 @@ Day-to-day:
 git pull              # get the latest before a run
 # …edit…
 make smoke            # verify
-git add -A && git commit -m "Describe the change" && git push
+git add <specific files>
+git commit -m "Describe the change"
+git push
 ```
 
 ## Pinning dependencies
@@ -100,7 +123,8 @@ commit it:
 
 ```bash
 make lock             # = pip freeze > requirements.lock
-git add requirements.lock && git commit -m "Pin dependency versions"
+git add requirements.lock
+git commit -m "Pin dependency versions"
 ```
 
 Then the other machine installs with `pip install -r requirements.lock`.
@@ -110,6 +134,9 @@ Then the other machine installs with `pip install -r requirements.lock`.
 - `upm_release_workflow.py` — orchestrator + CLI (canonical step registry is `_STEP_UNITS`).
 - `config.py` — release context, all paths, partner destinations.
 - `tracklist_columns.py` — shared CSV/XLSX column-name detection (one source for every module).
+- `soundminer_agent.py` — HDF1 Aqua LaunchAgent plus the shared-volume HDF2
+  request/heartbeat/result client.
+- `workflow_report.py` — structured end-of-run JSON reports.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`.

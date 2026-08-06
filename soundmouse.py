@@ -25,6 +25,7 @@ from config import (
     SOUNDMOUSE_BASE,
     SOUNDMOUSE_DOMO_CARDS,
     SOUNDMOUSE_DOMO_PAGE_ID,
+    DOMO_PROFILE_DIR,
     UPM_CACHE_WAV,
     ReleaseContext,
     context_from_cli_args,
@@ -40,8 +41,6 @@ from tracklist_columns import (
 ACTIVATION_RANGE_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}_to_\d{4}-\d{2}-\d{2}$"
 )
-DOMO_PROFILE_DIR = Path.home() / ".upm_release_workflow" / "domo_browser_profile"
-
 # code -> (territory label, territory set).  The set lets us recognize either
 # a bucket label ("02 UK DE SE OZ") or a raw Territory List value.
 METADATA_SHEETS: dict[str, tuple[str, frozenset[str]]] = {

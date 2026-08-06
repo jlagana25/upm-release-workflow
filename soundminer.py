@@ -83,10 +83,14 @@ Prerequisites:
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import math
+import re
 import subprocess
 import time
+import unicodedata
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
@@ -198,9 +202,263 @@ OPTIONAL_DIALOG_SCREENSHOTS: dict[str, str] = {
 # so the helpers can read it without parameter gymnastics.
 CAPTURE_STEPS = False
 
+# These three columns are intentionally absent from the NBCUniversal database
+# today.  The import dialog may be acknowledged only when its unmatched-field
+# set is a subset of this audited allowlist; any new field stops the run.
+ALLOWED_UNMATCHED_FIELDS = frozenset({
+    "is_SongBasedonLyrics",
+    "HasVocals",
+    "Is_Explicit",
+})
+
 
 class _SoundminerError(RuntimeError):
     """Raised when a Soundminer UI step doesn't reach its expected state."""
+
+
+def _checkpoint_path(ctx: ReleaseContext, workflow: str) -> Path:
+    return RUNTIME_DIR / f"{ctx.release_id}-{workflow}-checkpoint.json"
+
+
+def _load_checkpoint(ctx: ReleaseContext, workflow: str) -> dict:
+    path = _checkpoint_path(ctx, workflow)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _reset_checkpoint(ctx: ReleaseContext, workflow: str) -> None:
+    try:
+        _checkpoint_path(ctx, workflow).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _mark_checkpoint(
+    ctx: ReleaseContext,
+    workflow: str,
+    phase: str,
+    **details,
+) -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    path = _checkpoint_path(ctx, workflow)
+    payload = _load_checkpoint(ctx, workflow)
+    payload.update({
+        "schema_version": 1,
+        "release_id": ctx.release_id,
+        "workflow": workflow,
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    })
+    phases = payload.setdefault("completed_phases", {})
+    phases[phase] = {
+        "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        **details,
+    }
+    temporary = path.with_suffix(".json.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temporary.replace(path)
+
+
+def _checkpoint_completed(checkpoint: dict, phase: str) -> bool:
+    return phase in checkpoint.get("completed_phases", {})
+
+
+def _normalise_audio_identity(value: str) -> str:
+    """Soundminer comparison key, tolerant of extension and mono .M suffix."""
+    name = Path(str(value).strip()).name
+    stem = Path(name).stem
+    if stem.casefold().endswith(".m"):
+        stem = stem[:-2]
+    return stem.casefold()
+
+
+def _soundminer_filename_component(value: str) -> str:
+    # Soundminer preserves spaces inside field values; the underscore visible
+    # in NBC names is the literal separator in <Source:1>_<TrackTitle:2>.
+    value = re.sub(r"\s+", " ", str(value).strip())
+    # With "Strip illegal characters" enabled, v5Pro transliterates accents
+    # and retains only ASCII letters/digits, spaces, and underscores.
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    value = re.sub(r"[^A-Za-z0-9_ ]", "", value)
+    return value.strip(" ._")
+
+
+def _csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise _SoundminerError(f"CSV has no header row: {path}")
+        return list(reader.fieldnames), [dict(row) for row in reader]
+
+
+def _header(fields: list[str], *candidates: str) -> Optional[str]:
+    normalised = {
+        re.sub(r"[\s_]", "", field).casefold(): field for field in fields
+    }
+    for candidate in candidates:
+        hit = normalised.get(re.sub(r"[\s_]", "", candidate).casefold())
+        if hit:
+            return hit
+    return None
+
+
+def _source_wav_identities(audio_folder: Path) -> Counter[str]:
+    return Counter(
+        _normalise_audio_identity(path.name)
+        for path in audio_folder.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".wav"
+    )
+
+
+def _validate_nbc_source_manifest(
+    csv_path: Path,
+    audio_folder: Path,
+    logger: logging.Logger,
+) -> set[str]:
+    fields, rows = _csv_rows(csv_path)
+    filename_col = _header(fields, "Filename", "AudioFilename")
+    source_col = _header(fields, "Source")
+    title_col = _header(fields, "TrackTitle", "Track Title")
+    if not filename_col:
+        raise _SoundminerError(f"NBC metadata has no Filename column: {csv_path}")
+    if not source_col or not title_col:
+        raise _SoundminerError(
+            "NBC metadata must contain Source and TrackTitle columns so the "
+            "mirror filename manifest can be validated before delivery."
+        )
+    metadata_names: list[str] = []
+    expected_outputs: list[str] = []
+    for row in rows:
+        filename = str(row.get(filename_col, "")).strip()
+        if not filename or filename.casefold() == "grand total":
+            continue
+        metadata_names.append(_normalise_audio_identity(filename))
+        output = (
+            f"{_soundminer_filename_component(row.get(source_col, ''))}_"
+            f"{_soundminer_filename_component(row.get(title_col, ''))}"
+        ).strip("_")
+        if not output:
+            raise _SoundminerError(f"NBC metadata row has no output name: {filename}")
+        expected_outputs.append(_normalise_audio_identity(output))
+
+    metadata_counter = Counter(metadata_names)
+    source_counter = _source_wav_identities(audio_folder)
+    duplicate_metadata = sorted(name for name, count in metadata_counter.items() if count > 1)
+    duplicate_sources = sorted(name for name, count in source_counter.items() if count > 1)
+    missing = sorted(set(metadata_counter) - set(source_counter))
+    if duplicate_metadata or duplicate_sources or missing:
+        report = RUNTIME_DIR / f"{csv_path.stem}-source-preflight.csv"
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        with report.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["Problem", "Audio identity"])
+            writer.writerows(("Missing source WAV", value) for value in missing)
+            writer.writerows(("Duplicate metadata filename", value) for value in duplicate_metadata)
+            writer.writerows(("Duplicate source basename", value) for value in duplicate_sources)
+        raise _SoundminerError(
+            "NBC metadata/source preflight failed: "
+            f"{len(missing)} missing, {len(duplicate_metadata)} duplicate metadata, "
+            f"{len(duplicate_sources)} duplicate source basename(s). Report: {report}"
+        )
+    output_counter = Counter(expected_outputs)
+    collisions = sorted(name for name, count in output_counter.items() if count > 1)
+    if collisions:
+        raise _SoundminerError(
+            f"NBC mirror filename scheme creates {len(collisions)} collision(s); "
+            f"first: {collisions[:5]}"
+        )
+    extras = len(set(source_counter) - set(metadata_counter))
+    if extras:
+        logger.warning(
+            f"  NBC source contains {extras} extra WAV basename(s) not referenced "
+            "by metadata; they will not be selected for the validated mirror."
+        )
+    logger.info(
+        f"  ✓ NBC metadata/source preflight: {len(metadata_counter)} unique rows "
+        "and WAVs; output filename manifest has no collisions."
+    )
+    return set(expected_outputs)
+
+
+def _sourceaudio_manifest(source: Path) -> set[str]:
+    counter = _source_wav_identities(source)
+    duplicates = sorted(name for name, count in counter.items() if count > 1)
+    if duplicates:
+        raise _SoundminerError(
+            f"SourceAudio source contains {len(duplicates)} duplicate WAV "
+            f"basename(s); first: {duplicates[:5]}"
+        )
+    return set(counter)
+
+
+def _destination_manifest(
+    destination: Path,
+    output_exts: tuple[str, ...],
+) -> Counter[str]:
+    manifest, _wrong = _scan_destination(destination, output_exts)
+    return manifest
+
+
+def _scan_destination(
+    destination: Path,
+    output_exts: tuple[str, ...],
+) -> tuple[Counter[str], list[str]]:
+    """Build the manifest and wrong-format list in one Pegasus traversal."""
+    wanted = {f".{ext.lower().lstrip('.')}" for ext in output_exts}
+    manifest: Counter[str] = Counter()
+    wrong: list[str] = []
+    if not destination.exists():
+        return manifest, wrong
+    audio_suffixes = {".wav", ".aif", ".aiff", ".mp3"}
+    for path in destination.rglob("*"):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in wanted:
+            manifest[_normalise_audio_identity(path.name)] += 1
+        elif suffix in audio_suffixes:
+            wrong.append(str(path))
+    return manifest, sorted(wrong)
+
+
+def _validate_destination_manifest(
+    destination: Path,
+    expected: set[str],
+    output_exts: tuple[str, ...],
+    logger: logging.Logger,
+    label: str,
+    *,
+    allow_empty: bool = True,
+) -> str:
+    actual_counter, wrong_format = _scan_destination(destination, output_exts)
+    if not actual_counter and not wrong_format and allow_empty:
+        return "empty"
+    actual = set(actual_counter)
+    missing = sorted(expected - actual)
+    extras = sorted(actual - expected)
+    duplicates = sorted(name for name, count in actual_counter.items() if count > 1)
+    if missing or extras or duplicates or wrong_format:
+        report = RUNTIME_DIR / f"{label.lower().replace(' ', '-')}-manifest.csv"
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        with report.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["Problem", "Audio identity"])
+            writer.writerows(("Missing output", value) for value in missing)
+            writer.writerows(("Unexpected output", value) for value in extras)
+            writer.writerows(("Duplicate output", value) for value in duplicates)
+            writer.writerows(("Wrong-format output", value) for value in wrong_format)
+        raise _SoundminerError(
+            f"{label} destination manifest is not clean: {len(missing)} missing, "
+            f"{len(extras)} unexpected, {len(duplicates)} duplicate, "
+            f"{len(wrong_format)} wrong-format. Report: {report}"
+        )
+    logger.info(f"  ✓ {label} manifest matches all {len(expected)} expected files.")
+    return "complete"
 
 
 def _prepare_nbc_import_csv(
@@ -301,6 +559,28 @@ def verify_screenshots(logger: logging.Logger) -> bool:
             "  It walks you through each one and saves them to:\n"
             f"  {SCREENSHOTS_DIR}"
         )
+    if not all_ok:
+        return False
+
+    # Reject blank, near-uniform, or implausibly tiny crops before any
+    # destructive database action. Existence alone did not catch bad captures.
+    try:
+        from PIL import Image, ImageStat
+        for filename in REQUIRED_SCREENSHOTS.values():
+            path = SCREENSHOTS_DIR / filename
+            with Image.open(path) as image:
+                grayscale = image.convert("L")
+                extrema = grayscale.getextrema()
+                deviation = ImageStat.Stat(grayscale).stddev[0]
+                if image.width < 8 or image.height < 8 or not extrema or deviation < 2.0:
+                    logger.error(
+                        f"  ✗  {filename} is not a usable reference crop "
+                        f"({image.width}x{image.height}, contrast={deviation:.1f})."
+                    )
+                    all_ok = False
+    except Exception as exc:
+        logger.error(f"  ✗  Could not validate screenshot crops: {exc}")
+        all_ok = False
     return all_ok
 
 
@@ -313,6 +593,41 @@ def _verify_pyautogui_installed(logger: logging.Logger) -> bool:
             "pyautogui is not installed.\n"
             "  Run:  pip install pyautogui Pillow"
         )
+        return False
+
+
+def run_soundminer_gui_preflight(logger: logging.Logger) -> bool:
+    """Non-destructive HDF1 GUI/session diagnostic."""
+    if not _verify_pyautogui_installed(logger) or not verify_screenshots(logger):
+        return False
+    try:
+        import pyautogui
+        _activate_soundminer(logger)
+        screenshot = pyautogui.screenshot().convert("L")
+        extrema = screenshot.getextrema()
+        if not extrema or extrema[1] - extrema[0] < 10:
+            raise _SoundminerError(
+                f"Screen Recording returned a blank/flat frame: {extrema}"
+            )
+        script = (
+            f'tell application "System Events" to tell process "{SOUNDMINER_APP}" '
+            f'to return (exists menu bar 1)'
+        )
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode or result.stdout.strip().lower() != "true":
+            raise _SoundminerError(
+                "Soundminer menu bar is unavailable through Accessibility: "
+                + result.stderr.strip()
+            )
+        logger.info(
+            f"  ✓ HDF1 GUI preflight: capture {screenshot.width}x{screenshot.height}, "
+            "Accessibility menu available, reference crops valid."
+        )
+        return True
+    except Exception as exc:
+        logger.error(f"  ✗ Soundminer GUI preflight failed: {exc}")
         return False
 
 
@@ -330,6 +645,7 @@ def run_soundminer_nbc_workflow(
     skip_import:                    bool          = False,
     skip_embed:                     bool          = False,
     skip_mirror:                    bool          = False,
+    resume:                         bool          = False,
     manual_verify_mirror_settings:  Optional[bool] = None,
 ) -> bool:
     """
@@ -406,28 +722,36 @@ def run_soundminer_nbc_workflow(
         )
         return False
     mirror_dest.mkdir(parents=True, exist_ok=True)
-    expected_wav_count = sum(
-        1 for path in audio_folder.rglob("*")
-        if path.is_file() and path.suffix.lower() == ".wav"
-    )
-    existing_wav_count = sum(
-        1 for path in mirror_dest.rglob("*")
-        if path.is_file() and path.suffix.lower() == ".wav"
-    )
-    if 0 < existing_wav_count < expected_wav_count:
-        logger.error(
-            f"  ✗  NBC mirror destination is partial: "
-            f"{existing_wav_count}/{expected_wav_count} WAV files.\n"
-            f"     Soundminer's Skip Existing mode cannot reliably resume a "
-            f"partial NBC batch. Archive the partial WAV tree and recreate "
-            f"an empty destination before retrying the mirror."
+    try:
+        expected_manifest = _validate_nbc_source_manifest(
+            csv_path, audio_folder, logger
         )
+        destination_state = _validate_destination_manifest(
+            mirror_dest, expected_manifest, ("wav",), logger, "NBC mirror"
+        )
+    except _SoundminerError as exc:
+        logger.error(f"  ✗  {exc}")
         return False
+    expected_wav_count = len(expected_manifest)
+    if destination_state == "complete" and not skip_mirror:
+        logger.info(
+            "  ↩  NBC destination is already complete and exact; skipping "
+            "database mutation/import/embed/mirror."
+        )
+        _mark_checkpoint(ctx, "nbc", "mirror", files=expected_wav_count)
+        return True
+
+    if not resume:
+        _reset_checkpoint(ctx, "nbc")
+    checkpoint = _load_checkpoint(ctx, "nbc") if resume else {}
+    if resume and checkpoint:
+        logger.info(f"  ↻ Resuming NBC from checkpoint: {_checkpoint_path(ctx, 'nbc')}")
+        skip_delete_records = skip_delete_records or _checkpoint_completed(checkpoint, "delete")
+        skip_import = skip_import or _checkpoint_completed(checkpoint, "import")
+        skip_embed = skip_embed or _checkpoint_completed(checkpoint, "embed")
 
     # ---- Preflight: tooling -----------------------------------------------
-    if not verify_screenshots(logger):
-        return False
-    if not _verify_pyautogui_installed(logger):
+    if not run_soundminer_gui_preflight(logger):
         return False
 
     # Resolve the "manual verify mirror settings" decision
@@ -447,6 +771,7 @@ def run_soundminer_nbc_workflow(
             logger.info("  ↩  Skipping 12.3 delete-all-records (per flag).")
         else:
             _delete_all_records(logger)
+            _mark_checkpoint(ctx, "nbc", "delete")
 
         if skip_import:
             logger.info("  ↩  Skipping 12.4 import metadata (per flag).")
@@ -454,11 +779,13 @@ def run_soundminer_nbc_workflow(
             import_csv = _prepare_nbc_import_csv(csv_path, logger)
             _import_metadata(import_csv, audio_folder, logger,
                              unattended=unattended)
+            _mark_checkpoint(ctx, "nbc", "import", records=expected_wav_count)
 
         if skip_embed:
             logger.info("  ↩  Skipping 12.5 embed selected records (per flag).")
         else:
             _select_all_and_embed(logger, unattended=unattended)
+            _mark_checkpoint(ctx, "nbc", "embed", records=expected_wav_count)
 
         if skip_mirror:
             logger.info("  ↩  Skipping 12.6 mirror (per flag).")
@@ -480,7 +807,10 @@ def run_soundminer_nbc_workflow(
             output_exts=("wav",),
             reject_exts=("aif", "aiff"),
             expected_count=expected_wav_count,
+            expected_manifest=expected_manifest,
+            manifest_label="NBC mirror",
         )
+        _mark_checkpoint(ctx, "nbc", "mirror", files=expected_wav_count)
 
         logger.info("  ✓  Step 12 complete — NBC mirror finished.")
         return True
@@ -691,6 +1021,7 @@ def run_soundminer_sourceaudio_workflow(
     unattended:                     bool           = False,
     manual_verify_mirror_settings:  Optional[bool] = None,
     db_shortcut:                    Optional[str]  = None,
+    resume:                         bool           = False,
 ) -> bool:
     """
     SourceAudio delivery (Step 11 — runs right before the NBC Soundminer step).
@@ -737,40 +1068,23 @@ def run_soundminer_sourceaudio_workflow(
         return True
 
     # Preflight: tooling + source presence
-    if not _verify_pyautogui_installed(logger):
-        return False
-    if not verify_screenshots(logger):
+    if not run_soundminer_gui_preflight(logger):
         return False
 
     if manual_verify_mirror_settings is None:
         manual_verify_mirror_settings = not unattended
 
-    # Fail before touching the Soundminer database if a previous attempt wrote
-    # WAVs into either AIFF-only SourceAudio destination.  Otherwise the normal
-    # "Skip Existing" mirror behavior and extension-specific completion poll
-    # can conceal a wrong-format delivery.
-    wrong_output_found = False
-    for tag, _src, dest in pairs:
-        if not dest.exists():
-            continue
-        wav_count = sum(
-            1 for path in dest.rglob("*")
-            if path.is_file() and path.suffix.lower() == ".wav"
-        )
-        if wav_count:
-            logger.error(
-                f"  ✗  SourceAudio {tag} destination contains {wav_count} "
-                f"WAV file(s), but Step 11 requires AIFF:\n"
-                f"     {dest}\n"
-                f"     Archive or remove the wrong-format output before "
-                f"re-running."
-            )
-            wrong_output_found = True
-    if wrong_output_found:
-        return False
-
     DEBUG_STEP_DIR.mkdir(parents=True, exist_ok=True)
     FAILURE_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not resume:
+        _reset_checkpoint(ctx, "sourceaudio")
+    checkpoint = _load_checkpoint(ctx, "sourceaudio") if resume else {}
+    if resume and checkpoint:
+        logger.info(
+            f"  ↻ Resuming SourceAudio from checkpoint: "
+            f"{_checkpoint_path(ctx, 'sourceaudio')}"
+        )
 
     overall_ok = True
     try:
@@ -795,6 +1109,31 @@ def run_soundminer_sourceaudio_workflow(
                 overall_ok = False
                 continue
             dest.mkdir(parents=True, exist_ok=True)
+            try:
+                expected_manifest = _sourceaudio_manifest(src)
+                destination_state = _validate_destination_manifest(
+                    dest, expected_manifest, SOURCEAUDIO_OUTPUT_EXTS,
+                    logger, f"SourceAudio {tag}",
+                )
+            except _SoundminerError as exc:
+                logger.error(f"  ✗  {exc}")
+                overall_ok = False
+                continue
+            phase_key = f"{tag}.mirror"
+            if destination_state == "complete" or (
+                resume and _checkpoint_completed(checkpoint, phase_key)
+            ):
+                # Never trust the checkpoint alone: destination_state was
+                # validated immediately above before this skip.
+                if destination_state != "complete":
+                    logger.error(
+                        f"  ✗  {tag} checkpoint says complete but destination "
+                        "does not match; refusing to skip."
+                    )
+                    overall_ok = False
+                    continue
+                logger.info(f"  ↩  SourceAudio {tag} already complete; skipping pair.")
+                continue
 
             # Switch to the SourceAudio database, then clear it, then scan.
             # (Only the first pass needs the attended fallback if no shortcut.)
@@ -821,10 +1160,13 @@ def run_soundminer_sourceaudio_workflow(
                 output_exts=SOURCEAUDIO_OUTPUT_EXTS,
                 reject_exts=("wav",),
                 expected_count=sum(
-                    1 for path in source.rglob("*")
+                    1 for path in src.rglob("*")
                     if path.is_file() and path.suffix.lower() == ".wav"
                 ),
+                expected_manifest=expected_manifest,
+                manifest_label=f"SourceAudio {tag}",
             )
+            _mark_checkpoint(ctx, "sourceaudio", phase_key, files=len(expected_manifest))
             logger.info(f"  ✓  SourceAudio {tag} mirror finished → {dest}")
 
             # Only the FIRST pass needs an optional attended review.  The full
@@ -1639,6 +1981,8 @@ def _wait_for_mirror_complete(
     output_exts: tuple[str, ...] = ("wav",),
     reject_exts: tuple[str, ...] = (),
     expected_count: Optional[int] = None,
+    expected_manifest: Optional[set[str]] = None,
+    manifest_label: str = "Soundminer mirror",
 ) -> None:
     """
     Poll ``mirror_dest`` for new output files until the count stabilises
@@ -1730,6 +2074,15 @@ def _wait_for_mirror_complete(
                     f"destination may have prevented Skip Existing from "
                     f"resuming. Do not continue until the counts match."
                 )
+            if expected_manifest is not None:
+                _validate_destination_manifest(
+                    mirror_dest,
+                    expected_manifest,
+                    exts,
+                    logger,
+                    manifest_label,
+                    allow_empty=False,
+                )
             logger.info(
                 f"    File count stable at {last_count} for "
                 f"{MIRROR_STABILITY_WINDOW}s — mirror complete."
@@ -1814,41 +2167,32 @@ def _menu_click(
     logger.debug(f"  Menu: {menu_title} → {item_title}")
 
 
-def _click_dialog_ok_applescript(logger: logging.Logger) -> bool:
-    """
-    Deterministically click the confirm button of a Soundminer modal via
-    AppleScript System Events — no image matching.
-
-    Soundminer's blocking "Unmatched Fields" and "Check for Dupes Warning"
-    dialogs both have a confirm button (OK / Continue / Yes) as their default.
-    Image-matching those crops is unreliable on a HiDPI/4K display, so we ask
-    System Events to find a button by NAME in any Soundminer window or its
-    attached sheet and click it.  This is safe: it's a no-op unless such a
-    button actually exists on screen, and during import/scan the only modals
-    that appear are these proceed-to-continue confirmations.
-
-    Returns True if a button was clicked, False otherwise.
-    """
+def _dialog_accessibility_snapshot(logger: logging.Logger) -> str:
+    """Return visible Soundminer window/sheet names and static text."""
     script = (
         f'tell application "System Events"\n'
         f'  tell process "{SOUNDMINER_APP}"\n'
-        f'    repeat with theName in {{"OK", "Continue", "Yes"}}\n'
-        f'      repeat with w in windows\n'
-        f'        if exists (button (theName as string) of w) then\n'
-        f'          click button (theName as string) of w\n'
-        f'          return "clicked"\n'
-        f'        end if\n'
-        f'        if (count of sheets of w) > 0 then\n'
-        f'          if exists (button (theName as string) of sheet 1 of w) then\n'
-        f'            click button (theName as string) of sheet 1 of w\n'
-        f'            return "clicked"\n'
-        f'          end if\n'
-        f'        end if\n'
-        f'      end repeat\n'
+        f'    set snapshot to ""\n'
+        f'    repeat with w in windows\n'
+        f'      try\n'
+        f'        set snapshot to snapshot & (name of w as text) & " | "\n'
+        f'      end try\n'
+        f'      try\n'
+        f'        repeat with t in static texts of w\n'
+        f'          set snapshot to snapshot & (value of t as text) & " | "\n'
+        f'        end repeat\n'
+        f'      end try\n'
+        f'      try\n'
+        f'        repeat with s in sheets of w\n'
+        f'          repeat with t in static texts of s\n'
+        f'            set snapshot to snapshot & (value of t as text) & " | "\n'
+        f'          end repeat\n'
+        f'        end repeat\n'
+        f'      end try\n'
         f'    end repeat\n'
+        f'    return snapshot\n'
         f'  end tell\n'
-        f'end tell\n'
-        f'return "none"'
+        f'end tell'
     )
     try:
         result = subprocess.run(
@@ -1856,13 +2200,88 @@ def _click_dialog_ok_applescript(logger: logging.Logger) -> bool:
             capture_output=True, text=True, timeout=10,
         )
     except Exception as exc:
-        logger.debug(f"        (dialog OK AppleScript failed: {exc})")
-        return False
+        logger.debug(f"        (dialog Accessibility snapshot failed: {exc})")
+        return ""
+    return result.stdout.strip()
+
+
+def _click_known_dialog_ok(logger: logging.Logger, label: str) -> bool:
+    """Click OK only after Python has validated the visible dialog text."""
+    script = (
+        f'tell application "System Events"\n'
+        f'  tell process "{SOUNDMINER_APP}"\n'
+        f'    repeat with w in windows\n'
+        f'      repeat with theName in {{"OK", "Continue", "Yes"}}\n'
+        f'        try\n'
+        f'          if exists button (theName as string) of w then\n'
+        f'            click button (theName as string) of w\n'
+        f'            return "clicked"\n'
+        f'          end if\n'
+        f'        end try\n'
+        f'        try\n'
+        f'          repeat with s in sheets of w\n'
+        f'            if exists button (theName as string) of s then\n'
+        f'              click button (theName as string) of s\n'
+        f'              return "clicked"\n'
+        f'            end if\n'
+        f'          end repeat\n'
+        f'        end try\n'
+        f'      end repeat\n'
+        f'    end repeat\n'
+        f'  end tell\n'
+        f'end tell\n'
+        f'return "none"'
+    )
+    result = subprocess.run(
+        ["osascript", "-e", script], capture_output=True, text=True, timeout=10,
+    )
     if result.stdout.strip() == "clicked":
-        logger.info("        ↳ Clicked OK on a Soundminer dialog (dupes / unmatched fields).")
+        logger.info(f"        ↳ Accepted audited Soundminer dialog: {label}.")
         time.sleep(0.6)
         _save_step_screenshot("dialog_ok_clicked", logger)
         return True
+    return False
+
+
+def _validate_unmatched_dialog_text(snapshot: str) -> set[str]:
+    """Return audited unmatched fields or raise for new/unreadable fields."""
+    observed = {field for field in ALLOWED_UNMATCHED_FIELDS if field in snapshot}
+    match = re.search(
+        r"headers aren't in the database:\s*(.*?)\s*If you expected",
+        snapshot,
+        flags=re.IGNORECASE,
+    )
+    listed: set[str] = set()
+    if match:
+        listed = {
+            value.strip().strip(".,|")
+            for value in match.group(1).split(",") if value.strip()
+        }
+    unexpected = listed - ALLOWED_UNMATCHED_FIELDS
+    fields = listed or observed
+    if unexpected or not fields:
+        raise _SoundminerError(
+            "Unmatched Fields dialog contains an unaudited or unreadable "
+            f"field set. Observed={sorted(fields)}; "
+            f"allowed={sorted(ALLOWED_UNMATCHED_FIELDS)}."
+        )
+    return fields
+
+
+def _dismiss_known_dialog_applescript(logger: logging.Logger) -> bool:
+    snapshot = _dialog_accessibility_snapshot(logger)
+    if not snapshot:
+        return False
+    if "Unmatched Fields" in snapshot:
+        fields = _validate_unmatched_dialog_text(snapshot)
+        logger.warning(
+            "        Audited unmatched fields will not be imported: "
+            + ", ".join(sorted(fields))
+        )
+        return _click_known_dialog_ok(logger, "Unmatched Fields")
+    if "Check for Dupes Warning" in snapshot:
+        return _click_known_dialog_ok(logger, "Check for Dupes Warning")
+    # Do not click a generic OK/Yes button in an unknown modal.
     return False
 
 
@@ -1873,12 +2292,20 @@ def _dismiss_import_dialogs_once(logger: logging.Logger) -> bool:
     precise image-match dismissers first, then the AppleScript OK-clicker as
     a HiDPI-proof fallback.  Returns True if anything was dismissed.
     """
-    hit = False
-    if _dismiss_dialog_if_present("unmatched_fields", "Unmatched Fields", logger):
-        hit = True
+    hit = _dismiss_known_dialog_applescript(logger)
+    # If Accessibility cannot expose the unmatched text, fail instead of
+    # accepting fields we could not audit. The crop is only a presence signal.
+    unmatched_crop = OPTIONAL_DIALOG_SCREENSHOTS.get("unmatched_fields")
+    if (
+        not hit and unmatched_crop
+        and Path(_img(unmatched_crop)).exists()
+        and _locate_safe(_img(unmatched_crop)) is not None
+    ):
+        raise _SoundminerError(
+            "Unmatched Fields dialog is visible but its text is unavailable "
+            "through Accessibility; refusing to accept it blindly."
+        )
     if _dismiss_dialog_if_present("dupes_warning", "Check for Dupes Warning", logger):
-        hit = True
-    if _click_dialog_ok_applescript(logger):
         hit = True
     return hit
 
@@ -2138,9 +2565,9 @@ def _wait_for_screen_idle(
         least once (``saw_activity``) — so a brief static moment right after
         launching the phase, or a modal dialog sitting there BEFORE the work
         starts, can't be mistaken for completion.
-      • If we never see any visible activity (a silent phase with no on-screen
-        progress), we fall back to the proven fixed wait ``no_activity_fallback``
-        and proceed, rather than blocking on the hours-long hard ceiling.
+      • If we never see any visible activity, the soft ceiling is a hard
+        failure.  Advancing without positive evidence previously allowed a
+        blocked dialog or failed menu action to masquerade as completion.
       • ``hard_timeout`` is an absolute safety ceiling.
     """
     import numpy as np
@@ -2203,12 +2630,14 @@ def _wait_for_screen_idle(
             )
             return
 
-        # Fallback: no visible progress ever seen → after the proven soft wait,
-        # proceed instead of blocking on the hours-long ceiling.
+        # Fail closed: no visible progress means there is no positive evidence
+        # the requested phase ever started.
         if not saw_activity and elapsed >= no_activity_fallback:
-            logger.info(
-                f"        {phase_label}: no visible UI activity after "
-                f"{int(elapsed)}s — proceeding (soft-wait fallback)."
+            raise _SoundminerError(
+                f"{phase_label} showed no detectable UI activity for "
+                f"{int(elapsed)}s. Refusing to advance without a positive "
+                "start/completion signal; check for a blocked dialog, stale "
+                "menu command, or Screen Recording failure."
             )
             return
 
@@ -2271,9 +2700,8 @@ def _wait_with_manual_handshake(
     start = time.monotonic()
     if unattended:
         # Automated equivalent of "watch the status bar settle, then Enter":
-        # wait until the Soundminer UI stops changing.  If the phase shows no
-        # visible progress at all, fall back to the old fixed soft wait so we
-        # still proceed (never block on the hours-long hard ceiling).
+        # wait until the Soundminer UI first changes and then settles. A phase
+        # that never shows activity fails closed at the soft ceiling.
         _wait_for_screen_idle(
             phase_label          = phase_label,
             stability            = SCREEN_IDLE_STABILITY,
@@ -2456,6 +2884,13 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--capture-steps", action="store_true",
                    help="Save numbered step screenshots to "
                         f"{DEBUG_STEP_DIR}.")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume from the last validated phase checkpoint for "
+                        "this release. Destination manifests are revalidated "
+                        "before any phase is skipped.")
+    p.add_argument("--preflight-only", action="store_true",
+                   help="Run only the non-destructive GUI/crop/permission "
+                        "preflight and exit.")
     p.add_argument("--debug", action="store_true")
 
     args = p.parse_args(argv)
@@ -2483,6 +2918,9 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
         return 2
     logger.info(f"Release context: {ctx}")
 
+    if args.preflight_only:
+        return 0 if run_soundminer_gui_preflight(logger) else 1
+
     # Unattended is the default; --attended opts into the supervised prompts.
     unattended = not args.attended
 
@@ -2508,6 +2946,7 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
             logger=logger,
             unattended=unattended,
             db_shortcut=args.sourceaudio_db_shortcut,
+            resume=args.resume,
         )
         overall_ok = overall_ok and ok_sa
         if not ok_sa and run_nbc:
@@ -2528,6 +2967,7 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
             skip_import=args.skip_import,
             skip_embed=args.skip_embed,
             skip_mirror=args.skip_mirror,
+            resume=args.resume,
         )
         overall_ok = overall_ok and ok_nbc
 
