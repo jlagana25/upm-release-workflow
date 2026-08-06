@@ -42,7 +42,7 @@ The code already exists there, so back it up and clone into the same path so
 nothing downstream changes.
 
 ```bash
-cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation"
+cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation"
 mv files "files_backup_$(date +%Y%m%d)"
 git clone https://github.com/jlagana25/upm-release-workflow.git files
 cd files
@@ -106,7 +106,7 @@ It signs in with your Claude subscription (Pro/Max) or an API key on first launc
 **Use it** — run it from inside the repo and talk to it in plain English:
 
 ```bash
-cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
+cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
 claude
 ```
 
@@ -145,7 +145,7 @@ has never run this workflow needs more than code. Full checklist:
 2. **Python dependencies:** `pip install -r requirements.lock` (or
    `requirements.txt`). Then `python3 -m playwright install chromium`.
 3. **ffmpeg:** `brew install ffmpeg` (needed for Step 12.7 WAV→MP3).
-4. **Apps:** install and sign into **Soundminer** and **UniSync**, and confirm
+4. **Apps:** install **Soundminer** and **UniSync**, and confirm
    their databases/licenses are set up (e.g. the SourceAudio DB on ⌘8).
 5. **macOS permissions** (System Settings → Privacy & Security): grant the
    Terminal app both **Accessibility** and **Screen Recording** — the GUI
@@ -155,9 +155,12 @@ has never run this workflow needs more than code. Full checklist:
    the display/resolution differs from where they were captured, the Soundminer
    ones can be re-captured with `python3 make_soundminer_crops.py`; UniSync crops
    are re-cropped by hand (see the next section).
-8. **Domo/Microsoft login:** the first `--test` Domo run opens a browser to sign
-   in.
-9. **Verify:** `python3 smoke_test.py`, then a dry run:
+8. **Private per-user login:** do not copy auth files from another operator.
+   Run `python3 auth_manager.py --setup domo`, then
+   `python3 auth_manager.py --setup unisync`, using this operator's own UMG
+   SSO/MFA and UniSync login. Confirm with `python3 auth_manager.py --status`.
+   See `AUTHENTICATION.md` for offboarding/reset.
+9. **Verify:** `make verify`, then a dry run:
    `python3 upm_release_workflow.py --previous-month --dry-run`.
 
 Run `python3 upm_release_workflow.py --list-steps` any time for the current step

@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+from urllib.parse import urlsplit
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -70,6 +71,7 @@ from config import (
     ReleaseContext,
     context_from_cli_args,
 )
+from auth_manager import private_creation_umask, secure_private_directory, secure_private_file
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -83,6 +85,15 @@ EXPORT_WAIT       = 2.0
 LOGIN_TIMEOUT     = 300_000
 NAV_TIMEOUT       = 30_000
 DOWNLOAD_TIMEOUT  = 90_000
+
+
+def _safe_url_for_log(url: str) -> str:
+    """Return only scheme/host/path; auth query and fragment never reach logs."""
+    try:
+        parsed = urlsplit(url)
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    except Exception:
+        return "(URL redacted)"
 
 # ---------------------------------------------------------------------------
 # Card configuration
@@ -228,13 +239,14 @@ def run_domo_exports(
 
     _require_playwright()
     with sync_playwright() as p:
-        DOMO_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        ctx_pw = p.chromium.launch_persistent_context(
-            user_data_dir=str(DOMO_PROFILE_DIR),
-            headless=False,
-            downloads_path=str(TEMP_DOWNLOAD_DIR),
-            accept_downloads=True,
-        )
+        secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
+        with private_creation_umask():
+            ctx_pw = p.chromium.launch_persistent_context(
+                user_data_dir=str(DOMO_PROFILE_DIR),
+                headless=False,
+                downloads_path=str(TEMP_DOWNLOAD_DIR),
+                accept_downloads=True,
+            )
         page = ctx_pw.pages[0] if ctx_pw.pages else ctx_pw.new_page()
 
         try:
@@ -256,6 +268,7 @@ def run_domo_exports(
                     results[card["key"]] = "failed"
         finally:
             ctx_pw.close()
+            secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
 
     try:
         if TEMP_DOWNLOAD_DIR.exists() and not any(TEMP_DOWNLOAD_DIR.iterdir()):
@@ -335,15 +348,16 @@ def _authenticate(page, logger: logging.Logger) -> None:
         )
     except PlaywrightTimeoutError:
         failure_dir = Path(__file__).resolve().parent.parent / "_logs" / "domo_failures"
-        failure_dir.mkdir(parents=True, exist_ok=True)
+        secure_private_directory(failure_dir)
         screenshot = failure_dir / f"domo_auth_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         try:
             page.screenshot(path=str(screenshot))
+            secure_private_file(screenshot)
         except Exception:
             screenshot = Path("(screenshot unavailable)")
         raise PlaywrightTimeoutError(
             "Domo/Microsoft authentication did not recover within the timeout. "
-            f"URL={page.url}; screenshot={screenshot}. Complete the one-time "
+            f"URL={_safe_url_for_log(page.url)}; screenshot={screenshot}. Complete the one-time "
             "Microsoft sign-in in this persistent profile, then future runs "
             "will reuse it unattended."
         )
@@ -392,7 +406,7 @@ def _export_card(
     if "kpis/details" not in page.url:
         raise RuntimeError(
             f"Navigated away from card detail after setting date range.\n"
-            f"  Current URL: {page.url}"
+            f"  Current URL: {_safe_url_for_log(page.url)}"
         )
 
     # 4. Download (always an XLSX from Domo) → save as XLSX or convert to CSV
@@ -450,10 +464,11 @@ def _dump_picker_debug(page, logger: logging.Logger, tag: str) -> None:
     try:
         _REPO_ROOT = Path(__file__).resolve().parent.parent
         dbg = _REPO_ROOT / "_logs" / "domo_failures"
-        dbg.mkdir(parents=True, exist_ok=True)
+        secure_private_directory(dbg)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         shot = dbg / f"domo_{tag}_{ts}.png"
         page.screenshot(path=str(shot))
+        secure_private_file(shot)
         logger.error(f"     ⓘ Saved picker screenshot: {shot}")
     except Exception as exc:
         logger.warning(f"     (could not save screenshot: {exc})")
@@ -547,7 +562,7 @@ def _apply_previous_month_preset(page, logger: logging.Logger) -> None:
     # (clicking the filter-bar row to the right, never the card body).
     vp = page.viewport_size or {"width": 1280, "height": 720}
     page.mouse.click(vp["width"] - 150, 130)
-    logger.info(f"     Picker closed.  URL: {page.url}")
+    logger.info(f"     Picker closed.  URL: {_safe_url_for_log(page.url)}")
 
     # Step 6: wait for the card to reload with the new timeframe
     time.sleep(4)
@@ -608,7 +623,7 @@ def _apply_between_date_range(
     # The area is at approximately y=130 (filter bar row), far-right x.
     vp = page.viewport_size or {"width": 1280, "height": 720}
     page.mouse.click(vp["width"] - 150, 130)
-    logger.info(f"     Picker closed.  URL: {page.url}")
+    logger.info(f"     Picker closed.  URL: {_safe_url_for_log(page.url)}")
 
     # Step 7: wait for the card to reload with the new date range
     time.sleep(4)
@@ -826,13 +841,14 @@ def _run_test(args) -> None:
 
     _require_playwright()
     with sync_playwright() as p:
-        DOMO_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        ctx_pw = p.chromium.launch_persistent_context(
-            user_data_dir=str(DOMO_PROFILE_DIR),
-            headless=False,
-            downloads_path=str(TEMP_DOWNLOAD_DIR),
-            accept_downloads=True,
-        )
+        secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
+        with private_creation_umask():
+            ctx_pw = p.chromium.launch_persistent_context(
+                user_data_dir=str(DOMO_PROFILE_DIR),
+                headless=False,
+                downloads_path=str(TEMP_DOWNLOAD_DIR),
+                accept_downloads=True,
+            )
         page = ctx_pw.pages[0] if ctx_pw.pages else ctx_pw.new_page()
 
         keep_browser_open = False
@@ -879,7 +895,8 @@ def _run_test(args) -> None:
                 except KeyboardInterrupt:
                     pass
         finally:
-                ctx_pw.close()
+            ctx_pw.close()
+            secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
 
     # Tidy the temp download dir if it ended up empty
     try:

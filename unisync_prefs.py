@@ -5,7 +5,7 @@ fragile macOS path-entry UI (Cmd+Shift+G / folder-icon clicks).
 
 UniSync stores the last-used territory and the cache/client paths in:
 
-    /Users/hdfuser/Library/SMUniSync/UniSync.xml
+    ~/Library/SMUniSync/UniSync.xml
 
 as attributes on an inner <userPrefs> element, e.g.:
 
@@ -37,7 +37,10 @@ import shutil
 import sys
 from pathlib import Path
 
-DEFAULT_UNISYNC_XML = Path("/Users/hdfuser/Library/SMUniSync/UniSync.xml")
+from auth_manager import secure_private_directory, secure_private_file
+from config import UNISYNC_XML_PATH
+
+DEFAULT_UNISYNC_XML = UNISYNC_XML_PATH
 
 # The three attributes we manage on the inner <userPrefs> element.
 _MANAGED = ("territory", "cachePath", "clientPath")
@@ -70,8 +73,12 @@ def read_unisync_xml_prefs(xml_path: Path | str = DEFAULT_UNISYNC_XML) -> dict:
     """Return {loginname, territory, cachePath, clientPath} as found in the
     file (missing keys simply absent).  Returns {} if the file or the
     <userPrefs> element can't be read."""
+    path = Path(xml_path)
+    if path.parent.exists():
+        secure_private_directory(path.parent)
+    secure_private_file(path)
     try:
-        text = Path(xml_path).read_bytes().decode("utf-8")
+        text = path.read_bytes().decode("utf-8")
     except OSError:
         return {}
     m = _find_userprefs_tag(text)
@@ -104,6 +111,7 @@ def write_unisync_xml_prefs(
     """
     log = logger or logging.getLogger("unisync_prefs")
     p = Path(xml_path)
+    secure_private_directory(p.parent)
 
     try:
         text = p.read_bytes().decode("utf-8")
@@ -151,9 +159,11 @@ def write_unisync_xml_prefs(
         bak = p.with_suffix(".xml.bak")
         if backup and not bak.exists():
             shutil.copy2(p, bak)
+            secure_private_file(bak)
             log.info(f"    backup → {bak.name}")
         # write_bytes preserves the original CRLF line-endings exactly
         p.write_bytes(new_text.encode("utf-8"))
+        secure_private_file(p)
         log.info("  ✓  UniSync.xml updated.")
         return True
     except OSError as exc:
@@ -205,7 +215,11 @@ def _main(argv=None) -> int:
             log.error(f"Could not read prefs from {args.xml_path}")
             return 2
         log.info(f"Current UniSync.xml prefs ({args.xml_path}):")
-        for k in ("loginname",) + _MANAGED:
+        log.info(
+            "  loginname  = "
+            + ("configured (redacted)" if cur.get("loginname") else "(absent)")
+        )
+        for k in _MANAGED:
             log.info(f"  {k:11s}= {cur.get(k, '(absent)')}")
         return 0
 

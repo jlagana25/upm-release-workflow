@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from datetime import datetime
+import os
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -74,14 +75,23 @@ SOUNDMINER_AGENT_JOB_TIMEOUT = 12 * 60 * 60
 # Fixed user-side paths
 # ---------------------------------------------------------------------------
 
-TRACKLISTS_DIR = Path("/Users/hdfuser/Documents/UPM Tracklists/Release Lists")
-EXPORTS_DIR = Path(
-    "/Users/hdfuser/Documents/Scripts/Python/_Exports/_New Releases"
-)
-LOGS_DIR = Path(
-    "/Users/hdfuser/Documents/Scripts/Python/_Logs/UPM Release Workflow"
-)
-DOMO_PROFILE_DIR = Path.home() / ".upm_release_workflow" / "domo_browser_profile"
+USER_HOME = Path.home()
+TRACKLISTS_DIR = Path(os.environ.get(
+    "UPM_TRACKLISTS_DIR",
+    USER_HOME / "Documents" / "UPM Tracklists" / "Release Lists",
+))
+EXPORTS_DIR = Path(os.environ.get(
+    "UPM_EXPORTS_DIR",
+    USER_HOME / "Documents" / "Scripts" / "Python" / "_Exports" / "_New Releases",
+))
+LOGS_DIR = Path(os.environ.get(
+    "UPM_LOGS_DIR",
+    USER_HOME / "Documents" / "Scripts" / "Python" / "_Logs" / "UPM Release Workflow",
+))
+PRIVATE_STATE_DIR = USER_HOME / ".upm_release_workflow"
+DOMO_PROFILE_DIR = PRIVATE_STATE_DIR / "domo_browser_profile"
+UNISYNC_PREFS_DIR = USER_HOME / "Library" / "SMUniSync"
+UNISYNC_XML_PATH = UNISYNC_PREFS_DIR / "UniSync.xml"
 MISSING_COVER_REPORT = Path("/Volumes/UPM Builds/Missing_CDCover_Downloads.csv")
 
 # ---------------------------------------------------------------------------
@@ -229,8 +239,8 @@ REMOTE_SOUNDMINER: dict[str, str] = {
     # SSH target.  `host` may be a hostname, a Bonjour name (e.g.
     # "soundminer-mac.local"), or an IP.  `user` is the macOS account that
     # is logged into the GUI / Screen Sharing session on the remote Mac.
-    "host":        "USMPSMDHDF1.local",         # remote Soundminer Mac
-    "user":        "hdfuser",                   # ← remote GUI account
+    "host":        os.environ.get("UPM_SOUNDMINER_HOST", "USMPSMDHDF1.local"),
+    "user":        os.environ.get("UPM_SOUNDMINER_USER", "hdfuser"),
     # Numeric UID of that account on the remote Mac.  Get it by running
     # `id -u` while logged into the remote Mac (first account is usually
     # 501).  Used by `launchctl asuser <uid>` to reach the GUI session.
@@ -240,13 +250,18 @@ REMOTE_SOUNDMINER: dict[str, str] = {
     # /Volumes/Documents mount was a transient auto-mount that didn't survive
     # a restart, so we use the stable home-directory path (identical in both
     # SSH and console contexts on this machine).
-    "repo_path":   "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files",
+    "repo_path":   os.environ.get(
+        "UPM_SOUNDMINER_REPO",
+        "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files",
+    ),
     # Same files, but the path AS SEEN IN THE REMOTE MAC'S OWN CONSOLE /
     # Screen Sharing Terminal session, where the volume mounts under
     # /Users/hdfuser/….  This is what the Step 12 hand-off banner tells the
     # operator to `cd` into, because Path C runs soundminer.py there.
-    "console_repo_path":
+    "console_repo_path": os.environ.get(
+        "UPM_SOUNDMINER_REPO",
         "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files",
+    ),
     # Python interpreter on the remote Mac (must have pyautogui + Pillow).
     "python":      "python3",
     # Command template that re-injects a GUI command into the logged-in

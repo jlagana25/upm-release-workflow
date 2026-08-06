@@ -88,4 +88,5 @@ def write_workflow_report(
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
     temporary.replace(report_path)
+    report_path.chmod(0o600)
     return report_path

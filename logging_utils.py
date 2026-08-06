@@ -17,10 +17,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Keep in sync with config.LOGS_DIR to avoid circular import
-_DEFAULT_LOG_DIR = Path(
-    "/Users/hdfuser/Documents/Scripts/Python/_Logs/UPM Release Workflow"
-)
+from config import LOGS_DIR
+
+_DEFAULT_LOG_DIR = LOGS_DIR
 
 _FORMATTER = logging.Formatter(
     fmt="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -56,6 +55,7 @@ def get_logger(
         return _ACTIVE_LOGGERS[key]
 
     log_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.chmod(0o700)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_filename = f"UPM_Workflow_{year}-{month:02d}_{variant}_{timestamp}.log"
@@ -66,6 +66,7 @@ def get_logger(
 
     # --- file handler: everything ---
     fh = logging.FileHandler(log_path, encoding="utf-8")
+    log_path.chmod(0o600)
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(_FORMATTER)
 

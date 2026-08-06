@@ -291,6 +291,13 @@ inline or are submitted to HDF1's login-session agent.
   actual GUI command into the logged-in Terminal so Screen Recording and
   Accessibility use Terminal's existing TCC grants; it tails the job log and
   alone marks queue status complete/failed.
+- **Authentication is per macOS user and never repository data.** Domo cookies
+  live only in the user's private Playwright profile; UniSync owns its own
+  login/Keychain and local XML. Code may change only UniSync territory/cache/
+  client fields and must never print its login identity. Auth directories are
+  `0700`, files/screenshots are `0600`; `security_scan.py` and the pre-commit
+  hook reject identities, auth databases, and literal secrets. Keep
+  `AUTHENTICATION.md` synchronized with auth behavior.
 - **Interrupted Step 2 copies are recoverable.** `_safe_copytree` archives a
   partially copied Specials destination on `KeyboardInterrupt`. If an older
   partial tree already exists with unresolved `MMMM YYYY` names, Step 2 treats
@@ -338,7 +345,7 @@ saved. When proposing commits, follow these rules:
   `CONFLICT`, stop and surface it rather than resolving blind.
 - Both machines share the path, so a commit block is identical on either:
   ```bash
-  cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
+  cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
   git pull --no-edit
   git add <specific files>
   git commit -m "<message>"

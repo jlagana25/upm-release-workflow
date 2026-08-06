@@ -175,6 +175,39 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
             "pip install -r requirements.txt"
         )
 
+    # -- Per-user authentication state --------------------------------------
+    # Repair local permissions before either application can read its state.
+    # Status is deliberately redacted: no username, cookie, or token reaches
+    # workflow logs or structured reports.
+    from auth_manager import auth_status, secure_auth_permissions
+    try:
+        secure_auth_permissions()
+        private_auth = auth_status()
+        if _active("skip_domo"):
+            domo_state = private_auth["domo"]
+            if domo_state["state"] == "configured" and domo_state["private_permissions"]:
+                logger.info("  ✓  Domo per-user session profile configured and private")
+            else:
+                logger.warning(
+                    "  !  Domo per-user session is not configured. The first "
+                    "browser run will require this user's Microsoft login/MFA; "
+                    "or run: python3 auth_manager.py --setup domo"
+                )
+        if _active("skip_unisync"):
+            unisync_state = private_auth["unisync"]
+            if unisync_state["state"] == "configured" and unisync_state["private_permissions"]:
+                logger.info("  ✓  UniSync per-user login preferences configured and private")
+            else:
+                logger.error(
+                    "  ✗  UniSync is not configured for this macOS user. Run: "
+                    "python3 auth_manager.py --setup unisync, sign in inside "
+                    "UniSync, then rerun the workflow."
+                )
+                ok = False
+    except OSError as exc:
+        logger.error(f"  ✗  Could not secure per-user authentication state: {exc}")
+        ok = False
+
     # -- HDF1 login-session agent --------------------------------------------
     needs_soundminer = _active("skip_sourceaudio") or (
         _active("skip_soundminer")

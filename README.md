@@ -16,9 +16,10 @@ Release WorkFlow Automation/files`), so any `cd` / git command is identical on
 either one.
 
 The full pipeline can run end-to-end from USMPSMDHDF2 without switching Macs.
-An HDF1 login-session agent watches a JSON queue on the shared Pegasus volume,
-runs Steps 11–12 inside HDF1's real Aqua session, and streams heartbeat/result
-status back to HDF2. Soundminer is never installed or launched on HDF2. Shared
+An HDF1 login-session agent watches its private local JSON queue, accepts
+control/status traffic from HDF2 over SSH, runs Steps 11–12 inside HDF1's real
+Aqua session, and streams results back. SSH never drives the GUI. Soundminer is
+never installed or launched on HDF2. Shared
 storage is the two Pegasus volumes
 (`/Volumes/Pegasus32 R8 - 1` and `- 2`), which live **outside** the repo.
 
@@ -33,10 +34,24 @@ pip install -r requirements.lock
 `ffmpeg` must be on PATH for Step 12.7 (`brew install ffmpeg`). Soundminer steps
 require Accessibility + Screen Recording permissions on USMPSMDHDF1.
 
+Each operator configures private authentication under their own macOS account:
+
+```bash
+python3 auth_manager.py --setup domo
+python3 auth_manager.py --setup unisync
+python3 auth_manager.py --status
+```
+
+No credential or browser profile is stored in Git or on Pegasus. Local auth
+directories are mode `0700`, files are `0600`, status/log output is redacted,
+and the installed pre-commit scanner blocks identities, cookie databases,
+UniSync preferences, literal secrets, and private keys. See
+[`AUTHENTICATION.md`](AUTHENTICATION.md) for onboarding and recoverable reset.
+
 Install the unattended Soundminer agent once, from HDF1's logged-in session:
 
 ```bash
-cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
+cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
 python3 soundminer_agent.py --install
 python3 soundminer_agent.py --status
 ```
@@ -84,7 +99,8 @@ operating and testing guide.
 
 ```bash
 make smoke      # imports every module, checks arg/step consistency + shared helpers
-make verify     # smoke + byte-compile everything
+make security   # reject private auth artifacts or literal credentials
+make verify     # security + smoke + byte-compile everything
 ```
 
 The smoke test is offline (no volumes needed) and runs in seconds. Run it after
@@ -143,6 +159,10 @@ Then the other machine installs with `pip install -r requirements.lock`.
 - `soundminer_agent.py` — HDF1 Aqua LaunchAgent plus the SSH JSON/status control
   channel used by HDF2 (SSH never drives the GUI).
 - `workflow_report.py` — structured end-of-run JSON reports.
+- `auth_manager.py` — redacted per-user Domo/UniSync setup, status, permission
+  repair, and recoverable reset.
+- `security_scan.py` — worktree/index/history credential guard used by the
+  pre-commit hook and `make verify`.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`.

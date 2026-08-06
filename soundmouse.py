@@ -30,6 +30,7 @@ from config import (
     ReleaseContext,
     context_from_cli_args,
 )
+from auth_manager import private_creation_umask, secure_private_directory
 from tracklist_columns import (
     POSSIBLE_COVER_COLS,
     POSSIBLE_FILENAME_COLS,
@@ -433,14 +434,15 @@ def _export_domo_cards(
     domo.TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     domo._require_playwright()
     ok = True
-    DOMO_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
     with domo.sync_playwright() as playwright:
-        browser_ctx = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(DOMO_PROFILE_DIR),
-            headless=False,
-            downloads_path=str(domo.TEMP_DOWNLOAD_DIR),
-            accept_downloads=True,
-        )
+        with private_creation_umask():
+            browser_ctx = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(DOMO_PROFILE_DIR),
+                headless=False,
+                downloads_path=str(domo.TEMP_DOWNLOAD_DIR),
+                accept_downloads=True,
+            )
         page = browser_ctx.new_page()
         try:
             try:
@@ -465,6 +467,7 @@ def _export_domo_cards(
                     ok = False
         finally:
             browser_ctx.close()
+            secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
     return ok
 
 

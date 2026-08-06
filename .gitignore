@@ -21,6 +21,12 @@ soundminer_debug/
 # Playwright / browser session state
 .auth/
 playwright/.cache/
+domo_browser_profile/
+UniSync.xml
+UniSync.xml.bak
+Cookies
+Login Data
+Web Data
 
 # Editors
 .idea/

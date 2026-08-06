@@ -15,7 +15,7 @@ setting up a new machine, work through Part 2 top to bottom.
 
 - All commands assume you are in the project's `files/` directory. **Both
   machines now use the same path:**
-  `cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"`
+  `cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"`
   (On **USMPSMDHDF1**, run it in a console / Screen Sharing Terminal with an
   active GUI session for the Soundminer and UniSync steps.)
 - Examples use **May 2026, Part 1** (`--year 2026 --month 5 --part 1`). Swap in your real release.
@@ -31,6 +31,11 @@ setting up a new machine, work through Part 2 top to bottom.
 > (`ls -d "/Volumes/Pegasus32 R8 - 1" "/Volumes/Pegasus32 R8 - 2"`). After a
 > reboot they may not auto-mount, which presents as "permission denied" or
 > "no such file" errors that look like bugs but aren't.
+
+> **Authentication check:** `python3 auth_manager.py --status` must report the
+> current macOS user's Domo and UniSync state as configured/private. New users
+> run `--setup domo` and `--setup unisync`; credentials are entered only into
+> Microsoft/UniSync, never into this workflow. See `AUTHENTICATION.md`.
 
 ---
 
@@ -340,7 +345,7 @@ Validates Step 9 (compare expected vs. present files; write the missing report).
   - Step status `✓ completed` when nothing is missing; reports the missing count otherwise.
 - **Inspect:**
   - Open the missing report:
-    `"/Users/hdfuser/Documents/Scripts/Python/_Exports/_New Releases/UPM May 2026_Missing_<date>.csv"`
+    `"$HOME/Documents/Scripts/Python/_Exports/_New Releases/UPM May 2026_Missing_<date>.csv"`
   - Empty (header only) = clean. Rows = genuinely missing files to chase (often via re-running UniSync/covers).
 - **Rollback/cleanup:**
   - The missing-report CSV is a read-only artifact; delete it if test-only. Verification changes nothing else.
@@ -637,14 +642,14 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
   ```
   When it reaches Step 12, it prints the hand-off banner. Then, on **USMPSMDHDF1** (Screen Sharing Terminal):
   ```bash
-  cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
+  cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
   python3 soundminer.py --test --year 2026 --month 5 --part 1 --capture-steps
   ```
   Back on **USMPSMDHDF2**, press ENTER; the pipeline verifies the WAV output, runs 12.7 conversion, then Steps 13 (non-maintrack cleanup), 14 (rename), and 15 (final metadata cross-check), then the summary.
   - Step 13 deletes the non-maintracks in a normal run; `--dry-run` previews them only.
 - **Command (real run, inline — launched ON USMPSMDHDF1):**
   ```bash
-  cd "/Users/hdfuser/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
+  cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
   python3 upm_release_workflow.py --year 2026 --month 5 --part 1
   ```
   Run from the Soundminer machine, Step 12 runs **inline with no pause** — the

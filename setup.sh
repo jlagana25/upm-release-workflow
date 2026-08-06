@@ -26,6 +26,11 @@ python3 -m pip install \
   "python-dateutil>=2.9.0"
 
 echo "==> Sanity check: import every module + verify wiring"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git config core.hooksPath .githooks
+fi
+python3 auth_manager.py --permissions
+python3 security_scan.py
 python3 smoke_test.py
 
 echo "==> Setup complete."

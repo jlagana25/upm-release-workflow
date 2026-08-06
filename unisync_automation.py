@@ -51,7 +51,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from config import ReleaseContext, current_hostname
+from config import ReleaseContext, UNISYNC_XML_PATH as CONFIG_UNISYNC_XML_PATH, current_hostname
+from auth_manager import secure_private_file
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -59,10 +60,7 @@ from config import ReleaseContext, current_hostname
 
 # Screenshots live next to the code (sibling of files/), derived from this
 # script's own location so the path is correct regardless of where the repo
-# sits.  This previously hardcoded "/Users/hdfuser/Documents/Python/…" which
-# was missing the "Scripts/" level — wrong on the actual pipeline machine
-# (/Users/hdfuser/Documents/Scripts/Python/…).  Deriving from __file__ avoids
-# that whole class of path bugs.
+# sits. Deriving from __file__ avoids user-home and installation-layout bugs.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FILES_DIR = Path(__file__).resolve().parent
 
@@ -142,7 +140,7 @@ XML_SETUP          = True
 UNATTENDED_UI_RETRIES = 2
 UNATTENDED_ZERO_PROGRESS_RETRIES = 2
 # Location of UniSync's preferences file (holds the userPrefs cache/client).
-UNISYNC_XML_PATH   = "/Users/hdfuser/Library/SMUniSync/UniSync.xml"
+UNISYNC_XML_PATH   = str(CONFIG_UNISYNC_XML_PATH)
 
 
 def set_capture_steps(enabled: bool) -> None:
@@ -344,6 +342,8 @@ def run_all_unisync_jobs(
     ahead while UniSync is still busy on a previous CSV.  Pass
     `overwrite=True` to force every job to run regardless.
     """
+    secure_private_file(Path(UNISYNC_XML_PATH))
+
     # Screenshot preflight
     if not verify_screenshots(logger):
         return {job["name"]: STATUS_FAILED for job in ctx.unisync_jobs}
@@ -377,6 +377,7 @@ def run_all_unisync_jobs(
         logger.info(f"  CSV:    {job['csv']}")
 
         status = _run_single_job(job, dry_run, logger, overwrite=overwrite)
+        secure_private_file(Path(UNISYNC_XML_PATH))
         results[job["name"]] = status
 
         if status == STATUS_FAILED:
@@ -395,6 +396,7 @@ def run_all_unisync_jobs(
             logger.debug(f"  Inter-job pause ({INTER_JOB_PAUSE}s)…")
             time.sleep(INTER_JOB_PAUSE)
 
+    secure_private_file(Path(UNISYNC_XML_PATH))
     return results
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from pathlib import Path
 
 # Every first-party module — importing all of them catches broken cross-imports
 # (e.g. a helper that moved modules) before they fail mid-run.
@@ -29,7 +30,8 @@ MODULES = [
     "final_packaging", "cleanup", "audio_conversion", "domo_exports",
     "split_se_ingest_forms", "folder_setup", "album_list_doc", "soundminer",
     "make_soundminer_crops", "prune", "unisync_automation", "unisync_prefs",
-    "remote_runner", "soundminer_agent", "workflow_report", "soundmouse",
+    "remote_runner", "soundminer_agent", "workflow_report", "auth_manager",
+    "security_scan", "soundmouse",
     "upm_release_workflow",
 ]
 
@@ -126,6 +128,20 @@ def main() -> int:
         m = mods.get(name)
         check(f"{name}._find_column is the shared one",
               getattr(m, "_find_column", None) is tc._find_column)
+
+    # 6) Credential/privacy guard over tracked + untracked worktree files.
+    print("\nCredential safety:")
+    try:
+        security_findings = mods["security_scan"].scan_worktree(
+            Path(__file__).resolve().parent
+        )
+        check(
+            "no private auth material in repository worktree",
+            not security_findings,
+            ", ".join(f.location for f in security_findings),
+        )
+    except Exception as exc:                           # noqa: BLE001
+        check("repository credential scan runs", False, repr(exc))
 
     print()
     if failures:

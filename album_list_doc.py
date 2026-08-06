@@ -2,7 +2,7 @@
 album_list_doc.py — Step 4: Album List DOCX and PDF
 ====================================================
 Flow:
-  1. Read   /Users/hdfuser/Documents/UPM Tracklists/Release Lists/Album Lists/
+  1. Read   ~/Documents/UPM Tracklists/Release Lists/Album Lists/
               UPM-US-{tracklist_token}-AlbumList.csv
   2. Open   HD-Staging/{hd_folder}/Universal Production Music - {month_display_folder} Album List.docx
             (created by folder_setup.py)
