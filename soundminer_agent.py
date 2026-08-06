@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import plistlib
-import socket
+import shutil
 import subprocess
 import sys
 import time
@@ -39,6 +39,9 @@ AGENT_LABEL = "com.upm.soundminer-agent"
 FILES_DIR = Path(__file__).resolve().parent
 REPO_ROOT = FILES_DIR.parent
 AGENT_LOG_DIR = REPO_ROOT / "_logs" / "soundminer_agent"
+INSTALLED_ROOT = Path.home() / "Library" / "Application Support" / "UPM Soundminer Agent"
+INSTALLED_FILES_DIR = INSTALLED_ROOT / "files"
+LAUNCH_AGENT_LOG_DIR = Path.home() / "Library" / "Logs" / "UPM Soundminer Agent"
 
 
 def _utc_now() -> str:
@@ -417,6 +420,58 @@ def serve(
         time.sleep(max(1, poll_seconds))
 
 
+def _select_agent_python() -> Path:
+    """Choose an HDF1 Python that has the GUI automation dependencies.
+
+    ``--install`` is often invoked over SSH, where macOS resolves ``python3``
+    to the Command Line Tools interpreter instead of the Framework Python used
+    by the logged-in Terminal. Probe known candidates rather than persisting
+    that accidental SSH interpreter in the LaunchAgent.
+    """
+    configured = os.environ.get("UPM_SOUNDMINER_PYTHON")
+    candidates = [
+        configured,
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+        "/opt/homebrew/bin/python3",
+        sys.executable,
+        shutil.which("python3"),
+    ]
+    failures: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        if not raw:
+            continue
+        candidate = str(Path(raw).resolve())
+        if candidate in seen or not Path(candidate).exists():
+            continue
+        seen.add(candidate)
+        probe = subprocess.run(
+            [candidate, "-c", "import pyautogui, PIL, cv2"],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            return Path(candidate)
+        failures.append(f"{candidate}: {probe.stderr.strip().splitlines()[-1:]}")
+    raise RuntimeError(
+        "No Python interpreter with pyautogui, Pillow, and OpenCV was found. "
+        "Install the GUI requirements on HDF1 or set UPM_SOUNDMINER_PYTHON. "
+        f"Tried: {'; '.join(failures)}"
+    )
+
+
+def _deploy_runtime_copy() -> Path:
+    """Copy the small code/runtime tree outside macOS-protected Documents."""
+    INSTALLED_ROOT.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        FILES_DIR,
+        INSTALLED_FILES_DIR,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+    )
+    return INSTALLED_FILES_DIR / "soundminer_agent.py"
+
+
 def install_launch_agent() -> Path:
     if current_hostname() != SOUNDMINER_HOSTNAME.upper():
         raise RuntimeError(f"Install this agent on {SOUNDMINER_HOSTNAME} only")
@@ -424,17 +479,19 @@ def install_launch_agent() -> Path:
     launch_dir = Path.home() / "Library" / "LaunchAgents"
     launch_dir.mkdir(parents=True, exist_ok=True)
     plist_path = launch_dir / f"{AGENT_LABEL}.plist"
-    AGENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    agent_python = _select_agent_python()
+    installed_script = _deploy_runtime_copy()
+    LAUNCH_AGENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "Label": AGENT_LABEL,
-        "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--serve"],
-        "WorkingDirectory": str(FILES_DIR),
+        "ProgramArguments": [str(agent_python), str(installed_script), "--serve"],
+        "WorkingDirectory": str(INSTALLED_FILES_DIR),
         "RunAtLoad": True,
         "KeepAlive": True,
         "ProcessType": "Interactive",
         "LimitLoadToSessionType": "Aqua",
-        "StandardOutPath": str(AGENT_LOG_DIR / "launchagent.out.log"),
-        "StandardErrorPath": str(AGENT_LOG_DIR / "launchagent.err.log"),
+        "StandardOutPath": str(LAUNCH_AGENT_LOG_DIR / "launchagent.out.log"),
+        "StandardErrorPath": str(LAUNCH_AGENT_LOG_DIR / "launchagent.err.log"),
     }
     temporary = plist_path.with_suffix(".plist.tmp")
     with temporary.open("wb") as handle:

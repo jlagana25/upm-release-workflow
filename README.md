@@ -43,7 +43,10 @@ python3 soundminer_agent.py --status
 
 The LaunchAgent starts automatically at login. HDF2 preflight refuses to begin
 a real run if its heartbeat is missing or stale. `--no-soundminer-agent`
-restores the legacy manual handoff only for recovery.
+restores the legacy manual handoff only for recovery. Installation deploys a
+small runtime copy under `~/Library/Application Support/UPM Soundminer Agent`;
+this avoids macOS denying background processes access to the source repo in
+`Documents`. Re-run `--install` after pulling workflow code updates on HDF1.
 
 ## Running
 

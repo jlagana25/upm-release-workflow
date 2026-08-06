@@ -283,7 +283,10 @@ inline or are submitted to HDF1's shared-volume agent.
   Metadata/source and destination filename manifests are correctness gates.
 - **Agent requests are atomic JSON.** HDF2 writes only to `pending/`; HDF1
   claims by rename, updates heartbeats/status, and archives the request. Keep
-  GUI imports lazy so the queue/client remains testable headless.
+  GUI imports lazy so the queue/client remains testable headless. The installer
+  deploys a runtime copy under HDF1's `~/Library/Application Support` because
+  macOS denies a background LaunchAgent direct access to code in `Documents`;
+  re-run `--install` after syncing code changes.
 - **Interrupted Step 2 copies are recoverable.** `_safe_copytree` archives a
   partially copied Specials destination on `KeyboardInterrupt`. If an older
   partial tree already exists with unresolved `MMMM YYYY` names, Step 2 treats

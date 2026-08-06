@@ -440,7 +440,10 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
 - The remote has the **current code** (verify by byte size, e.g. `wc -c soundminer.py`).
 - The agent is installed and online:
   `python3 soundminer_agent.py --install` (one time), then
-  `python3 soundminer_agent.py --status`.
+  `python3 soundminer_agent.py --status`. The installer selects HDF1's
+  GUI-capable Framework Python and deploys its runtime under
+  `~/Library/Application Support/UPM Soundminer Agent`; re-install after code
+  updates so that runtime copy stays current.
 
 - **Command (dry-run first, then attended real run):**
   ```bash
