@@ -34,8 +34,8 @@ Setup is the only interactive authentication operation. Normal workflow runs:
 - reuse the private Domo profile and allow Microsoft/Domo silent SSO to finish;
 - reuse UniSync's current-user application/Keychain session after each relaunch;
 - never prompt for a password, MFA response, or an Enter keypress; and
-- fail promptly with a redacted setup command if UMG requires interactive
-  reauthentication.
+- allow up to three minutes for UMG's unattended Microsoft→Domo redirect, then
+  fail with a redacted setup command if interactive reauthentication is needed.
 
 This provides unattended authentication without making a retrievable password
 available to the workflow. Microsoft can still invalidate a session or require

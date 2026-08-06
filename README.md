@@ -47,6 +47,8 @@ private persistent browser session and UniSync's app/Keychain session without
 login prompts or Enter pauses. If UMG invalidates a session or requires fresh
 MFA, the run fails promptly and tells the operator which setup command to run
 outside the release workflow; it never stores or types a password.
+The unattended Microsoft→Domo redirect is allowed up to three minutes because
+this environment can take roughly two minutes even with a valid retained session.
 
 No credential or browser profile is stored in Git or on Pegasus. Local auth
 directories are mode `0700`, files are `0600`, status/log output is redacted,

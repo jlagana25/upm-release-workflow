@@ -249,9 +249,9 @@ enrollment first. A normal workflow run must not wait for manual login.
 - **Expected output:**
   - Browser opens; log says `Attempting unattended Domo/Microsoft silent SSO…`,
     then `Logged in using the private per-user session.`
-  - If the saved session is expired or MFA is required, Step 1 fails after the
-    bounded silent-SSO window and reports `auth_manager.py --setup domo`; it
-    does not pause for operator input.
+  - Allow up to three minutes for the unattended Microsoft→Domo redirect. If
+    the saved session is expired or MFA is required, Step 1 then fails and
+    reports `auth_manager.py --setup domo`; it does not pause for operator input.
   - Per card: navigation, date-range set (`05/01/2026 → 05/14/2026`), download, then `Output: …csv` or `…xlsx`.
   - Summary shows each card `✓` and the written path.
 - **Inspect:**

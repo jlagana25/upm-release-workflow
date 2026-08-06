@@ -86,7 +86,10 @@ LOGIN_TIMEOUT     = 300_000
 # Normal workflow runs never wait for a person.  This window is only for the
 # retained Domo/Microsoft session to redirect through silent SSO.  Interactive
 # MFA is deliberately confined to `auth_manager.py --setup domo`.
-SILENT_LOGIN_TIMEOUT = 45_000
+# The observed UMG Microsoft→Domo redirect can take roughly two minutes even
+# when no operator action is required, so allow three minutes before deciding
+# the retained session truly needs interactive re-enrollment.
+SILENT_LOGIN_TIMEOUT = 180_000
 NAV_TIMEOUT       = 30_000
 DOWNLOAD_TIMEOUT  = 90_000
 
