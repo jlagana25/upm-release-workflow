@@ -757,7 +757,7 @@ def rename_nbc_music_files(
       - Preserve extensions:    yes (only the basename is cleaned)
 
     SCOPE GUARD: this only ever operates under
-        …/3-FINAL PACKAGING/Universal Production Music {mdf} Release - NBC/Music
+        …/3-FINAL PACKAGING/{ctx.partner_folder_name('NBC')}/Music
     (ctx.partner_dirs["nbc_music_root"]).  The function refuses to run if
     that path can't be resolved, doesn't match the expected NBC Music
     structure, or doesn't exist — so a misconfigured ctx can't send it
@@ -784,7 +784,7 @@ def rename_nbc_music_files(
     # a whole volume.  We require the exact trailing structure.
     expected_tail = (
         Path("3-FINAL PACKAGING")
-        / f"Universal Production Music {ctx.month_display_folder} Release - NBC"
+        / ctx.partner_folder_name("NBC")
         / "Music"
     )
     if not str(nbc_root).endswith(str(expected_tail)):

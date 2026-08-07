@@ -530,6 +530,53 @@ def _apply_placeholder_replacements(
     )
 
 
+def _normalize_delivery_folder_names(
+    root: Path,
+    ctx: ReleaseContext,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> None:
+    """Remove the baseline's legacy singular ``Release`` where appropriate.
+
+    The baseline names contain ``MMMM YYYY Release``. After placeholder
+    substitution, Part deliveries must end at ``Part N`` and rolling ranges
+    must say ``Releases``. Full-month legacy runs retain singular ``Release``.
+    """
+    old = f"{ctx.month_display_folder} Release"
+    new = ctx.client_delivery_label
+    if not root.exists():
+        return
+    japan_names = {
+        f"UPM Japan NTT DATA {old}": ctx.partner_folder_name("Japan NTT DATA"),
+        f"UPM Japan JMD and TSS {old}": ctx.partner_folder_name("Japan JMD and TSS"),
+    }
+    matches = [] if old == new else [
+        p for p in root.rglob("*")
+        if old in p.name and p.name not in japan_names
+    ]
+    japan_matches = [p for p in root.rglob("*") if p.name in japan_names]
+    if dry_run:
+        logger.info(
+            f"  [DRY RUN] Would normalize "
+            f"{len(matches) + len(japan_matches)} delivery path name(s)"
+        )
+        return
+    for path in sorted(matches, key=lambda p: len(p.parts), reverse=True):
+        target = path.with_name(path.name.replace(old, new))
+        if target.exists():
+            raise FileExistsError(f"delivery naming target already exists: {target}")
+        path.rename(target)
+        logger.debug(f"    Delivery name: {path.name!r} → {target.name!r}")
+
+    # Japan templates historically used a different prefix. All client
+    # deliveries now begin with the same full Universal Production Music name.
+    for path in sorted(japan_matches, key=lambda p: len(p.parts), reverse=True):
+        target = path.with_name(japan_names[path.name])
+        if target.exists():
+            raise FileExistsError(f"delivery naming target already exists: {target}")
+        path.rename(target)
+
+
 # ---------------------------------------------------------------------------
 # Step 2 — Create Main Specials Folder
 # ---------------------------------------------------------------------------
@@ -559,6 +606,7 @@ def create_specials_folder(
     _apply_placeholder_replacements(
         ctx.specials_dir, ctx.month_display_folder, dry_run, logger
     )
+    _normalize_delivery_folder_names(ctx.specials_dir, ctx, dry_run, logger)
 
     if not dry_run:
         logger.info(f"  ✓  Specials folder ready: {ctx.specials_dir}")
@@ -597,6 +645,7 @@ def create_hd_folders(
         _apply_placeholder_replacements(
             ctx.hd_staging_dir, ctx.month_display_folder, dry_run, logger
         )
+        _normalize_delivery_folder_names(ctx.hd_staging_dir, ctx, dry_run, logger)
     else:
         success = False
 
@@ -610,6 +659,7 @@ def create_hd_folders(
         _apply_placeholder_replacements(
             ctx.hd_final_dir, ctx.month_display_folder, dry_run, logger
         )
+        _normalize_delivery_folder_names(ctx.hd_final_dir, ctx, dry_run, logger)
     else:
         success = False
 

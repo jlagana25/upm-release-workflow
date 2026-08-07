@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 
 from calendar import monthrange
-from datetime import datetime
+from datetime import date, datetime
 import os
 from pathlib import Path
 
@@ -332,10 +332,8 @@ DOCX_TO_PDF_METHODS: list[str] = ["libreoffice", "soffice"]
 
 class ReleaseContext:
     """
-    Derives every naming token, date range, and file/folder path for one
-    UPM release run from (year, month, part).
-
-    Part 1 covers the 1st–14th; Part 2 covers the 15th–last day.
+    Derives every naming token, date range, and file/folder path for one UPM
+    release run. Supports legacy month/part runs and exact rolling ranges.
     """
 
     def __init__(
@@ -344,6 +342,9 @@ class ReleaseContext:
         month: int,
         part: int,
         previous_month: bool = False,
+        full_month_content: bool = False,
+        range_start: date | None = None,
+        range_end: date | None = None,
     ) -> None:
         # In previous-month mode there is no Part split — the run covers the
         # full calendar month — so `part` is normalised to 1 and ignored for
@@ -351,8 +352,16 @@ class ReleaseContext:
         # reads ctx.part still works.
         if previous_month:
             part = 1
+        if previous_month and (full_month_content or range_start or range_end):
+            raise ValueError("previous-month cannot be combined with another date mode")
+        if (range_start is None) != (range_end is None):
+            raise ValueError("range_start and range_end must be supplied together")
+        if range_start is not None and (range_end - range_start).days != 13:
+            raise ValueError("date-range deliveries must cover exactly 14 inclusive days")
         if part not in (1, 2):
             raise ValueError(f"part must be 1 or 2, got {part!r}")
+        if full_month_content and part != 2:
+            raise ValueError("full_month_content requires Part 2")
         if not (1 <= month <= 12):
             raise ValueError(f"month must be 1-12, got {month!r}")
 
@@ -360,6 +369,8 @@ class ReleaseContext:
         self.month = month
         self.part = part
         self.previous_month = previous_month
+        self.full_month_content = full_month_content
+        self.is_date_range = range_start is not None
 
         run_date = datetime(year, month, 1)
 
@@ -372,31 +383,66 @@ class ReleaseContext:
         # Keep it explicitly named so it cannot collide with the normal Part 1
         # release for the same calendar month.
         self.is_full_month = previous_month
-        self.release_variant = "FULL" if self.is_full_month else f"P{self.part}"
-        self.release_id = (
-            f"UPM-{self.year_str}-{self.month_num}-{self.release_variant}"
-        )
+        if self.is_date_range:
+            assert range_start is not None and range_end is not None
+            self.release_variant = "RANGE"
+            self.release_id = f"UPM-{range_start.isoformat()}_to_{range_end.isoformat()}"
+        else:
+            self.release_variant = "FULL" if self.is_full_month else f"P{self.part}"
+            self.release_id = f"UPM-{self.year_str}-{self.month_num}-{self.release_variant}"
         # e.g. 2026-05-P1, 2026-05-P2, or 2026-05-FULL
-        self.tracklist_token = (
-            f"{self.year_str}-{self.month_num}-{self.release_variant}"
-        )
+        self.tracklist_token = self.release_id.removeprefix("UPM-")
 
         # ---- Display strings -------------------------------------------------
         # May 2026
         self.month_display = f"{self.month_name} {self.year_str}"
 
         # May 2026 Part 1, May 2026 Part 2, or May 2026 Full.
-        self.month_display_folder = (
-            f"{self.month_name} {self.year_str} Full"
-            if self.is_full_month
-            else f"{self.month_name} {self.year_str} Part {self.part}"
+        if self.is_date_range:
+            assert range_start is not None and range_end is not None
+            if range_start.year == range_end.year and range_start.month == range_end.month:
+                self.month_display_folder = (
+                    f"{range_start.strftime('%B')} {range_start.day}\u2013{range_end.day} "
+                    f"{range_start.year}"
+                )
+            elif range_start.year == range_end.year:
+                self.month_display_folder = (
+                    f"{range_start.strftime('%B')} {range_start.day}\u2013"
+                    f"{range_end.strftime('%B')} {range_end.day} {range_start.year}"
+                )
+            else:
+                self.month_display_folder = (
+                    f"{range_start.strftime('%B')} {range_start.day} {range_start.year}\u2013"
+                    f"{range_end.strftime('%B')} {range_end.day} {range_end.year}"
+                )
+        else:
+            self.month_display_folder = (
+                f"{self.month_name} {self.year_str} Full"
+                if self.is_full_month
+                else f"{self.month_name} {self.year_str} Part {self.part}"
+            )
+
+        # Exact client-facing delivery label. Part deliveries intentionally do
+        # not add "Release"; rolling date ranges use the requested plural.
+        self.client_delivery_label = (
+            f"{self.month_display_folder} Releases"
+            if self.is_date_range
+            else (
+                f"{self.month_display_folder} Release"
+                if self.is_full_month
+                else self.month_display_folder
+            )
         )
 
         # May 2026 (Part 1), May 2026 (Part 2), or May 2026 (Full).
         self.month_display_text = (
-            f"{self.month_name} {self.year_str} (Full)"
-            if self.is_full_month
-            else f"{self.month_name} {self.year_str} (Part {self.part})"
+            self.month_display_folder
+            if self.is_date_range
+            else (
+                f"{self.month_name} {self.year_str} (Full)"
+                if self.is_full_month
+                else f"{self.month_name} {self.year_str} (Part {self.part})"
+            )
         )
 
         # ---- Folder names ----------------------------------------------------
@@ -406,7 +452,11 @@ class ReleaseContext:
 
         # ---- Release date range ---------------------------------------------
         last_day = monthrange(year, month)[1]
-        if previous_month:
+        if self.is_date_range:
+            assert range_start is not None and range_end is not None
+            self.release_start = range_start.isoformat()
+            self.release_end = range_end.isoformat()
+        elif previous_month or full_month_content:
             # Full calendar month: 1st → last day.
             self.release_start = f"{self.year_str}-{self.month_num}-01"
             self.release_end   = f"{self.year_str}-{self.month_num}-{last_day:02d}"
@@ -468,7 +518,7 @@ class ReleaseContext:
             / f"SoundMouse {self.soundmouse_activation_range}_Missing.csv"
         )
 
-        _japan_folder = f"UPM Japan NTT DATA {self.month_display_folder} Release"
+        _japan_folder = self.partner_folder_name("Japan NTT DATA")
         self.japan_metadata_csv = (
             self.specials_dir
             / "3-FINAL PACKAGING"
@@ -500,12 +550,12 @@ class ReleaseContext:
 
         # ---- Step 13: Non-MainTrack cleanup paths ---------------------------
         # The Tunesat delivery folder is the primary cleanup target.
-        # CSV:    …/3-FINAL PACKAGING/Universal Production Music {mdf} Release - Tunesat/Metadata/UPM {mdf} Metadata.csv
-        # Target: …/3-FINAL PACKAGING/Universal Production Music {mdf} Release - Tunesat/Music
+        # CSV:    …/{client delivery label} - Tunesat/Metadata/UPM {mdf} Metadata.csv
+        # Target: …/{client delivery label} - Tunesat/Music
         _tunesat_root = (
             self.specials_dir
             / "3-FINAL PACKAGING"
-            / f"Universal Production Music {self.month_display_folder} Release - Tunesat"
+            / self.partner_folder_name("Tunesat")
         )
         self.cleanup_metadata_csv = (
             _tunesat_root / "Metadata" / f"UPM {self.month_display_folder} Metadata.csv"
@@ -522,7 +572,7 @@ class ReleaseContext:
         )
         self.soundexchange_final_dir = (
             self.specials_dir / "3-FINAL PACKAGING"
-            / f"Universal Production Music {self.month_display_folder} Release - SoundExchange"
+            / self.partner_folder_name("SoundExchange")
         )
 
         # ---- Partner deliverable metadata CSV/XLSX destinations -------------
@@ -578,6 +628,22 @@ class ReleaseContext:
 
         return cls(year=prev_year, month=prev_month, part=1, previous_month=True)
 
+    @classmethod
+    def for_date_range(cls, start: str | date, end: str | date) -> "ReleaseContext":
+        """Build an exact 14-day delivery context, including cross-month ranges."""
+        start_date = date.fromisoformat(start) if isinstance(start, str) else start
+        end_date = date.fromisoformat(end) if isinstance(end, str) else end
+        return cls(
+            year=start_date.year,
+            month=start_date.month,
+            part=1,
+            range_start=start_date,
+            range_end=end_date,
+        )
+
+    def partner_folder_name(self, partner: str) -> str:
+        return f"Universal Production Music {self.client_delivery_label} - {partner}"
+
     def pinned_cli_args(self) -> list[str]:
         """Return CLI arguments that recreate this exact release context.
 
@@ -585,6 +651,8 @@ class ReleaseContext:
         resolved full-month context must pass the following month when handed
         to another machine. This prevents a Full run from reopening Part 1.
         """
+        if self.is_date_range:
+            return ["--start-date", self.release_start, "--end-date", self.release_end]
         if self.is_full_month:
             if self.month == 12:
                 ref_year, ref_month = self.year + 1, 1
@@ -595,11 +663,14 @@ class ReleaseContext:
                 "--year", str(ref_year),
                 "--month", str(ref_month),
             ]
-        return [
+        args = [
             "--year", str(self.year),
             "--month", str(self.month),
             "--part", str(self.part),
         ]
+        if self.full_month_content:
+            args.append("--full-month-content")
+        return args
 
     # -------------------------------------------------------------------------
     # Internal builders
@@ -619,7 +690,7 @@ class ReleaseContext:
         fp  = self.specials_dir / "3-FINAL PACKAGING"
 
         def _r(name: str) -> Path:
-            return fp / f"Universal Production Music {mdf} Release - {name}"
+            return fp / self.partner_folder_name(name)
 
         return {
             "netmix":    _r("Netmix")    / "Metadata" / f"UPM {mdf} Metadata.csv",
@@ -632,7 +703,7 @@ class ReleaseContext:
             "soundexchange_ztunes": self.soundexchange_staging_dir / "Metadata"
                                     / "SoundExchange Universal Music - Z Tunes, Llc.xlsx",
             # JMD/TSS is delivered as an Excel workbook, not CSV.
-            "japan_jmdtss": fp / f"UPM Japan JMD and TSS {mdf} Release"
+            "japan_jmdtss": fp / self.partner_folder_name("Japan JMD and TSS")
                             / f"{mdf} UPM Japan JMD TSS Metadata.xlsx",
         }
 
@@ -643,21 +714,20 @@ class ReleaseContext:
         st  = self.specials_dir / "2-STAGING"
 
         def _r(name: str) -> Path:
-            """Universal Production Music {mdf} Release - {name}"""
-            return fp / f"Universal Production Music {mdf} Release - {name}"
+            return fp / self.partner_folder_name(name)
 
         return {
             # MP3 destinations (Step 10)
             "tunesat_mp3":      _r("Tunesat")   / "Music",
             "discovery_mp3":    _r("Discovery") / "Music" / "MP3",
-            "hd_mp3_media":     hdf / "MP3 (UDrive 2.0)" / f"Universal Production Music {mdf} Release (SM)" / "MEDIA",
+            "hd_mp3_media":     hdf / "MP3 (UDrive 2.0)" / f"Universal Production Music {self.client_delivery_label} (SM)" / "MEDIA",
 
             # WAV destinations (Step 10)
             "espn_wav":         _r("ESPN")      / "Music",
             "synchtank_wav":    _r("SynchTank") / "Music",
             "synchtank_covers": _r("SynchTank") / "Covers",
             "discovery_wav":    _r("Discovery") / "Music" / "WAV",
-            "hd_wav_media":     hdf / "WAV (UDrive 2.0)" / f"Universal Production Music {mdf} Release (SW)" / "MEDIA",
+            "hd_wav_media":     hdf / "WAV (UDrive 2.0)" / f"Universal Production Music {self.client_delivery_label} (SW)" / "MEDIA",
 
             # WAV w COVERS destinations (Step 10)
             "nbc_staging_media": st / "SME WAV 48K NBC" / "MEDIA",
@@ -667,7 +737,7 @@ class ReleaseContext:
             "exus_staging_media": st / "SME WAV ExUS" / "MEDIA",
 
             # Japan (Step 10)
-            "japan_final_media": fp / f"UPM Japan NTT DATA {mdf} Release" / "MEDIA",
+            "japan_final_media": fp / self.partner_folder_name("Japan NTT DATA") / "MEDIA",
 
             # NBC music (Steps 12.6, 12.7)
             "nbc_wav_music":    _r("NBC") / "Music" / "WAV",
@@ -734,7 +804,7 @@ class ReleaseContext:
 
         Pattern (confirmed against Tunesat example):
           Partner root: {specials_dir}/3-FINAL PACKAGING/
-                        Universal Production Music {mdf} Release - {partner}
+                        {ctx.partner_folder_name(partner)}
           Metadata CSV: {partner_root}/Metadata/UPM {mdf} Metadata.csv
           Music folder: {partner_root}/Music
 
@@ -747,7 +817,7 @@ class ReleaseContext:
         partner_root = (
             self.specials_dir
             / "3-FINAL PACKAGING"
-            / f"Universal Production Music {mdf} Release - {partner}"
+            / self.partner_folder_name(partner)
         )
         return {
             "partner":      partner,
@@ -806,6 +876,18 @@ def context_from_cli_args(args) -> "ReleaseContext":
     year  = getattr(args, "year", None)
     month = getattr(args, "month", None)
     part  = getattr(args, "part", None)
+    start = getattr(args, "start_date", None)
+    end = getattr(args, "end_date", None)
+    full_month_content = getattr(args, "full_month_content", False)
+
+    if start or end:
+        if previous or year is not None or month is not None or part is not None:
+            raise ValueError("--start-date/--end-date cannot be combined with month/part modes")
+        if not start or not end:
+            raise ValueError("--start-date and --end-date must be supplied together")
+        if full_month_content:
+            raise ValueError("--full-month-content is not valid with an exact date range")
+        return ReleaseContext.for_date_range(start, end)
 
     if previous:
         if (year is None) ^ (month is None):
@@ -825,4 +907,9 @@ def context_from_cli_args(args) -> "ReleaseContext":
             "Missing required argument(s): " + ", ".join(missing)
             + ".  (Or use --previous-month for a full-month run.)"
         )
-    return ReleaseContext(year=year, month=month, part=part)
+    return ReleaseContext(
+        year=year,
+        month=month,
+        part=part,
+        full_month_content=full_month_content,
+    )

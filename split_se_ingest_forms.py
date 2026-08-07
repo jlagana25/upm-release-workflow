@@ -12,7 +12,7 @@ SoundExchange flow for the chosen month:
     template (ISRC Ingest Form.xlsx).
   • The generated "<base name> - Part N.xlsx" workbooks are written to the
     FINAL PACKAGING SoundExchange release folder
-    (3-FINAL PACKAGING/Universal Production Music {Month} Release - SoundExchange).
+    (3-FINAL PACKAGING/{client delivery label} - SoundExchange).
 
     python3 split_se_ingest_forms.py --previous-month
     python3 split_se_ingest_forms.py --year 2026 --month 5 --part 1

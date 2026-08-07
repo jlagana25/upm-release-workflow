@@ -513,6 +513,9 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--year",  type=int)
     p.add_argument("--month", type=int)
     p.add_argument("--part",  type=int, choices=[1, 2])
+    p.add_argument("--start-date")
+    p.add_argument("--end-date")
+    p.add_argument("--full-month-content", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the remote command without connecting.")
     p.add_argument("--no-smoke", action="store_true",
@@ -535,11 +538,12 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
         return 0 if smoke_test(logger) else 1
 
     if not args.test:
-        p.error("pass --smoke-test, or --test with --year/--month/--part")
-    if args.year is None or args.month is None or args.part is None:
-        p.error("--test requires --year, --month, and --part")
-
-    ctx = ReleaseContext(year=args.year, month=args.month, part=args.part)
+        p.error("pass --smoke-test or --test with a release date mode")
+    from config import context_from_cli_args
+    try:
+        ctx = context_from_cli_args(args)
+    except ValueError as exc:
+        p.error(str(exc))
     extra: list[str] = []
     if args.unattended:
         extra.append("--unattended")

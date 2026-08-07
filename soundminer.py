@@ -2858,6 +2858,9 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--year",  type=int, default=None)
     p.add_argument("--month", type=int, default=None)
     p.add_argument("--part",  type=int, choices=[1, 2], default=None)
+    p.add_argument("--start-date")
+    p.add_argument("--end-date")
+    p.add_argument("--full-month-content", action="store_true")
 
     p.add_argument("--dry-run", action="store_true",
                    help="Log the plan and exit without touching the UI.")

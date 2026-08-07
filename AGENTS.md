@@ -9,14 +9,16 @@ the hard-won invariants that are easy to break.
 
 ## 1. What this project is
 
-A modular Python automation for Universal Production Music's **twice-monthly
+A modular Python automation for Universal Production Music's **14-day rolling
 release workflow** on macOS. One orchestrator (`upm_release_workflow.py`) runs
 **16 ordered steps** from Domo metadata exports through final partner packaging
 and the independent SoundMouse delivery.
 
-- **Part 1** of a month = releases dated the **1st–14th**.
-- **Part 2** = the **15th–end** of the month.
-- Everything is date-driven from `--year/--month/--part` (or `--previous-month`);
+- The August 2026 transition retains **Part 1 / Part 2** client labels.
+- Normal ongoing deliveries use exact inclusive 14-day date ranges and may
+  cross month boundaries.
+- Everything is date-driven from `--start-date/--end-date`, legacy
+  `--year/--month/--part`, or `--previous-month`;
   **no month/year is ever hardcoded**. Naming tokens and destination paths are all
   derived in `config.py`.
 

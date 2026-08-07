@@ -7,11 +7,11 @@ preserving the subfolder structure.
 
 Source:
     ctx.partner_dirs["nbc_wav_music"]
-        …/3-FINAL PACKAGING/Universal Production Music {mdf} Release - NBC/Music/WAV
+        …/3-FINAL PACKAGING/{ctx.partner_folder_name('NBC')}/Music/WAV
 
 Destination (mirrors the source's subfolder layout):
     ctx.partner_dirs["nbc_mp3_music"]
-        …/3-FINAL PACKAGING/Universal Production Music {mdf} Release - NBC/Music/MP3
+        …/3-FINAL PACKAGING/{ctx.partner_folder_name('NBC')}/Music/MP3
 
 Encoding:
     Codec:    libmp3lame
@@ -283,7 +283,7 @@ def convert_nbc_wav_to_mp3(
     # change can't repoint conversion at an unintended location.
     nbc_music_tail = (
         Path("3-FINAL PACKAGING")
-        / f"Universal Production Music {ctx.month_display_folder} Release - NBC"
+        / ctx.partner_folder_name("NBC")
         / "Music"
     )
     if not (str(wav_root).endswith(str(nbc_music_tail / "WAV"))

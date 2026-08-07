@@ -57,7 +57,7 @@ class SoundMouseTests(unittest.TestCase):
         self.assertEqual(part1.month_display_folder, "June 2026 Part 1")
         self.assertEqual(part2.month_display_folder, "June 2026 Part 2")
         self.assertIn(
-            "Universal Production Music June 2026 Part 1 Release - NBC",
+            "Universal Production Music June 2026 Part 1 - NBC",
             str(part1.partner_dirs["nbc_music_root"]),
         )
         self.assertEqual(
@@ -68,6 +68,34 @@ class SoundMouseTests(unittest.TestCase):
         self.assertEqual(part2.soundmouse_activation_range, "2026-06-15_to_2026-06-30")
         self.assertEqual(part1.soundmouse_tracklist_csv.name, "Soundmouse 06-01-26 to 06-15-26.csv")
         self.assertEqual(part2.soundmouse_tracklist_csv.name, "Soundmouse 06-15-26 to 07-01-26.csv")
+
+    def test_transition_full_month_and_rolling_delivery_names(self) -> None:
+        transition = ReleaseContext(2026, 8, 2, full_month_content=True)
+        self.assertEqual(transition.release_start, "2026-08-01")
+        self.assertEqual(transition.release_end, "2026-08-31")
+        self.assertEqual(
+            transition.partner_folder_name("NBC"),
+            "Universal Production Music August 2026 Part 2 - NBC",
+        )
+        self.assertIn("--full-month-content", transition.pinned_cli_args())
+
+        same_month = ReleaseContext.for_date_range("2026-09-01", "2026-09-14")
+        crossing = ReleaseContext.for_date_range("2026-09-29", "2026-10-12")
+        self.assertEqual(
+            same_month.partner_folder_name("NBC"),
+            "Universal Production Music September 1–14 2026 Releases - NBC",
+        )
+        self.assertEqual(
+            crossing.partner_folder_name("Japan NTT DATA"),
+            "Universal Production Music September 29–October 12 2026 Releases - Japan NTT DATA",
+        )
+        self.assertEqual(
+            crossing.pinned_cli_args(),
+            ["--start-date", "2026-09-29", "--end-date", "2026-10-12"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly 14"):
+            ReleaseContext.for_date_range("2026-09-01", "2026-09-15")
 
     def test_soundmouse_audio_uses_all_three_territories(self) -> None:
         ctx = ReleaseContext(2026, 6, 1, previous_month=True)

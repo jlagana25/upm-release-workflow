@@ -20,7 +20,7 @@ setting up a new machine, work through Part 2 top to bottom.
   active GUI session for the Soundminer and UniSync steps.)
 - Examples use **May 2026, Part 1** (`--year 2026 --month 5 --part 1`). Swap in your real release.
 - `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05-P1`
-- `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Part 1 Release - NBC`
+- `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Part 1 - NBC`
 - The workflow can be launched from **either machine**. On HDF1, Soundminer runs
   inline. On HDF2, Steps 11–12 are submitted to the HDF1 Aqua LaunchAgent and
   monitored through HDF1's local queue over an SSH JSON/status channel—no Screen Sharing, Enter prompt,
@@ -48,6 +48,8 @@ setting up a new machine, work through Part 2 top to bottom.
 | Dry-run a normal release (preview, no changes) | `python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --dry-run` |
 | Run a normal release, Part 1 | `python3 upm_release_workflow.py --year 2026 --month 5 --part 1` |
 | Run a normal release, Part 2 | `python3 upm_release_workflow.py --year 2026 --month 5 --part 2` |
+| August transition Part 2 (all August content) | `python3 upm_release_workflow.py --year 2026 --month 8 --part 2 --full-month-content` |
+| Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-14` |
 | Previous month (full month), auto from today | `python3 upm_release_workflow.py --previous-month` |
 | Previous month relative to a given month | `python3 upm_release_workflow.py --previous-month --year 2026 --month 6` |
 | Preview the whole run incl. non-maintrack deletions | add `--dry-run` |

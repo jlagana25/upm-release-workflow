@@ -46,6 +46,7 @@ from config import (
     REQUIRED_APPS,
     VOLUMES,
     ReleaseContext,
+    context_from_cli_args,
 )
 from logging_utils import (
     get_logger,
@@ -573,32 +574,7 @@ def run_workflow(args: argparse.Namespace) -> int:
 
     # ---- Build release context ----------------------------------------------
     try:
-        if getattr(args, "previous_month", False):
-            # Previous-month full-month run.  --year/--month optionally pin the
-            # reference month; otherwise it's relative to today.  --part is
-            # ignored.
-            if (args.year is None) ^ (args.month is None):
-                raise ValueError(
-                    "--previous-month: pass BOTH --year and --month, or "
-                    "NEITHER (to use today's date)."
-                )
-            ctx = ReleaseContext.for_previous_month(
-                year=args.year, month=args.month
-            )
-        else:
-            # Normal Part 1 / Part 2 run — year, month, and part are required.
-            missing = [
-                name for name, val in
-                (("--year", args.year), ("--month", args.month), ("--part", args.part))
-                if val is None
-            ]
-            if missing:
-                raise ValueError(
-                    "Missing required argument(s) for a normal run: "
-                    + ", ".join(missing)
-                    + ".  (Or use --previous-month for a full-month run.)"
-                )
-            ctx = ReleaseContext(year=args.year, month=args.month, part=args.part)
+        ctx = context_from_cli_args(args)
     except ValueError as exc:
         print(f"ERROR: Invalid arguments — {exc}", file=sys.stderr)
         return 1
@@ -1361,6 +1337,14 @@ def build_parser() -> argparse.ArgumentParser:
              "--month to compute it relative to a specific month instead.  "
              "Domo uses its built-in 'Previous Month' preset and all folders "
              "use explicit 'Month YYYY Full' naming.",
+    )
+    p.add_argument("--start-date", help="Exact 14-day range start (YYYY-MM-DD)")
+    p.add_argument("--end-date", help="Exact 14-day range end (YYYY-MM-DD)")
+    p.add_argument(
+        "--full-month-content",
+        action="store_true",
+        help="Use the entire calendar month while retaining the selected Part label; "
+             "intended for the August Part 2 transition delivery.",
     )
 
     # Safety flags

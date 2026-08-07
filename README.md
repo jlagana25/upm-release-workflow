@@ -81,6 +81,8 @@ code updates on HDF1.
 
 ```bash
 python3 upm_release_workflow.py --year 2026 --month 5 --part 1        # a normal release
+python3 upm_release_workflow.py --year 2026 --month 8 --part 2 --full-month-content
+python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-14
 python3 upm_release_workflow.py --previous-month                     # full prior month
 python3 upm_release_workflow.py --previous-month --dry-run           # preview, no writes
 python3 upm_release_workflow.py --list-steps                         # the canonical step list
@@ -95,11 +97,14 @@ with step results, timing, diagnostics, artifact paths, and key output counts.
 Use `--soundminer-resume` after a failed HDF1 phase; each checkpoint is trusted
 only after its destination manifest is revalidated.
 
-Release names always describe the content period. Each run has one canonical
-internal ID: `UPM-2026-07-P1`, `UPM-2026-07-P2`, or `UPM-2026-07-FULL`.
-Partner-facing folders are equally explicit, such as
-`Universal Production Music July 2026 Full Release - NBC`. A July run retains
-July naming even when processed in August.
+Internal IDs always describe the source content period. Client delivery names
+follow the delivery schedule: the transition uses `Universal Production Music
+August 2026 Part 1` and `Universal Production Music August 2026 Part 2`. From
+September 2026 onward, pass an exact 14-day range; names contain no commas, for
+example `Universal Production Music September 1–14 2026 Releases - NBC` and
+`Universal Production Music September 29–October 12 2026 Releases - NBC`.
+Cross-month ranges are supported. `--full-month-content` lets the transition
+Part 2 include all August releases without changing its Part 2 client label.
 
 MTV-Viacom is retired from the workflow. Folder setup filters any matching
 legacy folder out of the shared Specials baseline, so fresh and additively

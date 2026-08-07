@@ -73,6 +73,28 @@ class RetiredPartnerFolderTests(unittest.TestCase):
             )
             self.assertFalse(any(destination.rglob("*MTV*")))
 
+    def test_part_and_range_delivery_folder_names_are_normalized(self):
+        cases = [
+            (
+                config.ReleaseContext(2026, 8, 1),
+                "Universal Production Music August 2026 Part 1 - NBC",
+            ),
+            (
+                config.ReleaseContext.for_date_range("2026-09-29", "2026-10-12"),
+                "Universal Production Music September 29–October 12 2026 Releases - NBC",
+            ),
+        ]
+        for ctx, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                (root / f"Universal Production Music {ctx.month_display_folder} Release - NBC").mkdir()
+                (root / f"UPM Japan NTT DATA {ctx.month_display_folder} Release").mkdir()
+                folder_setup._normalize_delivery_folder_names(root, ctx, False, self.logger)
+                self.assertTrue((root / expected).is_dir())
+                self.assertTrue(
+                    (root / ctx.partner_folder_name("Japan NTT DATA")).is_dir()
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
