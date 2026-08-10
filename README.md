@@ -128,6 +128,11 @@ The smoke test is offline (no volumes needed) and runs in seconds. Run it after
 every edit — it catches broken imports, arg/step-registry drift, and other
 refactor breakage before they fail mid-release.
 
+Step 16 requires Microsoft Excel on the pipeline Mac. SoundMouse rejects the
+otherwise-valid inline-string XLSX packages produced by Python libraries, so
+the workflow clears Domo formatting and performs an unattended native Excel
+save before installing each metadata workbook.
+
 ## Version control & two-machine sync
 
 This project is tracked in git so changes are reviewable and a bad edit is one

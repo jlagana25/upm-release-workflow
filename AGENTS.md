@@ -46,6 +46,9 @@ validation signal:
   (Hard Drive Updates). They are not present in the sandbox.
 - **Domo exports** — Steps 1 and 16 drive an authenticated Domo browser session via
   Playwright. Needs credentials and interactive login.
+- **Native Excel normalization** — Step 16 opens and saves cleaned SoundMouse
+  metadata through Microsoft Excel because the SoundMouse uploader rejects
+  openpyxl's inline-string serialization.
 - **DOCX→PDF** — Step 4 shells out to LibreOffice/Word.
 
 What you **can** do here (this is where you add value):

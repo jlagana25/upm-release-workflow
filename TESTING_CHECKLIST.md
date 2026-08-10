@@ -37,6 +37,12 @@ setting up a new machine, work through Part 2 top to bottom.
 > run `--setup domo` and `--setup unisync`; credentials are entered only into
 > Microsoft/UniSync, never into this workflow. See `AUTHENTICATION.md`.
 
+> **SoundMouse Excel requirement:** Step 16 performs an unattended native Excel
+> save after clearing Domo formatting. Verify Microsoft Excel is installed on
+> the pipeline Mac. A finished metadata workbook must contain
+> `xl/sharedStrings.xml` and no `t="inlineStr"` worksheet cells; this is required
+> by the SoundMouse uploader even though Excel itself accepts either form.
+
 ---
 
 # Part 1 — Running the Workflow

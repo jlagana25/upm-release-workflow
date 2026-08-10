@@ -7,9 +7,11 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from config import ReleaseContext
 from soundmouse import (
+    _assert_soundmouse_xlsx_compatibility,
     _partition_soundmouse_rows,
     _soundmouse_unisync_jobs,
     activation_ranges_from_tracklist,
@@ -191,7 +193,12 @@ class SoundMouseTests(unittest.TestCase):
             workbook.save(path)
             workbook.close()
 
-            strip_xlsx_formatting(path)
+            with patch("soundmouse._normalize_xlsx_with_excel") as normalize:
+                strip_xlsx_formatting(path)
+            normalize.assert_called_once()
+            self.assertTrue(
+                str(normalize.call_args.args[0]).endswith(".unformatted.tmp.xlsx")
+            )
 
             cleaned = load_workbook(path, data_only=False)
             cleaned_sheet = cleaned["Metadata"]
@@ -212,6 +219,19 @@ class SoundMouseTests(unittest.TestCase):
             with ZipFile(path) as package:
                 sheet_xml = package.read("xl/worksheets/sheet1.xml")
             self.assertNotIn(b'pane="bottomLeft"', sheet_xml)
+
+    def test_soundmouse_rejects_openpyxl_inline_string_packages(self) -> None:
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "inline-strings.xlsx"
+            workbook = Workbook()
+            workbook.active["A1"] = "SoundMouse header"
+            workbook.save(path)
+            workbook.close()
+
+            with self.assertRaisesRegex(ValueError, "shared-string table"):
+                _assert_soundmouse_xlsx_compatibility(path)
 
     def test_metadata_validation_checks_audio_and_covers(self) -> None:
         from openpyxl import Workbook

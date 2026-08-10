@@ -17,9 +17,11 @@ import csv
 import logging
 import re
 import shutil
+import subprocess
 import tempfile
 from copy import copy
 from pathlib import Path
+from zipfile import ZipFile
 
 from config import (
     SOUNDMOUSE_BASE,
@@ -72,7 +74,9 @@ def strip_xlsx_formatting(path: Path) -> None:
     names, and workbook structure are retained.
 
     The cleaned workbook is saved beside the download first and then atomically
-    replaces it, so a failed save cannot destroy the original export.
+    replaces it, so a failed save cannot destroy the original export. A final
+    native Excel save is required because SoundMouse rejects openpyxl's valid
+    but non-Excel ``inlineStr`` serialization.
     """
     from openpyxl import Workbook, load_workbook
     from openpyxl.worksheet.dimensions import SheetFormatProperties
@@ -127,11 +131,77 @@ def strip_xlsx_formatting(path: Path) -> None:
                     )
         finally:
             check.close()
+        _normalize_xlsx_with_excel(temp_path)
         temp_path.replace(path)
     finally:
         workbook.close()
         if temp_path.exists():
             temp_path.unlink()
+
+def _normalize_xlsx_with_excel(path: Path) -> None:
+    """Native-save an XLSX so SoundMouse receives Excel shared strings.
+
+    Opening and saving is fully unattended. It reproduces the package rewrite
+    performed when an operator chooses Clear Formats and saves in Excel, without
+    relying on menu coordinates or changing workbook values.
+    """
+    excel_app = Path("/Applications/Microsoft Excel.app")
+    if not excel_app.is_dir():
+        raise RuntimeError(
+            "Microsoft Excel is required to finalize SoundMouse metadata; "
+            "the workbook was not left in an upload-incompatible state"
+        )
+
+    script = r'''
+on run argv
+    set workbookPath to item 1 of argv
+    tell application "Microsoft Excel"
+        open workbook workbook file name workbookPath
+        set targetWorkbook to active workbook
+        save targetWorkbook
+        close targetWorkbook saving no
+    end tell
+end run
+'''
+    # Excel can read Pegasus files but its sandboxed save may silently leave a
+    # file on the removable volume unchanged. Normalize a local copy, validate
+    # it, then atomically install it beside the original.
+    with tempfile.TemporaryDirectory(prefix="soundmouse_excel_") as temp_dir:
+        local_path = Path(temp_dir) / path.name.lstrip(".")
+        shutil.copy2(path, local_path)
+        result = subprocess.run(
+            ["osascript", "-e", script, str(local_path)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown Excel error"
+            raise RuntimeError(f"Excel could not finalize {path.name}: {detail}")
+
+        _assert_soundmouse_xlsx_compatibility(local_path)
+        install_temp = path.with_name(f".{path.name}.excel-normalized.tmp")
+        try:
+            shutil.copy2(local_path, install_temp)
+            install_temp.replace(path)
+        finally:
+            if install_temp.exists():
+                install_temp.unlink()
+
+
+def _assert_soundmouse_xlsx_compatibility(path: Path) -> None:
+    """Reject packages using string storage known to fail SoundMouse upload."""
+    with ZipFile(path) as package:
+        names = set(package.namelist())
+        if "xl/sharedStrings.xml" not in names:
+            raise ValueError(f"{path.name} has no Excel shared-string table")
+        for name in names:
+            if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
+                if b't="inlineStr"' in package.read(name):
+                    raise ValueError(
+                        f"{path.name} still contains inline strings rejected by SoundMouse"
+                    )
 
 
 def _file_key(value: object) -> str:
@@ -486,7 +556,10 @@ def _export_domo_cards(
                     domo._export_card(page, card, output, ctx, logger)
                     if card.get("strip_formatting"):
                         strip_xlsx_formatting(output)
-                        logger.info(f"  Removed XLSX formatting: {output.name}")
+                        logger.info(
+                            f"  Removed XLSX formatting and normalized with "
+                            f"Excel: {output.name}"
+                        )
                 except Exception as exc:  # browser errors are logged per card
                     logger.error(f"  ✗ {card['description']} failed: {exc}")
                     ok = False
