@@ -76,6 +76,7 @@ def strip_xlsx_formatting(path: Path) -> None:
     """
     from openpyxl import Workbook, load_workbook
     from openpyxl.worksheet.dimensions import SheetFormatProperties
+    from openpyxl.worksheet.views import Selection
 
     workbook = load_workbook(path)
     default_cell = Workbook().active["A1"]
@@ -95,6 +96,13 @@ def strip_xlsx_formatting(path: Path) -> None:
         worksheet.sheet_format = SheetFormatProperties()
         worksheet.conditional_formatting._cf_rules.clear()
         worksheet.freeze_panes = None
+        # Clearing freeze_panes does not clear the pane identifier on Domo's
+        # existing selection.  That produces a contradictory sheet view
+        # (selection pane="bottomLeft" with no <pane>) which Excel repairs on
+        # open.  Reset to one ordinary selection after removing the pane.
+        worksheet.sheet_view.selection = [
+            Selection(activeCell="A1", sqref="A1")
+        ]
         worksheet.sheet_view.showGridLines = True
         worksheet.sheet_view.zoomScale = None
         worksheet.sheet_view.zoomScaleNormal = None
@@ -104,6 +112,21 @@ def strip_xlsx_formatting(path: Path) -> None:
     temp_path = path.with_name(f".{path.stem}.unformatted.tmp.xlsx")
     try:
         workbook.save(temp_path)
+        # Reopen the serialized package and enforce the view invariant before
+        # replacing the valid Domo download. openpyxl itself tolerates the
+        # stale selection state, but desktop Excel does not.
+        check = load_workbook(temp_path, read_only=False, data_only=False)
+        try:
+            for worksheet in check.worksheets:
+                if worksheet.sheet_view.pane is None and any(
+                    selection.pane is not None
+                    for selection in worksheet.sheet_view.selection
+                ):
+                    raise ValueError(
+                        f"invalid pane selection remained in {worksheet.title!r}"
+                    )
+        finally:
+            check.close()
         temp_path.replace(path)
     finally:
         workbook.close()

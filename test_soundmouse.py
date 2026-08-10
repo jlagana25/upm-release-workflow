@@ -167,6 +167,7 @@ class SoundMouseTests(unittest.TestCase):
             self.assertEqual(metadata_codes_from_bucket(bucket), ["02", "07", "08"])
 
     def test_xlsx_formatting_is_removed_but_values_and_formulas_remain(self) -> None:
+        from zipfile import ZipFile
         from openpyxl import Workbook, load_workbook
         from openpyxl.formatting.rule import CellIsRule
         from openpyxl.styles import Font, PatternFill
@@ -201,8 +202,16 @@ class SoundMouseTests(unittest.TestCase):
             self.assertNotIn("A", cleaned_sheet.column_dimensions)
             self.assertNotIn(1, cleaned_sheet.row_dimensions)
             self.assertIsNone(cleaned_sheet.freeze_panes)
+            self.assertTrue(all(
+                selection.pane is None
+                for selection in cleaned_sheet.sheet_view.selection
+            ))
             self.assertEqual(len(cleaned_sheet.conditional_formatting), 0)
             cleaned.close()
+
+            with ZipFile(path) as package:
+                sheet_xml = package.read("xl/worksheets/sheet1.xml")
+            self.assertNotIn(b'pane="bottomLeft"', sheet_xml)
 
     def test_metadata_validation_checks_audio_and_covers(self) -> None:
         from openpyxl import Workbook
