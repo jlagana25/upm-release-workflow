@@ -7,18 +7,18 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from config import ReleaseContext
 from soundmouse import (
     _assert_soundmouse_xlsx_compatibility,
+    _domo_configs,
     _partition_soundmouse_rows,
     _soundmouse_unisync_jobs,
     activation_ranges_from_tracklist,
     create_soundmouse_directories,
+    convert_soundmouse_csv_to_xlsx,
     install_soundmouse_metadata,
     metadata_codes_from_bucket,
-    strip_xlsx_formatting,
     validate_soundmouse_delivery,
 )
 
@@ -168,57 +168,45 @@ class SoundMouseTests(unittest.TestCase):
             )
             self.assertEqual(metadata_codes_from_bucket(bucket), ["02", "07", "08"])
 
-    def test_xlsx_formatting_is_removed_but_values_and_formulas_remain(self) -> None:
-        from zipfile import ZipFile
-        from openpyxl import Workbook, load_workbook
-        from openpyxl.formatting.rule import CellIsRule
-        from openpyxl.styles import Font, PatternFill
+    def test_metadata_cards_export_csv_then_target_xlsx(self) -> None:
+        ctx = ReleaseContext(2026, 7, 1, previous_month=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            card = _domo_configs(ctx, ["01"], metadata_dir=Path(tmp))[0]
+            self.assertEqual(card["format"], "csv")
+            self.assertEqual(card["download_format"], "csv")
+            self.assertEqual(card["output_fn"](ctx).suffix, ".csv")
+            self.assertEqual(card["xlsx_output_fn"](ctx).suffix, ".xlsx")
+
+    def test_csv_conversion_validates_shape_and_installs_xlsx(self) -> None:
+        from openpyxl import load_workbook
 
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "metadata.xlsx"
-            workbook = Workbook()
-            sheet = workbook.active
-            sheet.title = "Metadata"
-            sheet["A1"] = "Title"
-            sheet["A1"].font = Font(bold=True, color="FFFFFF")
-            sheet["A1"].fill = PatternFill("solid", fgColor="4472C4")
-            sheet["A2"] = 5
-            sheet["B2"] = "=A2*2"
-            sheet.column_dimensions["A"].width = 30
-            sheet.row_dimensions[1].height = 24
-            sheet.freeze_panes = "A2"
-            sheet.conditional_formatting.add(
-                "A2", CellIsRule(operator="greaterThan", formula=["0"])
-            )
-            workbook.save(path)
+            root = Path(tmp)
+            csv_path = root / "metadata.csv"
+            xlsx_path = root / "metadata.xlsx"
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Code", "Title", "Formula-like", "Long ID"])
+                writer.writerow(["001", "Text, with comma", "=1+1", "12345678901234567890"])
+
+            convert_soundmouse_csv_to_xlsx(csv_path, xlsx_path)
+            _assert_soundmouse_xlsx_compatibility(xlsx_path)
+
+            workbook = load_workbook(xlsx_path, data_only=False)
+            sheet = workbook["Metadata"]
+            self.assertEqual(sheet["A2"].value, "001")
+            self.assertEqual(sheet["B2"].value, "Text, with comma")
+            self.assertEqual(sheet["C2"].value, "=1+1")
+            self.assertEqual(sheet["D2"].value, "12345678901234567890")
             workbook.close()
 
-            with patch("soundmouse._normalize_xlsx_with_excel") as normalize:
-                strip_xlsx_formatting(path)
-            normalize.assert_called_once()
-            self.assertTrue(
-                str(normalize.call_args.args[0]).endswith(".unformatted.tmp.xlsx")
-            )
-
-            cleaned = load_workbook(path, data_only=False)
-            cleaned_sheet = cleaned["Metadata"]
-            self.assertEqual(cleaned_sheet["A1"].value, "Title")
-            self.assertEqual(cleaned_sheet["B2"].value, "=A2*2")
-            self.assertEqual(cleaned_sheet["A1"].style_id, 0)
-            self.assertEqual(cleaned_sheet["A2"].number_format, "General")
-            self.assertNotIn("A", cleaned_sheet.column_dimensions)
-            self.assertNotIn(1, cleaned_sheet.row_dimensions)
-            self.assertIsNone(cleaned_sheet.freeze_panes)
-            self.assertTrue(all(
-                selection.pane is None
-                for selection in cleaned_sheet.sheet_view.selection
-            ))
-            self.assertEqual(len(cleaned_sheet.conditional_formatting), 0)
-            cleaned.close()
-
-            with ZipFile(path) as package:
-                sheet_xml = package.read("xl/worksheets/sheet1.xml")
-            self.assertNotIn(b'pane="bottomLeft"', sheet_xml)
+    def test_csv_conversion_rejects_ragged_rows_before_excel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "bad.csv"
+            csv_path.write_text("A,B\n1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "row 2"):
+                convert_soundmouse_csv_to_xlsx(csv_path, root / "bad.xlsx")
 
     def test_soundmouse_rejects_openpyxl_inline_string_packages(self) -> None:
         from openpyxl import Workbook

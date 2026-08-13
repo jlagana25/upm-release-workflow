@@ -11,7 +11,7 @@ Confirmed working UI flow:
   7. Close picker with page.mouse.click() on neutral card body area
      — DO NOT use Tab or Enter; both navigate away from the card detail view
   8. Wait for card to reload (networkidle)
-  9. Click share icon → Send / Export → Excel  (confirmed enabled on card detail)
+  9. Click share icon → Send / Export → Excel or CSV
   10. Save .xlsx → convert to .csv → filter to Part 1/2 window
 
 Card map:
@@ -579,18 +579,30 @@ def _export_card(
             f"  Current URL: {_safe_url_for_log(page.url)}"
         )
 
-    # 4. Download (always an XLSX from Domo) → save as XLSX or convert to CSV
-    xlsx_temp = _trigger_excel_download(page, card["description"], logger)
+    # 4. Download directly as CSV when requested (SoundMouse metadata), or use
+    #    the established Excel path for the other cards.
+    direct_csv = card.get("download_format") == "csv"
+    downloaded = _trigger_download(
+        page,
+        card["description"],
+        logger,
+        export_format="CSV" if direct_csv else "Excel",
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if card.get("format", "csv") == "xlsx":
+    if direct_csv:
+        if output_path.exists():
+            output_path.unlink()
+        shutil.move(str(downloaded), str(output_path))
+        logger.info(f"     Saved CSV → {output_path.name}")
+    elif card.get("format", "csv") == "xlsx":
         # Keep the workbook as-is (cross-filesystem move: temp is in Downloads,
         # output on the Pegasus volume).
         if output_path.exists():
             output_path.unlink()
-        shutil.move(str(xlsx_temp), str(output_path))
+        shutil.move(str(downloaded), str(output_path))
         logger.info(f"     Saved XLSX → {output_path.name}")
     else:
-        _xlsx_to_csv(xlsx_temp, output_path, logger)
+        _xlsx_to_csv(downloaded, output_path, logger)
 
 
 def _navigate_to_card(
@@ -872,13 +884,15 @@ def _wait_for_enabled(
     logger.warning(f"     '{selector}' not enabled after {timeout}s — clicking anyway.")
 
 
-def _trigger_excel_download(
+def _trigger_download(
     page,
     description: str,
     logger: logging.Logger,
+    *,
+    export_format: str = "Excel",
 ) -> Path:
     """
-    Share icon → Send / Export → Excel.
+    Share icon → Send / Export → requested file format.
     'Send / Export' is confirmed enabled when on the card detail page.
     """
     logger.info("     Opening share menu…")
@@ -898,15 +912,27 @@ def _trigger_excel_download(
     page.locator("text=Send / Export").click(timeout=10_000)
     time.sleep(EXPORT_WAIT)
 
-    logger.info("     Downloading Excel…")
+    if export_format not in {"CSV", "Excel"}:
+        raise ValueError(f"Unsupported Domo export format: {export_format}")
+    logger.info(f"     Downloading {export_format}…")
     with page.expect_download(timeout=DOWNLOAD_TIMEOUT) as dl_info:
-        page.locator("text=Excel").click(timeout=10_000)
+        page.get_by_text(export_format, exact=True).click(timeout=10_000)
 
     download  = dl_info.value
-    temp_path = TEMP_DOWNLOAD_DIR / f"_temp_{description.replace(' ', '_')}.xlsx"
+    suffix = ".csv" if export_format == "CSV" else ".xlsx"
+    temp_path = TEMP_DOWNLOAD_DIR / f"_temp_{description.replace(' ', '_')}{suffix}"
     download.save_as(str(temp_path))
     logger.debug(f"       Temp: {temp_path}")
     return temp_path
+
+
+def _trigger_excel_download(
+    page,
+    description: str,
+    logger: logging.Logger,
+) -> Path:
+    """Backward-compatible wrapper for callers/tests expecting Excel."""
+    return _trigger_download(page, description, logger, export_format="Excel")
 
 
 # ---------------------------------------------------------------------------

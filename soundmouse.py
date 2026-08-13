@@ -17,11 +17,10 @@ import csv
 import logging
 import re
 import shutil
-import subprocess
 import tempfile
-from copy import copy
+import xml.etree.ElementTree as ET
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from config import (
     SOUNDMOUSE_BASE,
@@ -65,129 +64,159 @@ def metadata_filename(code: str) -> str:
     return f"SoundMouseMetadata {code} - {label}.xlsx"
 
 
-def strip_xlsx_formatting(path: Path) -> None:
-    """Remove presentation formatting while preserving workbook cell values.
+def metadata_csv_filename(code: str) -> str:
+    return Path(metadata_filename(code)).with_suffix(".csv").name
 
-    SoundMouse requires real XLSX workbooks, but not Domo's fonts, fills,
-    borders, alignments, number formats, row/column sizing, conditional
-    formatting, or frozen views.  Merged ranges, formulas, values, worksheet
-    names, and workbook structure are retained.
 
-    The cleaned workbook is saved beside the download first and then atomically
-    replaces it, so a failed save cannot destroy the original export. A final
-    native Excel save is required because SoundMouse rejects openpyxl's valid
-    but non-Excel ``inlineStr`` serialization.
+def convert_soundmouse_csv_to_xlsx(csv_path: Path, xlsx_path: Path) -> None:
+    """Convert a Domo CSV export into a clean, upload-compatible XLSX.
+
+    Every CSV field is written as literal text, so leading zeroes, long IDs,
+    and values beginning with ``=`` survive unchanged. The XLSX package is then
+    normalized to use Excel's shared-string table, which the SoundMouse uploader
+    requires, without automating Excel or touching any open workbooks.
     """
-    from openpyxl import Workbook, load_workbook
-    from openpyxl.worksheet.dimensions import SheetFormatProperties
-    from openpyxl.worksheet.views import Selection
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"SoundMouse CSV export is missing: {csv_path}")
 
-    workbook = load_workbook(path)
-    default_cell = Workbook().active["A1"]
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        rows = list(reader)
+    if len(rows) < 2 or not rows[0]:
+        raise ValueError(f"SoundMouse CSV has no data rows: {csv_path}")
+    expected_columns = len(rows[0])
+    for row_number, row in enumerate(rows[1:], start=2):
+        if len(row) != expected_columns:
+            raise ValueError(
+                f"SoundMouse CSV row {row_number} has {len(row)} columns; "
+                f"expected {expected_columns}: {csv_path}"
+            )
 
-    for worksheet in workbook.worksheets:
-        for row in worksheet.iter_rows():
-            for cell in row:
-                cell.font = copy(default_cell.font)
-                cell.fill = copy(default_cell.fill)
-                cell.border = copy(default_cell.border)
-                cell.alignment = copy(default_cell.alignment)
-                cell.number_format = "General"
-                cell.protection = copy(default_cell.protection)
-
-        worksheet.row_dimensions.clear()
-        worksheet.column_dimensions.clear()
-        worksheet.sheet_format = SheetFormatProperties()
-        worksheet.conditional_formatting._cf_rules.clear()
-        worksheet.freeze_panes = None
-        # Clearing freeze_panes does not clear the pane identifier on Domo's
-        # existing selection.  That produces a contradictory sheet view
-        # (selection pane="bottomLeft" with no <pane>) which Excel repairs on
-        # open.  Reset to one ordinary selection after removing the pane.
-        worksheet.sheet_view.selection = [
-            Selection(activeCell="A1", sqref="A1")
-        ]
-        worksheet.sheet_view.showGridLines = True
-        worksheet.sheet_view.zoomScale = None
-        worksheet.sheet_view.zoomScaleNormal = None
-        for table in worksheet.tables.values():
-            table.tableStyleInfo = None
-
-    temp_path = path.with_name(f".{path.stem}.unformatted.tmp.xlsx")
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = xlsx_path.with_name(f".{xlsx_path.name}.from-csv.tmp.xlsx")
+    generated = temporary.with_name(f".{xlsx_path.name}.generated.tmp.xlsx")
     try:
-        workbook.save(temp_path)
-        # Reopen the serialized package and enforce the view invariant before
-        # replacing the valid Domo download. openpyxl itself tolerates the
-        # stale selection state, but desktop Excel does not.
-        check = load_workbook(temp_path, read_only=False, data_only=False)
-        try:
-            for worksheet in check.worksheets:
-                if worksheet.sheet_view.pane is None and any(
-                    selection.pane is not None
-                    for selection in worksheet.sheet_view.selection
-                ):
-                    raise ValueError(
-                        f"invalid pane selection remained in {worksheet.title!r}"
-                    )
-        finally:
-            check.close()
-        _normalize_xlsx_with_excel(temp_path)
-        temp_path.replace(path)
-    finally:
+        from openpyxl import Workbook
+        from openpyxl.cell import WriteOnlyCell
+
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet("Metadata")
+        for row in rows:
+            cells = []
+            for value in row:
+                cell = WriteOnlyCell(worksheet, value=value)
+                cell.data_type = "s"
+                cells.append(cell)
+            worksheet.append(cells)
+        workbook.save(generated)
         workbook.close()
-        if temp_path.exists():
-            temp_path.unlink()
 
-def _normalize_xlsx_with_excel(path: Path) -> None:
-    """Native-save an XLSX so SoundMouse receives Excel shared strings.
+        _rewrite_inline_strings_as_shared(generated, temporary)
+        _assert_soundmouse_xlsx_compatibility(temporary)
+        temporary.replace(xlsx_path)
+        _assert_soundmouse_xlsx_compatibility(xlsx_path)
+    finally:
+        if generated.exists():
+            generated.unlink()
+        if temporary.exists():
+            temporary.unlink()
 
-    Opening and saving is fully unattended. It reproduces the package rewrite
-    performed when an operator chooses Clear Formats and saves in Excel, without
-    relying on menu coordinates or changing workbook values.
-    """
-    excel_app = Path("/Applications/Microsoft Excel.app")
-    if not excel_app.is_dir():
-        raise RuntimeError(
-            "Microsoft Excel is required to finalize SoundMouse metadata; "
-            "the workbook was not left in an upload-incompatible state"
+
+def _rewrite_inline_strings_as_shared(source: Path, destination: Path) -> None:
+    """Rewrite openpyxl inline strings into an OOXML shared-string table."""
+    spreadsheet_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    relationships_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    content_types_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+    ET.register_namespace("", spreadsheet_ns)
+    ET.register_namespace("", relationships_ns)
+
+    shared_values: list[str] = []
+    shared_indexes: dict[str, int] = {}
+    total_strings = 0
+
+    with ZipFile(source) as input_package:
+        members = {name: input_package.read(name) for name in input_package.namelist()}
+
+    for name, payload in list(members.items()):
+        if not (name.startswith("xl/worksheets/sheet") and name.endswith(".xml")):
+            continue
+        root = ET.fromstring(payload)
+        changed = False
+        for cell in root.iter(f"{{{spreadsheet_ns}}}c"):
+            if cell.get("t") != "inlineStr":
+                continue
+            inline = cell.find(f"{{{spreadsheet_ns}}}is")
+            value = "" if inline is None else "".join(inline.itertext())
+            index = shared_indexes.get(value)
+            if index is None:
+                index = len(shared_values)
+                shared_indexes[value] = index
+                shared_values.append(value)
+            total_strings += 1
+            for child in list(cell):
+                cell.remove(child)
+            cell.set("t", "s")
+            ET.SubElement(cell, f"{{{spreadsheet_ns}}}v").text = str(index)
+            changed = True
+        if changed:
+            members[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    if not total_strings:
+        raise ValueError(f"No string cells found while converting {source.name}")
+
+    shared_root = ET.Element(
+        f"{{{spreadsheet_ns}}}sst",
+        {"count": str(total_strings), "uniqueCount": str(len(shared_values))},
+    )
+    for value in shared_values:
+        item = ET.SubElement(shared_root, f"{{{spreadsheet_ns}}}si")
+        text = ET.SubElement(item, f"{{{spreadsheet_ns}}}t")
+        if value[:1].isspace() or value[-1:].isspace():
+            text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        text.text = value
+    members["xl/sharedStrings.xml"] = ET.tostring(
+        shared_root, encoding="utf-8", xml_declaration=True
+    )
+
+    relationships = ET.fromstring(members["xl/_rels/workbook.xml.rels"])
+    relationship_type = (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"
+    )
+    if not any(item.get("Type") == relationship_type for item in relationships):
+        used_ids = {item.get("Id", "") for item in relationships}
+        next_id = 1
+        while f"rId{next_id}" in used_ids:
+            next_id += 1
+        ET.SubElement(
+            relationships,
+            f"{{{relationships_ns}}}Relationship",
+            {"Id": f"rId{next_id}", "Type": relationship_type, "Target": "sharedStrings.xml"},
         )
+    members["xl/_rels/workbook.xml.rels"] = ET.tostring(
+        relationships, encoding="utf-8", xml_declaration=True
+    )
 
-    script = r'''
-on run argv
-    set workbookPath to item 1 of argv
-    tell application "Microsoft Excel"
-        open workbook workbook file name workbookPath
-        set targetWorkbook to active workbook
-        save targetWorkbook
-        close targetWorkbook saving no
-    end tell
-end run
-'''
-    # Excel can read Pegasus files but its sandboxed save may silently leave a
-    # file on the removable volume unchanged. Normalize a local copy, validate
-    # it, then atomically install it beside the original.
-    with tempfile.TemporaryDirectory(prefix="soundmouse_excel_") as temp_dir:
-        local_path = Path(temp_dir) / path.name.lstrip(".")
-        shutil.copy2(path, local_path)
-        result = subprocess.run(
-            ["osascript", "-e", script, str(local_path)],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
+    content_types = ET.fromstring(members["[Content_Types].xml"])
+    part_name = "/xl/sharedStrings.xml"
+    if not any(item.get("PartName") == part_name for item in content_types):
+        ET.SubElement(
+            content_types,
+            f"{{{content_types_ns}}}Override",
+            {
+                "PartName": part_name,
+                "ContentType": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sharedStrings+xml"
+                ),
+            },
         )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown Excel error"
-            raise RuntimeError(f"Excel could not finalize {path.name}: {detail}")
+    members["[Content_Types].xml"] = ET.tostring(
+        content_types, encoding="utf-8", xml_declaration=True
+    )
 
-        _assert_soundmouse_xlsx_compatibility(local_path)
-        install_temp = path.with_name(f".{path.name}.excel-normalized.tmp")
-        try:
-            shutil.copy2(local_path, install_temp)
-            install_temp.replace(path)
-        finally:
-            if install_temp.exists():
-                install_temp.unlink()
+    with ZipFile(destination, "w", compression=ZIP_DEFLATED) as output_package:
+        for name, payload in members.items():
+            output_package.writestr(name, payload)
 
 
 def _assert_soundmouse_xlsx_compatibility(path: Path) -> None:
@@ -497,10 +526,13 @@ def _domo_configs(
             "page_id": SOUNDMOUSE_DOMO_PAGE_ID,
             "description": f"SoundMouse Metadata {code}",
             "output_fn": (
+                lambda _ctx, c=code: output_dir / metadata_csv_filename(c)
+            ),
+            "format": "csv",
+            "download_format": "csv",
+            "xlsx_output_fn": (
                 lambda _ctx, c=code: output_dir / metadata_filename(c)
             ),
-            "format": "xlsx",
-            "strip_formatting": True,
         }
         for code in codes
     ]
@@ -554,11 +586,14 @@ def _export_domo_cards(
                 logger.info(f"  Exporting {card['description']} → {output}")
                 try:
                     domo._export_card(page, card, output, ctx, logger)
-                    if card.get("strip_formatting"):
-                        strip_xlsx_formatting(output)
+                    xlsx_output_fn = card.get("xlsx_output_fn")
+                    if xlsx_output_fn:
+                        xlsx_output = xlsx_output_fn(ctx)
+                        convert_soundmouse_csv_to_xlsx(output, xlsx_output)
+                        output.unlink()
                         logger.info(
-                            f"  Removed XLSX formatting and normalized with "
-                            f"Excel: {output.name}"
+                            f"  Converted CSV → upload-compatible XLSX: "
+                            f"{xlsx_output.name}"
                         )
                 except Exception as exc:  # browser errors are logged per card
                     logger.error(f"  ✗ {card['description']} failed: {exc}")

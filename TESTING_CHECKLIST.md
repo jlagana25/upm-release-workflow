@@ -37,9 +37,8 @@ setting up a new machine, work through Part 2 top to bottom.
 > run `--setup domo` and `--setup unisync`; credentials are entered only into
 > Microsoft/UniSync, never into this workflow. See `AUTHENTICATION.md`.
 
-> **SoundMouse Excel requirement:** Step 16 performs an unattended native Excel
-> save after clearing Domo formatting. Verify Microsoft Excel is installed on
-> the pipeline Mac. A finished metadata workbook must contain
+> **SoundMouse workbook requirement:** Step 16 exports metadata as CSV and
+> converts it to XLSX without controlling Excel. A finished workbook must contain
 > `xl/sharedStrings.xml` and no `t="inlineStr"` worksheet cells; this is required
 > by the SoundMouse uploader even though Excel itself accepts either form.
 
@@ -638,8 +637,8 @@ workbooks selected by the bucket.
     sends the remaining rows to Rest of World, and uses Japan only as a
     fallback. All passes share the same `MEDIA` directory.
   - Metadata contains only the `SoundMouseMetadata NN - … .xlsx` files named
-    by the SoundMouse bucket card. Each remains an XLSX workbook, but its Domo
-    formatting is removed; values, formulas, and worksheet names are retained.
+    by the SoundMouse bucket card. Each card is downloaded as CSV first and
+    converted to a clean XLSX; no Domo workbook formatting is carried forward.
   - The final SoundMouse validation unions every `Filename` and album-artwork
     filename across those selected workbooks and confirms they exist under
     `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in

@@ -46,9 +46,9 @@ validation signal:
   (Hard Drive Updates). They are not present in the sandbox.
 - **Domo exports** — Steps 1 and 16 drive an authenticated Domo browser session via
   Playwright. Needs credentials and interactive login.
-- **Native Excel normalization** — Step 16 opens and saves cleaned SoundMouse
-  metadata through Microsoft Excel because the SoundMouse uploader rejects
-  openpyxl's inline-string serialization.
+- **SoundMouse CSV→XLSX normalization** — Step 16 exports metadata cards as CSV,
+  builds clean XLSX workbooks with an OOXML shared-string table
+  because the SoundMouse uploader rejects inline-string serialization.
 - **DOCX→PDF** — Step 4 shells out to LibreOffice/Word.
 
 What you **can** do here (this is where you add value):
@@ -146,10 +146,9 @@ so the finalization steps are **not** blocked.
 Step **16 is independent of the Step 9 gate**. It exports the SoundMouse
 tracklist and bucket, builds one directory from the resolved workflow start and
 end dates, runs additive US/Rest-of-World/Japan WAV UniSync jobs into `MEDIA`,
-downloads flat covers, and exports only metadata workbooks selected by bucket
-codes 01–10. Those metadata exports remain XLSX,
-but Step 16 removes their Domo workbook formatting after download while keeping
-cell values, formulas, worksheet names, and workbook structure. Raw Domo
+downloads flat covers, and exports only metadata cards selected by bucket
+codes 01–10. Those metadata cards are downloaded as CSV and converted into
+clean XLSX workbooks, so Domo formatting is never carried forward. Raw Domo
 `ActivationRange` values never control or split the delivery directory. Its final gate
 unions the audio and cover filenames across every selected metadata workbook,
 checks them against `MEDIA` and `Covers`, writes an auditable missing-items CSV,

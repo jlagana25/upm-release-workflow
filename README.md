@@ -128,10 +128,10 @@ The smoke test is offline (no volumes needed) and runs in seconds. Run it after
 every edit — it catches broken imports, arg/step-registry drift, and other
 refactor breakage before they fail mid-release.
 
-Step 16 requires Microsoft Excel on the pipeline Mac. SoundMouse rejects the
-otherwise-valid inline-string XLSX packages produced by Python libraries, so
-the workflow clears Domo formatting and performs an unattended native Excel
-save before installing each metadata workbook.
+Step 16 exports SoundMouse metadata from Domo as CSV first and converts each
+CSV to a clean shared-string XLSX package required by the SoundMouse uploader.
+The conversion is unattended, preserves every CSV field as text, and does not
+require or control Microsoft Excel.
 
 ## Version control & two-machine sync
 
@@ -198,8 +198,8 @@ Then the other machine installs with `pip install -r requirements.lock`.
   directory dates come from the resolved workflow period, never from raw Domo
   `ActivationRange` values. Audio rows found in the canonical US tracklist are
   requested from the US territory; remaining rows go to Rest of World, with
-  Japan retained as a fallback. Metadata
-  remains XLSX but all downloaded workbook formatting is removed automatically.
+  Japan retained as a fallback. Metadata is exported from Domo as CSV and then
+  converted into clean upload-compatible XLSX workbooks automatically.
   The step then validates every audio and cover filename referenced across the
   selected metadata workbooks and fails with a missing-items CSV if needed.
   Also runnable standalone with the normal date flags and `--dry-run`.
