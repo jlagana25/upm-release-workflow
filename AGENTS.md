@@ -336,7 +336,11 @@ inline or are submitted to HDF1's login-session agent.
   re-run `--install` after syncing code changes. The LaunchAgent dispatches the
   actual GUI command into the logged-in Terminal so Screen Recording and
   Accessibility use Terminal's existing TCC grants; it tails the job log and
-  alone marks queue status complete/failed.
+  alone marks queue status complete/failed. The Terminal wrapper holds a
+  `caffeinate` assertion for the job lifetime, and `soundminer.py` independently
+  checks for a locked console or missing Soundminer window. Do not remove those
+  guards: a locked Mac yields wallpaper-only captures that can otherwise look
+  like progress when a dynamic wallpaper is enabled.
 - **Authentication is per macOS user and never repository data.** Domo cookies
   live only in the user's private Playwright profile; UniSync owns its own
   login/Keychain and local XML. Code may change only UniSync territory/cache/

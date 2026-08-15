@@ -74,8 +74,12 @@ small runtime copy under `~/Library/Application Support/UPM Soundminer Agent`;
 this avoids macOS denying background processes access to the source repo in
 `Documents`. The agent dispatches GUI commands into HDF1's logged-in Terminal
 so they inherit its existing Screen Recording and Accessibility grants, then
-tails their log/result unattended. Re-run `--install` after pulling workflow
-code updates on HDF1.
+tails their log/result unattended. Each dispatched job runs under macOS
+`caffeinate` so the display stays awake for long imports. The agent also checks
+the console lock state throughout the run and fails immediately—rather than
+mistaking a wallpaper-only capture for progress—if HDF1 is manually locked or
+a managed policy overrides the wake assertion. Re-run `--install` after pulling
+workflow code updates on HDF1.
 
 ## Running
 

@@ -1220,6 +1220,12 @@ def _activate_soundminer(logger: logging.Logger) -> None:
     """
     import pyautogui
 
+    # GUI automation cannot operate through the macOS lock screen.  Screen
+    # capture returns only the desktop wallpaper in that state, which used to
+    # look like endless progress to the pixel-change watcher when a dynamic
+    # wallpaper was active.
+    _assert_soundminer_gui_available(logger, require_window=False)
+
     script = f'tell application "{SOUNDMINER_APP}" to activate'
     result = subprocess.run(
         ["osascript", "-e", script], capture_output=True, text=True,
@@ -1238,6 +1244,7 @@ def _activate_soundminer(logger: logging.Logger) -> None:
     time.sleep(0.3)
 
     logger.debug(f"  {SOUNDMINER_APP} is active.")
+    _assert_soundminer_gui_available(logger, require_window=True)
     _save_step_screenshot("12_2a_activated", logger)
 
 
@@ -2545,6 +2552,85 @@ def _screen_fingerprint():
     return np.asarray(img, dtype="int16")
 
 
+def _ioreg_reports_locked(output: str) -> bool:
+    """Parse macOS IORegistry console-session output without GUI imports."""
+    return bool(re.search(r'CGSSessionScreenIsLocked["\s=]+Yes', output))
+
+
+def _assert_soundminer_gui_available(
+    logger: logging.Logger,
+    *,
+    require_window: bool,
+) -> None:
+    """Fail closed when the Aqua console cannot currently be automated.
+
+    A locked HDF1 session produces a valid-looking screenshot containing only
+    the macOS wallpaper.  Checking the console state separately prevents that
+    wallpaper (especially a dynamic one) from masquerading as Soundminer
+    progress.  Once Soundminer has been activated, also require at least one
+    application window so an app crash or unexpected quit is reported at once.
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/ioreg", "-n", "Root", "-d1"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and _ioreg_reports_locked(result.stdout):
+            raise _SoundminerError(
+                "The HDF1 macOS console became locked during Soundminer "
+                "automation. Unlock the hdfuser session before resuming; "
+                "screen capture and dialog handling are unavailable while "
+                "the session is locked."
+            )
+    except _SoundminerError:
+        raise
+    except Exception as exc:
+        # The lock probe is an additional macOS guard.  Existing screenshot
+        # and Accessibility checks remain authoritative if ioreg itself is
+        # unavailable on a future host.
+        logger.debug(f"        (console-lock probe failed: {exc})")
+
+    if not require_window:
+        return
+
+    script = (
+        'tell application "System Events"\n'
+        f'  if not (exists process "{SOUNDMINER_APP}") then return "missing"\n'
+        f'  tell process "{SOUNDMINER_APP}" to return count of windows\n'
+        'end tell'
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            logger.debug(
+                "        (Soundminer window probe unavailable: %s)",
+                result.stderr.strip(),
+            )
+            return
+        state = result.stdout.strip().lower()
+        if state == "missing":
+            raise _SoundminerError(
+                "Soundminer v5Pro exited during GUI automation. Review the "
+                "Soundminer/macOS crash report before resuming."
+            )
+        if state.isdigit() and int(state) < 1:
+            raise _SoundminerError(
+                "Soundminer v5Pro is running but has no application window. "
+                "Restore or relaunch it before resuming."
+            )
+    except _SoundminerError:
+        raise
+    except Exception as exc:
+        logger.debug(f"        (Soundminer window probe failed: {exc})")
+
+
 def _wait_for_screen_idle(
     *,
     phase_label:          str,
@@ -2589,10 +2675,15 @@ def _wait_for_screen_idle(
     last_change  = start
     saw_activity = False
     next_log     = start + PROGRESS_DOT_INTERVAL
+    next_gui_guard = start
 
     while True:
         now     = time.monotonic()
         elapsed = now - start
+
+        if now >= next_gui_guard:
+            _assert_soundminer_gui_available(logger, require_window=True)
+            next_gui_guard = now + 10
 
         if elapsed > hard_timeout:
             raise _SoundminerError(

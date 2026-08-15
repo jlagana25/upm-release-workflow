@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from config import ReleaseContext, SOUNDMINER_HOSTNAME
 import soundminer_agent
@@ -82,6 +83,32 @@ class SoundminerAgentTests(unittest.TestCase):
         self.assertIn("--preflight-only", command)
         self.assertIn("--nbc", command)
         self.assertNotIn("--sourceaudio", command)
+
+    def test_terminal_wrapper_runs_job_under_caffeinate(self):
+        request = {"request_id": "awake-job"}
+        log_path = self.root / "job.log"
+        status_path = self.root / "status.json"
+
+        def fake_run(argv, **kwargs):
+            wrapper = Path(argv[-1])
+            body = wrapper.read_text(encoding="utf-8")
+            self.assertIn("/usr/bin/caffeinate -dimsu", body)
+            exit_path = wrapper.with_suffix(".exit")
+            exit_path.write_text("0\n", encoding="utf-8")
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with (
+            patch.object(soundminer_agent, "AGENT_LOG_DIR", self.root),
+            patch.object(soundminer_agent.subprocess, "run", side_effect=fake_run),
+        ):
+            code, _ = soundminer_agent._run_in_login_terminal(
+                ["python3", "soundminer.py"],
+                request,
+                status_path,
+                log_path,
+                self.logger,
+            )
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

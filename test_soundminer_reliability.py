@@ -98,6 +98,14 @@ class SoundminerReliabilityTests(unittest.TestCase):
         with self.assertRaises(soundminer._SoundminerError):
             soundminer._validate_unmatched_dialog_text(unexpected)
 
+    def test_console_lock_parser_distinguishes_locked_session(self):
+        self.assertTrue(soundminer._ioreg_reports_locked(
+            '"CGSSessionScreenIsLocked"=Yes,"kCGSSessionOnConsoleKey"=Yes'
+        ))
+        self.assertFalse(soundminer._ioreg_reports_locked(
+            '"CGSSessionScreenIsLocked"=No,"kCGSSessionOnConsoleKey"=Yes'
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

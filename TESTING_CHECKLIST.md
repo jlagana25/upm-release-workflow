@@ -506,6 +506,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
 
 **Prerequisites on USMPSMDHDF1:**
 - Terminal has **Accessibility** + **Screen Recording** granted.
+- The `hdfuser` Aqua session is logged in and unlocked when the job begins.
+  Agent jobs hold a `caffeinate` assertion to prevent idle display sleep and
+  fail closed if the console nevertheless locks during processing.
 - The four/three reference crops exist (`python3 make_soundminer_crops.py` if not).
   If one live control changes, recapture only that host-specific crop with
   `python3 recapture_crop.py <crop_filename.png>` while the control is visible.
@@ -546,7 +549,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     unmatched-fields dialog is accepted only for the audited
     `is_SongBasedonLyrics`, `HasVocals`, and `Is_Explicit` set. A new field is
     a hard failure. A phase that shows no positive UI activity also fails
-    instead of advancing on a fixed timeout.
+    instead of advancing on a fixed timeout. Loss of the Soundminer window or
+    a locked console is detected independently of pixel activity and stops the
+    run with a targeted error.
   - `12.5` embed via Database menu → attended pause until embed done (`✓ Embed complete`).
   - A visible **Soundminer Log Window** during import or embed is a hard failure:
     the workflow stops, leaves the log open, and saves a diagnostic screenshot.

@@ -410,7 +410,11 @@ def _run_in_login_terminal(
     shell_lines = [
         "#!/bin/zsh",
         f"cd {shlex.quote(str(FILES_DIR))}",
-        f"{shlex.join(command)} > {shlex.quote(str(log_path))} 2>&1",
+        # Keep the HDF1 display and Aqua session awake for the entire GUI job.
+        # If the console locks, macOS returns wallpaper-only screenshots and
+        # neither pyautogui nor Accessibility can handle Soundminer dialogs.
+        f"/usr/bin/caffeinate -dimsu {shlex.join(command)} > "
+        f"{shlex.quote(str(log_path))} 2>&1",
         "upm_exit_code=$?",
         f"printf '%s\\n' \"$upm_exit_code\" > {shlex.quote(str(result_tmp))}",
         f"mv {shlex.quote(str(result_tmp))} {shlex.quote(str(result_path))}",
