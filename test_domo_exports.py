@@ -28,6 +28,10 @@ class DomoDeliveryMetadataTests(unittest.TestCase):
             cards["sourceaudio_exus_metadata"]["output_fn"](ctx),
             ctx.partner_metadata["sourceaudio_exus"],
         )
+        self.assertEqual(cards["sourceaudio_metadata"]["sourceaudio_delta"], "us")
+        self.assertEqual(
+            cards["sourceaudio_exus_metadata"]["sourceaudio_delta"], "exus"
+        )
         self.assertEqual(
             ctx.partner_metadata["sourceaudio"].name,
             "UPM August 2026 Part 1 Metadata.csv",

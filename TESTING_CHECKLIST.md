@@ -276,12 +276,32 @@ workflow run must not wait for manual account/password entry.
   - SourceAudio US and Ex-US exports overwrite the baseline CSVs in their
     respective delivery `Metadata` folders. `--skip-domo` rejects an unchanged
     baseline template, and any failed Domo export blocks Steps 10–15.
+  - On the initial workflow export, no AIFFs exist yet and the SourceAudio delta
+    check logs that it is skipped. On a later refresh, it compares tracks by
+    `External Id`. A sibling `Missing` folder is rebuilt only when differences
+    exist and contains `SourceAudio Missing Audit.csv` plus AIFs for additions
+    and filename revisions. Removed tracks and superseded filenames are deleted
+    from the local `Music` folder only after all required AIFs are ready; their
+    SourceAudio service entries remain explicitly listed for manual deletion.
+  - If an added track has no unique WAV source, the refreshed export is marked
+    failed, existing local media is preserved, and the audit row says `NOT
+    PREPARED`.
 - **Inspect:**
   - NBC CSV exists and is non-trivial:
     `ls -la "{specials}/1-ORIGINAL/Metadata/UPM-US NBCUniversal Metadata Export.csv"` (should be ~MBs, not 0/167 bytes).
   - SoundExchange exports land in **2-STAGING**, not final packaging:
     `ls -la "{specials}/2-STAGING/SoundExchange/Metadata/"` → both `SoundExchange Universal Music - *.xlsx`.
   - Open one CSV and confirm it has rows for the correct date window.
+  - For a SourceAudio refresh, inspect the sibling `Missing` folder and its
+    audit CSV before uploading. The audit is the authoritative list of manual
+    SourceAudio removals.
+- **Standalone SourceAudio reconciliation (no Domo download):**
+  ```bash
+  python3 sourceaudio_delta.py --previous-month --territory both --dry-run
+  python3 sourceaudio_delta.py --previous-month --territory both
+  ```
+  Use the exact date/month flags for the original delivery. The dry-run reports
+  counts without copying, converting, archiving, or deleting files.
 - **Rollback/cleanup:**
   - Delete the test export(s) if they shouldn't persist.
   - Re-running overwrites the same files, so cleanup is optional.

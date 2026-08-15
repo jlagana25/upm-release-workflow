@@ -171,7 +171,8 @@ single source; don't reinvent per module), `logging_utils.py` (step logging
 helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 (`soundminer_agent.py` supersedes its SSH/manual path for normal runs),
 `soundminer_agent.py` (HDF1 Aqua LaunchAgent + SSH JSON/status protocol),
-`workflow_report.py` (structured JSON run report),
+`workflow_report.py` (structured JSON run report), `sourceaudio_delta.py`
+(post-delivery SourceAudio metadata/audio reconciliation),
 `prune.py` (removes files from prior months the current tracklist no longer
 references — the counterpart to verification).
 
@@ -292,6 +293,13 @@ inline or are submitted to HDF1's login-session agent.
   (e.g. `--only 10` explicitly un-skips SoundExchange).
 - **Column detection** goes through `tracklist_columns.py`. Don't hardcode column
   names in individual modules.
+- **Refreshed SourceAudio metadata reconciles by External Id.** Once delivered
+  AIFFs exist, a later US or Ex-US Domo export rebuilds the sibling `Missing`
+  package with additions and filename replacements. It may remove metadata
+  removals and superseded filenames from the local `Music` tree only after all
+  replacement files are ready. It never deletes from the SourceAudio service;
+  those actions remain in `SourceAudio Missing Audit.csv` for manual handling.
+  Missing/ambiguous masters fail closed and preserve the existing local media.
 - **Delivery metadata must replace baseline templates.** Step 1 has dedicated
   SourceAudio US and SourceAudio Ex-US cards in addition to the other partner
   metadata cards. A failed export blocks Steps 10–15, and `--skip-domo` must not

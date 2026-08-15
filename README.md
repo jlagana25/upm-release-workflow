@@ -192,10 +192,18 @@ Then the other machine installs with `pip install -r requirements.lock`.
 - Step 1 replaces every Domo-managed delivery metadata template with the
   current export. This includes dedicated SourceAudio US and SourceAudio Ex-US
   cards; a failed export blocks final packaging instead of shipping baseline
-  metadata.
+  metadata. When either SourceAudio card is exported again after AIFF media
+  already exists, `sourceaudio_delta.py` compares the refreshed metadata by
+  External Id. Additions and filename revisions are prepared as AIF files in a
+  sibling `Missing` folder, removals and superseded filenames are removed from
+  the local `Music` folder only after the replacement package is complete, and
+  an audit CSV lists the SourceAudio service entries that still require manual
+  removal. Missing source masters fail the export closed without deleting
+  existing media.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
-  `cleanup`, `final_metadata_verification`, `remediation`, `prune`.
+  `cleanup`, `final_metadata_verification`, `remediation`, `prune`,
+  `sourceaudio_delta`.
 - `soundmouse.py` — Step 16: SoundMouse tracklist/bucket exports, release
   period directory, WAVs from the US/Rest-of-World/Japan UniSync territories,
   covers, and bucket-selected metadata workbooks. The

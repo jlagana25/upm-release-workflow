@@ -308,6 +308,7 @@ CARD_CONFIGS: list[dict] = [
         "card_id":     DOMO_CARDS["sourceaudio_metadata"],
         "description": "SourceAudio Metadata",
         "output_fn":   lambda ctx: ctx.partner_metadata["sourceaudio"],
+        "sourceaudio_delta": "us",
         "baseline_template": (
             BASELINE_SPECIALS / "3-FINAL PACKAGING"
             / "Universal Production Music MMMM YYYY Release - SourceAudio"
@@ -319,6 +320,7 @@ CARD_CONFIGS: list[dict] = [
         "card_id":     DOMO_CARDS["sourceaudio_exus_metadata"],
         "description": "SourceAudio Ex-US Metadata",
         "output_fn":   lambda ctx: ctx.partner_metadata["sourceaudio_exus"],
+        "sourceaudio_delta": "exus",
         "baseline_template": (
             BASELINE_SPECIALS / "3-FINAL PACKAGING"
             / "Universal Production Music MMMM YYYY Release - SourceAudio Ex-US"
@@ -387,6 +389,11 @@ def run_domo_exports(
         logger.info("  [DRY RUN] Would export the following files:")
         for card in cards:
             logger.info(f"    {card['description']:<18} → {card['output_fn'](ctx)}")
+            if card.get("sourceaudio_delta"):
+                logger.info(
+                    "      Then compare refreshed metadata with existing AIFF "
+                    "media and rebuild the sibling Missing package if needed."
+                )
         return {card["key"]: "skipped" for card in cards}
 
     TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -413,6 +420,7 @@ def run_domo_exports(
                 logger.info(f"     Output: {output_path}")
                 try:
                     _export_card(page, card, output_path, ctx, logger)
+                    _reconcile_sourceaudio_export(card, ctx, logger)
                     results[card["key"]] = "ok"
                     logger.info(f"     ✓ Saved: {output_path}")
                 except PlaywrightTimeoutError as exc:
@@ -432,6 +440,29 @@ def run_domo_exports(
         pass
 
     return results
+
+
+def _reconcile_sourceaudio_export(
+    card: dict,
+    ctx: ReleaseContext,
+    logger: logging.Logger,
+) -> None:
+    """Reconcile refreshed SourceAudio metadata when AIFFs already exist.
+
+    The import stays lazy so the browser module remains cheap to import in
+    headless tests and utility scripts.
+    """
+    territory = card.get("sourceaudio_delta")
+    if not territory:
+        return
+    from sourceaudio_delta import reconcile_context_sourceaudio
+
+    result = reconcile_context_sourceaudio(ctx, territory, logger=logger)
+    if not result.ok:
+        raise RuntimeError(
+            "SourceAudio refreshed-metadata reconciliation is incomplete; "
+            "review the sibling Missing audit before continuing"
+        )
 
 
 def verify_exports_exist(
@@ -1101,6 +1132,7 @@ def _run_test(args) -> None:
                 logger.info(f"     Output: {output_path}")
                 try:
                     _export_card(page, card, output_path, ctx, logger)
+                    _reconcile_sourceaudio_export(card, ctx, logger)
                     results[card["key"]] = "ok"
                     logger.info(f"     ✓ Saved: {output_path}")
                 except PlaywrightTimeoutError as exc:
