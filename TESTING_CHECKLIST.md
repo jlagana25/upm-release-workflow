@@ -611,6 +611,10 @@ Validates Step 14 (strip characters outside `[A-Za-z0-9_ ]` from filenames under
     `--specials-dir-override`, `--client-label-override`, and
     `--nbc-metadata-override`; the HDF1 agent must forward those arguments and
     log the resolved source and destination before touching the GUI.
+  - A catalog refresh with an existing partial NBC/SourceAudio mirror must log
+    `valid partial destination` and continue with `Skip Existing` only when all
+    existing filenames belong to the refreshed manifest. Any unexpected,
+    duplicate, or wrong-format output must still stop before GUI mutation.
 - **Rollback/cleanup:**
   - Renames are in place and not automatically reversible. **Always run `--dry-run` first** and review.
   - To restore original names, re-run the Soundminer mirror + conversion (Tests 11–12), which regenerate the tree from source.

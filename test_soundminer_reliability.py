@@ -70,6 +70,20 @@ class SoundminerReliabilityTests(unittest.TestCase):
                 "NBC mirror",
             )
 
+    def test_destination_manifest_allows_missing_only_incremental_refresh(self):
+        destination = self.root / "dest"
+        destination.mkdir()
+        (destination / "expected-one.wav").touch()
+        state = soundminer._validate_destination_manifest(
+            destination,
+            {"expected-one", "expected-two"},
+            ("wav",),
+            self.logger,
+            "NBC mirror",
+            allow_partial=True,
+        )
+        self.assertEqual(state, "partial")
+
     def test_unmatched_dialog_allowlist_rejects_new_field(self):
         allowed = (
             "Unmatched Fields | Warning...The following field headers aren't "

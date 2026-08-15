@@ -324,6 +324,9 @@ inline or are submitted to HDF1's login-session agent.
 - **Soundminer must fail closed.** Never restore count-only mirror success,
   generic OK/Yes clicking, or a no-activity timeout that proceeds anyway.
   Metadata/source and destination filename manifests are correctness gates.
+  An incremental refresh may proceed only when the destination is a strict
+  subset of the expected manifest (missing only); unexpected, duplicate, or
+  wrong-format outputs still fail before GUI mutation.
 - **Agent requests are atomic JSON.** HDF2 sends control JSON over SSH into
   HDF1's local `pending/`; HDF1 claims by rename, updates heartbeats/status,
   and archives the request. SSH never owns or drives the GUI. Keep

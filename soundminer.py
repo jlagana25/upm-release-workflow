@@ -434,6 +434,7 @@ def _validate_destination_manifest(
     label: str,
     *,
     allow_empty: bool = True,
+    allow_partial: bool = False,
 ) -> str:
     actual_counter, wrong_format = _scan_destination(destination, output_exts)
     if not actual_counter and not wrong_format and allow_empty:
@@ -442,6 +443,12 @@ def _validate_destination_manifest(
     missing = sorted(expected - actual)
     extras = sorted(actual - expected)
     duplicates = sorted(name for name, count in actual_counter.items() if count > 1)
+    if missing and allow_partial and not (extras or duplicates or wrong_format):
+        logger.info(
+            f"  ↻ {label} is a valid partial destination: {len(actual)} "
+            f"present, {len(missing)} missing. Continuing with Skip Existing."
+        )
+        return "partial"
     if missing or extras or duplicates or wrong_format:
         report = RUNTIME_DIR / f"{label.lower().replace(' ', '-')}-manifest.csv"
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -727,7 +734,8 @@ def run_soundminer_nbc_workflow(
             csv_path, audio_folder, logger
         )
         destination_state = _validate_destination_manifest(
-            mirror_dest, expected_manifest, ("wav",), logger, "NBC mirror"
+            mirror_dest, expected_manifest, ("wav",), logger, "NBC mirror",
+            allow_partial=True,
         )
     except _SoundminerError as exc:
         logger.error(f"  ✗  {exc}")
@@ -1113,7 +1121,7 @@ def run_soundminer_sourceaudio_workflow(
                 expected_manifest = _sourceaudio_manifest(src)
                 destination_state = _validate_destination_manifest(
                     dest, expected_manifest, SOURCEAUDIO_OUTPUT_EXTS,
-                    logger, f"SourceAudio {tag}",
+                    logger, f"SourceAudio {tag}", allow_partial=True,
                 )
             except _SoundminerError as exc:
                 logger.error(f"  ✗  {exc}")
