@@ -248,12 +248,16 @@ workflow run must not wait for manual account/password entry.
   # A subset — --only is comma-separated (case-insensitive, matches key or label):
   python3 domo_exports.py --test --previous-month --only netmix_metadata,synchtank_metadata
 
+  # Refresh both SourceAudio delivery metadata files:
+  python3 domo_exports.py --test --previous-month --only sourceaudio_metadata,sourceaudio_exus_metadata
+
   # All cards:
   python3 domo_exports.py --test --year 2026 --month 5 --part 1
   ```
 - **Cards exported:** the core tracklist/album/cleanup/NBC cards plus the partner
   metadata cards: `netmix_metadata`, `synchtank_metadata`, `scripps_metadata`,
-  `qwire_metadata`, `japan_jmdtss_metadata` (**.xlsx**), `soundexchange_mgb`
+  `qwire_metadata`, `sourceaudio_metadata`, `sourceaudio_exus_metadata`,
+  `japan_jmdtss_metadata` (**.xlsx**), `soundexchange_mgb`
   (**.xlsx**), `soundexchange_ztunes` (**.xlsx**). Most write CSV; the three
   noted write XLSX (passthrough — the Domo workbook is kept as-is, not converted).
 - **Expected output:**
@@ -269,6 +273,9 @@ workflow run must not wait for manual account/password entry.
     reports `auth_manager.py --setup domo`; it does not pause for operator input.
   - Per card: navigation, date-range set (`05/01/2026 → 05/14/2026`), download, then `Output: …csv` or `…xlsx`.
   - Summary shows each card `✓` and the written path.
+  - SourceAudio US and Ex-US exports overwrite the baseline CSVs in their
+    respective delivery `Metadata` folders. `--skip-domo` rejects an unchanged
+    baseline template, and any failed Domo export blocks Steps 10–15.
 - **Inspect:**
   - NBC CSV exists and is non-trivial:
     `ls -la "{specials}/1-ORIGINAL/Metadata/UPM-US NBCUniversal Metadata Export.csv"` (should be ~MBs, not 0/167 bytes).
@@ -568,7 +575,7 @@ Validates Step 14 (strip characters outside `[A-Za-z0-9_ ]` from filenames under
 
 ## 14. Final metadata cross-check test (Step 15)
 
-Validates Step 15: cross-references each partner deliverable's metadata sheet (or the US/Ex-US tracklist) against the audio actually present in its media folder, and checks covers where required. Missing audio/cover = **FAIL**; extra files = warning.
+Validates Step 15: cross-references each partner deliverable's metadata sheet (or the US/Ex-US tracklist) against the audio actually present in its media folder, including both SourceAudio deliveries, and checks covers where required. Missing audio/cover = **FAIL**; extra files = warning.
 
 - **Command:**
   ```bash

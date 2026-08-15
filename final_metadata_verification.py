@@ -7,7 +7,7 @@ that the audio actually present on disk matches an authoritative track list, and
 
 Audio source per partner:
   • Partners WITH their own metadata sheet  (Netmix, SynchTank, Tunesat,
-    NTT Data) are checked against that sheet.
+    NTT Data, SourceAudio US/Ex-US) are checked against that sheet.
   • Partners WITHOUT a sheet (Discovery, ESPN) are checked against the original
     US tracklist.
   • The post-copy STAGING trees (SME WAV 48K NBC, SME WAV ExUS) are checked for
@@ -125,6 +125,12 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
               cover_mode="tree"),
         Check("Tunesat",   ctx.cleanup_metadata_csv, pd["tunesat_mp3"]),
         Check("NTT Data",  ctx.japan_metadata_csv,   pd["japan_final_media"]),
+        Check("SourceAudio", pm["sourceaudio"], pd["sourceaudio_music"]),
+        Check(
+            "SourceAudio Ex-US",
+            pm["sourceaudio_exus"],
+            pd["sourceaudio_exus_music"],
+        ),
 
         # ---- Partners without a sheet → checked against the US tracklist ----
         Check("Discovery (MP3)", us, pd["discovery_mp3"]),

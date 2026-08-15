@@ -133,6 +133,8 @@ DOMO_CARDS: dict[str, str] = {
     "synchtank_metadata":    "835577782",
     "scripps_metadata":      "871733994",
     "qwire_metadata":        "1299912690",
+    "sourceaudio_metadata":  "816828701",
+    "sourceaudio_exus_metadata": "1909039415",
     "japan_jmdtss_metadata": "272055256",   # exported as .xlsx (not CSV)
     "soundexchange_mgb":     "700921386",
     "soundexchange_ztunes":  "583310488",
@@ -698,6 +700,10 @@ class ReleaseContext:
             "scripps":   _r("Scripps")   / "Metadata" / f"UPM {mdf} Metadata.csv",
             "qwire":     _r("Qwire")     / "Metadata"
                          / f"Qwire Library Submission Template \u2013 {mdf}.csv",
+            "sourceaudio": _r("SourceAudio") / "Metadata"
+                           / f"UPM {mdf} Metadata.csv",
+            "sourceaudio_exus": _r("SourceAudio Ex-US") / "Metadata"
+                                / f"UPM Ex-US {mdf} Metadata.csv",
             "soundexchange_mgb":    self.soundexchange_staging_dir / "Metadata"
                                     / "SoundExchange Universal Music - Mgb Na Llc.xlsx",
             "soundexchange_ztunes": self.soundexchange_staging_dir / "Metadata"

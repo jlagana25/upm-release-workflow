@@ -625,6 +625,7 @@ def run_workflow(args: argparse.Namespace) -> int:
     )
 
     results = StepResults()
+    domo_failed = False   # failed delivery metadata must block finalization
 
     # ---- Preflight ----------------------------------------------------------
     log_section(logger, "Preflight")
@@ -684,11 +685,14 @@ def run_workflow(args: argparse.Namespace) -> int:
                 checks = verify_exports_exist(ctx, logger)
                 missing = [k for k, v in checks.items() if not v]
                 if missing:
-                    logger.warning(
+                    domo_failed = True
+                    logger.error(
                         f"  Some expected CSV files are missing: {missing}\n"
-                        f"  Downstream steps may fail."
+                        f"  Final delivery steps will be blocked."
                     )
-                results["1 Domo exports"] = _STEP_RESULT_SKIPPED
+                    results["1 Domo exports"] = _STEP_RESULT_FAILED
+                else:
+                    results["1 Domo exports"] = _STEP_RESULT_SKIPPED
             else:
                 log_step_start(logger, 1, "Domo Exports")
                 from domo_exports import run_domo_exports
@@ -698,6 +702,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                 if any_stub:
                     results["1 Domo exports"] = _STEP_RESULT_STUB
                 elif any_failed:
+                    domo_failed = True
                     results["1 Domo exports"] = _STEP_RESULT_FAILED
                     log_step_end(logger, 1, "Domo Exports", False)
                 else:
@@ -854,25 +859,34 @@ def run_workflow(args: argparse.Namespace) -> int:
             # exempt so the plan can be previewed end-to-end.)  Override paths:
             # fix the cause and re-run, add --remediate to auto-retry the producers,
             # or --skip-verify to package anyway.
-            finalize_blocked = verify_failed and not args.dry_run
+            finalize_blocked = (verify_failed or domo_failed) and not args.dry_run
+            block_reason = (
+                "Domo export failed" if domo_failed else "verification failed"
+            )
             if finalize_blocked:
-                logger.error(
-                    "\n  ✗ Verification failed — skipping final packaging and the "
-                    "remaining finalization steps (10–15)\n"
-                    "    so an incomplete release isn't assembled.  See the missing "
-                    "report:\n"
-                    f"      {ctx.missing_report_csv}\n"
-                    "    Then either re-run the same command (idempotent — it fills "
-                    "only the gaps),\n"
-                    "    add --remediate to auto-retry the producers, or --skip-verify "
-                    "to package anyway."
-                )
+                if domo_failed:
+                    logger.error(
+                        "\n  ✗ Domo export failed — skipping final packaging and the "
+                        "remaining finalization steps (10–15)\n"
+                        "    so baseline, missing, or stale metadata cannot ship.\n"
+                        "    Correct the failed Domo card/session and rerun Step 1."
+                    )
+                else:
+                    logger.error(
+                        "\n  ✗ Verification failed — skipping final packaging and the "
+                        "remaining finalization steps (10–15)\n"
+                        "    so an incomplete release isn't assembled. See the missing "
+                        "report:\n"
+                        f"      {ctx.missing_report_csv}\n"
+                        "    Then re-run the same command, add --remediate, or use "
+                        "--skip-verify only after reviewing the discrepancy."
+                    )
 
             # ---- Step 10: Final Packaging -------------------------------------------
             log_section(logger, "Step 10 — Final Packaging")
             if finalize_blocked:
                 log_step_skipped(logger, 10, "Copy Originals to Finals")
-                results["10 Final packaging"] = "blocked — verification failed"
+                results["10 Final packaging"] = f"blocked — {block_reason}"
             elif args.skip_final_packaging:
                 log_step_skipped(logger, 10, "Copy Originals to Finals")
                 results["10 Final packaging"] = _STEP_RESULT_SKIPPED
@@ -896,7 +910,7 @@ def run_workflow(args: argparse.Namespace) -> int:
             # the audio/cover copy above.
             if finalize_blocked:
                 log_step_skipped(logger, 10, "SoundExchange Ingest Forms")
-                results["10 SoundExchange forms"] = "blocked — verification failed"
+                results["10 SoundExchange forms"] = f"blocked — {block_reason}"
             elif args.skip_final_packaging or args.skip_soundexchange:
                 log_step_skipped(logger, 10, "SoundExchange Ingest Forms")
                 results["10 SoundExchange forms"] = _STEP_RESULT_SKIPPED
@@ -915,7 +929,7 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 11 — SourceAudio (AIFF) Mirror")
             if finalize_blocked:
                 log_step_skipped(logger, 11, "SourceAudio Mirror")
-                results["11 SourceAudio"] = "blocked — verification failed"
+                results["11 SourceAudio"] = f"blocked — {block_reason}"
             elif args.skip_sourceaudio:
                 log_step_skipped(logger, 11, "SourceAudio Mirror")
                 results["11 SourceAudio"] = _STEP_RESULT_SKIPPED
@@ -998,7 +1012,7 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 12 — Soundminer NBC Workflow")
             if finalize_blocked:
                 log_step_skipped(logger, 12, "Soundminer NBC")
-                results["12 Soundminer"] = "blocked — verification failed"
+                results["12 Soundminer"] = f"blocked — {block_reason}"
             elif args.skip_soundminer:
                 log_step_skipped(logger, 12, "Soundminer NBC")
                 results["12 Soundminer"] = _STEP_RESULT_SKIPPED
@@ -1110,7 +1124,7 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 13 — Non-MainTrack Cleanup")
             if finalize_blocked:
                 log_step_skipped(logger, 13, "Non-MainTrack Removal")
-                results["13 Non-maintrack cleanup"] = "blocked — verification failed"
+                results["13 Non-maintrack cleanup"] = f"blocked — {block_reason}"
             elif args.skip_non_maintrack_cleanup:
                 log_step_skipped(logger, 13, "Non-MainTrack Removal")
                 results["13 Non-maintrack cleanup"] = _STEP_RESULT_SKIPPED
@@ -1135,7 +1149,7 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 14 — Rename NBC Music Files")
             if finalize_blocked:
                 log_step_skipped(logger, 14, "NBC Filename Rename")
-                results["14 NBC rename"] = "blocked — verification failed"
+                results["14 NBC rename"] = f"blocked — {block_reason}"
             elif args.skip_rename:
                 log_step_skipped(logger, 14, "NBC Filename Rename")
                 results["14 NBC rename"] = _STEP_RESULT_SKIPPED
@@ -1152,7 +1166,7 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 15 — Final Metadata Cross-Check")
             if finalize_blocked:
                 log_step_skipped(logger, 15, "Final Metadata Cross-Check")
-                results["15 Final metadata check"] = "blocked — verification failed"
+                results["15 Final metadata check"] = f"blocked — {block_reason}"
             elif args.skip_final_metadata_check:
                 log_step_skipped(logger, 15, "Final Metadata Cross-Check")
                 results["15 Final metadata check"] = _STEP_RESULT_SKIPPED

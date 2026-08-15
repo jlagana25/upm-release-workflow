@@ -138,10 +138,10 @@ with the three tools above.
 | 15 | Final metadata cross-check | `final_metadata_verification.py` | Logic testable |
 | 16 | SoundMouse delivery | `soundmouse.py` | Data/filesystem logic testable; Domo + UniSync cannot run |
 
-Steps **10–15 are gated behind Step 9**: if verification fails on a real run
-(`finalize_blocked = verify_failed and not dry_run`), they're skipped. When Step 9
+Steps **10–15 are gated behind Step 9 and Step 1**: if verification or a Domo
+export fails on a real run, they're skipped. When Step 9
 is skipped entirely (e.g. `--start-at 13`), `verify_failed` defaults to `False`,
-so the finalization steps are **not** blocked.
+so it does not block finalization; a failed Step 1 still does.
 
 Step **16 is independent of the Step 9 gate**. It exports the SoundMouse
 tracklist and bucket, builds one directory from the resolved workflow start and
@@ -292,6 +292,10 @@ inline or are submitted to HDF1's login-session agent.
   (e.g. `--only 10` explicitly un-skips SoundExchange).
 - **Column detection** goes through `tracklist_columns.py`. Don't hardcode column
   names in individual modules.
+- **Delivery metadata must replace baseline templates.** Step 1 has dedicated
+  SourceAudio US and SourceAudio Ex-US cards in addition to the other partner
+  metadata cards. A failed export blocks Steps 10–15, and `--skip-domo` must not
+  accept an unchanged baseline metadata file as a valid current export.
 - **Soundminer must fail closed.** Never restore count-only mirror success,
   generic OK/Yes clicking, or a no-activity timeout that proceeds anyway.
   Metadata/source and destination filename manifests are correctness gates.

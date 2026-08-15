@@ -21,6 +21,8 @@ Card map:
     japan_metadata   242186821     → specials_dir/…/NTT Data Metadata.csv
     nbc_metadata     233748559     → specials_dir/…/NBCUniversal Metadata Export.csv
     tunesat_metadata 1826988754    → specials_dir/…/Tunesat/Metadata/UPM {month} Metadata.csv
+    sourceaudio_metadata      816828701  → …/SourceAudio/Metadata/UPM {delivery} Metadata.csv
+    sourceaudio_exus_metadata 1909039415 → …/SourceAudio Ex-US/Metadata/UPM Ex-US {delivery} Metadata.csv
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ def _require_playwright() -> None:
         )
 
 from config import (
+    BASELINE_SPECIALS,
     DOMO_CARDS,
     DOMO_INSTANCE,
     DOMO_PAGE_ID,
@@ -301,6 +304,28 @@ CARD_CONFIGS: list[dict] = [
         "output_fn":   lambda ctx: ctx.partner_metadata["qwire"],
     },
     {
+        "key":         "sourceaudio_metadata",
+        "card_id":     DOMO_CARDS["sourceaudio_metadata"],
+        "description": "SourceAudio Metadata",
+        "output_fn":   lambda ctx: ctx.partner_metadata["sourceaudio"],
+        "baseline_template": (
+            BASELINE_SPECIALS / "3-FINAL PACKAGING"
+            / "Universal Production Music MMMM YYYY Release - SourceAudio"
+            / "Metadata" / "UPM MMMM YYYY Metadata.csv"
+        ),
+    },
+    {
+        "key":         "sourceaudio_exus_metadata",
+        "card_id":     DOMO_CARDS["sourceaudio_exus_metadata"],
+        "description": "SourceAudio Ex-US Metadata",
+        "output_fn":   lambda ctx: ctx.partner_metadata["sourceaudio_exus"],
+        "baseline_template": (
+            BASELINE_SPECIALS / "3-FINAL PACKAGING"
+            / "Universal Production Music MMMM YYYY Release - SourceAudio Ex-US"
+            / "Metadata" / "UPM Ex-US MMMM YYYY Metadata.csv"
+        ),
+    },
+    {
         "key":         "japan_jmdtss_metadata",
         "card_id":     DOMO_CARDS["japan_jmdtss_metadata"],
         "description": "Japan JMD/TSS Metadata",
@@ -413,15 +438,21 @@ def verify_exports_exist(
     ctx: ReleaseContext,
     logger: logging.Logger,
 ) -> dict[str, bool]:
-    """Check that all five expected CSV files already exist on disk."""
+    """Check that every expected export exists and is not a baseline template."""
     results: dict[str, bool] = {}
     for card in CARD_CONFIGS:
-        path   = card["output_fn"](ctx)
-        exists = Path(path).exists()
-        results[card["key"]] = exists
+        path = Path(card["output_fn"](ctx))
+        exists = path.is_file() and path.stat().st_size > 0
+        stale_template = False
+        baseline = card.get("baseline_template")
+        if exists and baseline and Path(baseline).is_file():
+            stale_template = path.read_bytes() == Path(baseline).read_bytes()
+        valid = exists and not stale_template
+        results[card["key"]] = valid
+        detail = " (unchanged baseline template)" if stale_template else ""
         logger.log(
-            logging.INFO if exists else logging.WARNING,
-            f"  {'✓' if exists else '✗'}  {card['key']:<18} {path}",
+            logging.INFO if valid else logging.WARNING,
+            f"  {'✓' if valid else '✗'}  {card['key']:<28} {path}{detail}",
         )
     return results
 
@@ -589,17 +620,20 @@ def _export_card(
         export_format="CSV" if direct_csv else "Excel",
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    install_temp = output_path.with_name(f".{output_path.name}.domo-export.tmp")
     if direct_csv:
-        if output_path.exists():
-            output_path.unlink()
-        shutil.move(str(downloaded), str(output_path))
+        if install_temp.exists():
+            install_temp.unlink()
+        shutil.move(str(downloaded), str(install_temp))
+        install_temp.replace(output_path)
         logger.info(f"     Saved CSV → {output_path.name}")
     elif card.get("format", "csv") == "xlsx":
-        # Keep the workbook as-is (cross-filesystem move: temp is in Downloads,
-        # output on the Pegasus volume).
-        if output_path.exists():
-            output_path.unlink()
-        shutil.move(str(downloaded), str(output_path))
+        # Install atomically so a failed cross-filesystem move cannot destroy
+        # the previous valid workbook.
+        if install_temp.exists():
+            install_temp.unlink()
+        shutil.move(str(downloaded), str(install_temp))
+        install_temp.replace(output_path)
         logger.info(f"     Saved XLSX → {output_path.name}")
     else:
         _xlsx_to_csv(downloaded, output_path, logger)
@@ -953,9 +987,16 @@ def _xlsx_to_csv(xlsx_path: Path, csv_path: Path, logger: logging.Logger) -> Non
         )
     df = pd.read_excel(xlsx_path, dtype=str).fillna("")
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    logger.info(f"     CSV rows: {len(df)}  columns: {len(df.columns)}")
-    xlsx_path.unlink()
+    install_temp = csv_path.with_name(f".{csv_path.name}.domo-export.tmp")
+    try:
+        df.to_csv(install_temp, index=False, encoding="utf-8-sig")
+        install_temp.replace(csv_path)
+        logger.info(f"     CSV rows: {len(df)}  columns: {len(df.columns)}")
+    finally:
+        if install_temp.exists():
+            install_temp.unlink()
+        if xlsx_path.exists():
+            xlsx_path.unlink()
 
 
 # ---------------------------------------------------------------------------

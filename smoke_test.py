@@ -77,6 +77,10 @@ def main() -> int:
               hasattr(ctx, "soundexchange_final_dir"))
         check("partner_metadata has SoundExchange xlsx",
               str(ctx.partner_metadata["soundexchange_mgb"]).endswith(".xlsx"))
+        check("partner_metadata has SourceAudio US CSV",
+              str(ctx.partner_metadata["sourceaudio"]).endswith("Metadata.csv"))
+        check("partner_metadata has SourceAudio Ex-US CSV",
+              str(ctx.partner_metadata["sourceaudio_exus"]).endswith("Metadata.csv"))
         check("SoundMouse tracklist uses exclusive end date",
               ctx.soundmouse_tracklist_csv.name ==
               "Soundmouse 05-01-26 to 05-15-26.csv")

@@ -189,6 +189,10 @@ Then the other machine installs with `pip install -r requirements.lock`.
   repair, and recoverable reset.
 - `security_scan.py` — worktree/index/history credential guard used by the
   pre-commit hook and `make verify`.
+- Step 1 replaces every Domo-managed delivery metadata template with the
+  current export. This includes dedicated SourceAudio US and SourceAudio Ex-US
+  cards; a failed export blocks final packaging instead of shipping baseline
+  metadata.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`.
