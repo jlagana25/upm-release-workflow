@@ -19,6 +19,7 @@ import re
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -255,6 +256,8 @@ def validate_soundmouse_delivery(
     report_path: Path,
     dry_run: bool,
     logger: logging.Logger,
+    additional_media_roots: tuple[Path, ...] = (),
+    additional_cover_roots: tuple[Path, ...] = (),
 ) -> bool:
     """Confirm every audio and cover named by the period metadata is present.
 
@@ -350,8 +353,12 @@ def validate_soundmouse_delivery(
                 "Problem": f"Could not read workbook: {exc}",
             })
 
-    present_audio = _disk_file_keys(media_root)
-    present_covers = _disk_file_keys(covers_root)
+    present_audio = set().union(*(
+        _disk_file_keys(root) for root in (media_root, *additional_media_roots)
+    ))
+    present_covers = set().union(*(
+        _disk_file_keys(root) for root in (covers_root, *additional_cover_roots)
+    ))
     missing_audio = sorted(set(expected_audio) - present_audio)
     missing_covers = sorted(set(expected_covers) - present_covers)
 
@@ -674,6 +681,8 @@ def _soundmouse_unisync_jobs(
     ctx: ReleaseContext,
     us_request_csv: Path | None = None,
     exus_request_csv: Path | None = None,
+    all_request_csv: Path | None = None,
+    destination_dir: Path | None = None,
 ) -> list[dict[str, str]]:
     """Build the additive territory jobs used by the SoundMouse delivery."""
     jobs = [
@@ -681,8 +690,8 @@ def _soundmouse_unisync_jobs(
             "name": f"SoundMouse {label} WAV ({ctx.soundmouse_activation_range})",
             "territory": territory,
             "cache_path": str(UPM_CACHE_WAV),
-            "client_path": str(ctx.soundmouse_release_dir / "MEDIA"),
-            "csv": str(request_csv or ctx.soundmouse_tracklist_csv),
+            "client_path": str(destination_dir or (ctx.soundmouse_release_dir / "MEDIA")),
+            "csv": str(request_csv or all_request_csv or ctx.soundmouse_tracklist_csv),
         }
         for label, territory, request_csv in (
             ("US", "United States", us_request_csv),
@@ -699,6 +708,9 @@ def run_soundmouse_unisync(
     dry_run: bool,
     overwrite: bool,
     logger: logging.Logger,
+    *,
+    destination_dir: Path | None = None,
+    existing_media_roots: tuple[Path, ...] = (),
 ) -> bool:
     """Run all three WAV territories into the workflow-period directory.
 
@@ -710,7 +722,8 @@ def run_soundmouse_unisync(
     if dry_run:
         logger.info(
             "  [DRY RUN] Would route SoundMouse WAVs through US, "
-            f"Rest of World, then Japan fallback → {ctx.soundmouse_release_dir / 'MEDIA'}"
+            f"Rest of World, then Japan fallback → "
+            f"{destination_dir or (ctx.soundmouse_release_dir / 'MEDIA')}"
         )
         return True
 
@@ -718,8 +731,29 @@ def run_soundmouse_unisync(
     with tempfile.TemporaryDirectory(prefix="soundmouse_unisync_") as tmp:
         request_dir = Path(tmp)
         try:
+            request_csv = ctx.soundmouse_tracklist_csv
+            if existing_media_roots:
+                fields, rows = _read_csv(request_csv)
+                filename_col = _find_column(fields, POSSIBLE_FILENAME_COLS)
+                if not filename_col:
+                    raise ValueError("SoundMouse tracklist needs a Filename column")
+                present = set().union(*(
+                    _disk_file_keys(root) for root in existing_media_roots
+                ))
+                rows = [
+                    row for row in rows
+                    if _wav_name(row.get(filename_col, "")) not in present
+                ]
+                if not rows:
+                    logger.info("  ✓ SoundMouse has no new audio to retrieve.")
+                    return True
+                request_csv = request_dir / "SoundMouse-Missing.csv"
+                _write_soundmouse_request_csv(request_csv, fields, rows)
+                logger.info(
+                    f"  SoundMouse uploaded correction: {len(rows)} new audio row(s)."
+                )
             fields, us_rows, exus_rows = _partition_soundmouse_rows(
-                ctx.soundmouse_tracklist_csv, ctx.us_tracklist_csv
+                request_csv, ctx.us_tracklist_csv
             )
             us_csv = request_dir / "SoundMouse-US.csv"
             exus_csv = request_dir / "SoundMouse-ExUS.csv"
@@ -729,13 +763,23 @@ def run_soundmouse_unisync(
                 f"  SoundMouse territory routing: {len(us_rows)} US, "
                 f"{len(exus_rows)} Rest-of-World/Japan fallback row(s)."
             )
-            jobs = _soundmouse_unisync_jobs(ctx, us_csv, exus_csv)
+            jobs = _soundmouse_unisync_jobs(
+                ctx,
+                us_csv,
+                exus_csv,
+                request_csv,
+                destination_dir,
+            )
         except (OSError, ValueError) as exc:
             logger.warning(
                 f"  Could not partition SoundMouse requests ({exc}); "
                 "falling back to full-list territory passes."
             )
-            jobs = _soundmouse_unisync_jobs(ctx)
+            jobs = _soundmouse_unisync_jobs(
+                ctx,
+                all_request_csv=request_csv,
+                destination_dir=destination_dir,
+            )
 
         class _Jobs:
             unisync_jobs = jobs
@@ -752,6 +796,8 @@ def download_soundmouse_covers(
     dry_run: bool,
     overwrite: bool,
     logger: logging.Logger,
+    *,
+    existing_cover_roots: tuple[Path, ...] = (),
 ) -> bool:
     """Download unique covers into the workflow period's delivery root."""
     fields, rows = _read_csv(tracklist_csv)
@@ -766,6 +812,9 @@ def download_soundmouse_covers(
 
     ok = True
     seen: set[str] = set()
+    existing_cover_names = set().union(*(
+        _disk_file_keys(root) for root in existing_cover_roots
+    )) if existing_cover_roots else set()
     for row in rows:
         name = Path(str(row.get(cover_col, "")).strip()).name
         url = str(row.get(url_col, "")).strip()
@@ -773,6 +822,8 @@ def download_soundmouse_covers(
             continue
         seen.add(name)
         destination = release_directory / "Covers" / name
+        if name.casefold() in existing_cover_names:
+            continue
         if destination.exists() and not overwrite:
             continue
         if not url:
@@ -796,6 +847,90 @@ def download_soundmouse_covers(
     return ok
 
 
+def _soundmouse_expected_names(tracklist_csv: Path) -> tuple[set[str], set[str]]:
+    fields, rows = _read_csv(tracklist_csv)
+    filename_col = _find_column(fields, POSSIBLE_FILENAME_COLS)
+    cover_col = _find_column(fields, POSSIBLE_COVER_COLS)
+    if not filename_col or not cover_col:
+        raise ValueError(
+            "SoundMouse tracklist needs Filename and AlbumCoverArt columns"
+        )
+    audio = {
+        _wav_name(row.get(filename_col, ""))
+        for row in rows
+        if str(row.get(filename_col, "")).strip()
+    }
+    covers = {
+        Path(str(row.get(cover_col, "")).strip()).name.casefold()
+        for row in rows
+        if str(row.get(cover_col, "")).strip()
+    }
+    return audio, covers
+
+
+def _soundmouse_paths_by_leaf(root: Path) -> dict[str, list[Path]]:
+    result: dict[str, list[Path]] = {}
+    if not root.is_dir():
+        return result
+    for path in root.rglob("*"):
+        if path.is_file() and path.name != ".DS_Store" and not path.name.startswith("._"):
+            result.setdefault(path.name.casefold(), []).append(path)
+    return result
+
+
+def _archive_soundmouse_missing(path: Path, logger: logging.Logger) -> None:
+    if not path.exists():
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive = path.with_name(f"{path.name}-archived-{stamp}")
+    counter = 2
+    while archive.exists():
+        archive = path.with_name(f"{path.name}-archived-{stamp}-{counter}")
+        counter += 1
+    path.replace(archive)
+    logger.info(f"  Archived prior SoundMouse correction → {archive.name}")
+
+
+def _write_soundmouse_correction_audit(
+    path: Path,
+    *,
+    audio_additions: set[str],
+    audio_removals: set[str],
+    cover_additions: set[str],
+    cover_removals: set[str],
+) -> None:
+    fields = ["Action", "Filename", "Local Result", "Required Manual Action"]
+    rows: list[dict[str, str]] = []
+    for action, values, local, manual in (
+        (
+            "AUDIO_ADDITION_UPLOAD", audio_additions,
+            "Prepared under Missing/MEDIA", "Upload audio to SoundMouse",
+        ),
+        (
+            "AUDIO_REMOVE_FROM_SOUNDMOUSE", audio_removals,
+            "Removed from original MEDIA", "Remove audio from SoundMouse",
+        ),
+        (
+            "COVER_ADDITION_UPLOAD", cover_additions,
+            "Prepared under Missing/Covers", "Upload cover to SoundMouse",
+        ),
+        (
+            "COVER_REMOVE_FROM_SOUNDMOUSE", cover_removals,
+            "Removed from original Covers", "Remove cover from SoundMouse",
+        ),
+    ):
+        rows.extend({
+            "Action": action,
+            "Filename": name,
+            "Local Result": local,
+            "Required Manual Action": manual,
+        } for name in sorted(values))
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def run_soundmouse_step(
     ctx: ReleaseContext,
     dry_run: bool,
@@ -806,6 +941,20 @@ def run_soundmouse_step(
 ) -> bool:
     logger.info(f"  Tracklist: {ctx.soundmouse_tracklist_csv}")
     logger.info(f"  Release base: {SOUNDMOUSE_BASE}")
+    from delivery_state import partner_needs_correction_package, partner_status
+
+    status = partner_status(ctx.specials_dir, "soundmouse")
+    correction_package = partner_needs_correction_package(
+        ctx.specials_dir, "soundmouse"
+    )
+    logger.info(
+        f"  SoundMouse refresh state: {status.upper()} — "
+        + (
+            "uploaded corrections use a separate Missing package."
+            if correction_package
+            else "refresh the original delivery in place."
+        )
+    )
 
     if dry_run:
         _export_domo_cards(ctx, _domo_configs(ctx), True, logger)
@@ -849,6 +998,38 @@ def run_soundmouse_step(
         logger.error(f"  ✗ SoundMouse directory setup failed: {exc}")
         return False
     try:
+        expected_audio, expected_covers = _soundmouse_expected_names(
+            ctx.soundmouse_tracklist_csv
+        )
+    except (OSError, ValueError) as exc:
+        logger.error(f"  ✗ Could not read refreshed SoundMouse tracklist: {exc}")
+        return False
+    existing_audio = _soundmouse_paths_by_leaf(root / "MEDIA")
+    existing_covers = _soundmouse_paths_by_leaf(root / "Covers")
+    audio_additions = expected_audio - set(existing_audio)
+    audio_removals = set(existing_audio) - expected_audio
+    cover_additions = expected_covers - set(existing_covers)
+    cover_removals = set(existing_covers) - expected_covers
+    has_delta = bool(
+        audio_additions or audio_removals or cover_additions or cover_removals
+    )
+    correction_root = root / "Missing"
+    if correction_package and has_delta:
+        _archive_soundmouse_missing(correction_root, logger)
+        for child in (
+            correction_root,
+            correction_root / "MEDIA",
+            correction_root / "Covers",
+            correction_root / "Metadata",
+        ):
+            child.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        f"  SoundMouse refresh delta: {len(audio_additions)} audio addition(s), "
+        f"{len(audio_removals)} audio removal(s), "
+        f"{len(cover_additions)} cover addition(s), "
+        f"{len(cover_removals)} cover removal(s)."
+    )
+    try:
         codes = metadata_codes_from_bucket(ctx.soundmouse_bucket_csv)
     except (OSError, ValueError) as exc:
         logger.error(f"  ✗ Could not read SoundMouse bucket export: {exc}")
@@ -872,14 +1053,32 @@ def run_soundmouse_step(
         source_workbooks = [
             staging_dir / metadata_filename(code) for code in codes
         ]
-        if not run_soundmouse_unisync(ctx, False, overwrite, logger):
-            return False
-        if not download_soundmouse_covers(
-            ctx.soundmouse_tracklist_csv,
-            root,
+        media_destination = (
+            correction_root / "MEDIA"
+            if correction_package and has_delta
+            else root / "MEDIA"
+        )
+        if not run_soundmouse_unisync(
+            ctx,
             False,
             overwrite,
             logger,
+            destination_dir=media_destination,
+            existing_media_roots=(root / "MEDIA",) if correction_package else (),
+        ):
+            return False
+        cover_destination = (
+            correction_root
+            if correction_package and has_delta
+            else root
+        )
+        if not download_soundmouse_covers(
+            ctx.soundmouse_tracklist_csv,
+            cover_destination,
+            False,
+            overwrite,
+            logger,
+            existing_cover_roots=(root / "Covers",) if correction_package else (),
         ):
             return False
         try:
@@ -888,9 +1087,67 @@ def run_soundmouse_step(
                 root / "Metadata",
                 logger,
             )
+            if correction_package and has_delta:
+                install_soundmouse_metadata(
+                    source_workbooks,
+                    correction_root / "Metadata",
+                    logger,
+                )
         except (OSError, ValueError) as exc:
             logger.error(f"  ✗ Could not install SoundMouse metadata: {exc}")
             return False
+
+    prepared_audio = set().union(
+        _disk_file_keys(root / "MEDIA"),
+        _disk_file_keys(correction_root / "MEDIA")
+        if correction_package and has_delta else set(),
+    )
+    prepared_covers = set().union(
+        _disk_file_keys(root / "Covers"),
+        _disk_file_keys(correction_root / "Covers")
+        if correction_package and has_delta else set(),
+    )
+    unprepared_audio = expected_audio - prepared_audio
+    unprepared_covers = expected_covers - prepared_covers
+    if unprepared_audio or unprepared_covers:
+        logger.error(
+            "  ✗ SoundMouse refresh is incomplete; refusing to remove any "
+            f"obsolete originals ({len(unprepared_audio)} audio and "
+            f"{len(unprepared_covers)} cover additions still missing)."
+        )
+        return False
+
+    # Only mutate the original delivery after all additions, covers, and
+    # refreshed metadata have been prepared successfully.
+    removal_errors = 0
+    for key in audio_removals:
+        for path in existing_audio[key]:
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.error(f"  ✗ Could not remove stale SoundMouse audio {path}: {exc}")
+                removal_errors += 1
+    for key in cover_removals:
+        for path in existing_covers[key]:
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.error(f"  ✗ Could not remove stale SoundMouse cover {path}: {exc}")
+                removal_errors += 1
+    if removal_errors:
+        return False
+    if correction_package and has_delta:
+        _write_soundmouse_correction_audit(
+            correction_root / "SoundMouse Missing Audit.csv",
+            audio_additions=audio_additions,
+            audio_removals=audio_removals,
+            cover_additions=cover_additions,
+            cover_removals=cover_removals,
+        )
+        logger.warning(
+            "  ⚠ SoundMouse was already uploaded. Review the Missing audit "
+            "for manual removals in SoundMouse."
+        )
 
     return validate_soundmouse_delivery(
         metadata_paths,
@@ -899,6 +1156,10 @@ def run_soundmouse_step(
         ctx.soundmouse_validation_report,
         False,
         logger,
+        additional_media_roots=(correction_root / "MEDIA",)
+        if correction_package and has_delta else (),
+        additional_cover_roots=(correction_root / "Covers",)
+        if correction_package and has_delta else (),
     )
 
 

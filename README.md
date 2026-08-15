@@ -211,23 +211,26 @@ Then the other machine installs with `pip install -r requirements.lock`.
   metadata cover filename locally. Missing source masters fail closed without
   deleting existing media.
 - Catalog refreshes are delivery-state aware. A partner is `pending` unless it
-  has explicitly been marked delivered in the release-local
+  has explicitly been marked `uploaded` or `delivered` in the release-local
   `_WORKFLOW/delivery_status.json`. Re-running Steps 1, 5–8, and 10 replaces its
   metadata, retrieves newly referenced masters through the normal UniSync
   territory/cache/client route, refreshes covers, adds new media, and removes
-  files no longer present in the refreshed source trees. Destinations marked
-  delivered are protected from in-place changes; delivered SourceAudio US and
-  Ex-US instead receive the audited `Missing` correction package described
-  above. Step 15 validates refreshed SourceAudio metadata against the union of
-  the original `Music` tree and the current correction package. Record or
-  inspect state with:
+  files no longer present in the refreshed source trees. `uploaded` is the
+  correction boundary for SourceAudio US/Ex-US, Netmix, and SoundMouse because
+  those systems map uploaded metadata to media before official delivery. They
+  receive an audited `Missing` correction package once uploaded (and remain in
+  correction mode if later marked delivered). Other uploaded partners continue
+  to refresh their original folders in place; other delivered partners are
+  protected from mutation. Step 15 validates SourceAudio and Netmix against the
+  union of original media and the current correction package. SoundMouse applies
+  the same union in its Step 16 gate. Record or inspect state with:
   ```bash
-  python3 delivery_state.py --year 2026 --month 9 --part 1 --mark-delivered sourceaudio,sourceaudio_exus
+  python3 delivery_state.py --year 2026 --month 9 --part 1 --mark-uploaded sourceaudio,sourceaudio_exus
   python3 delivery_state.py --year 2026 --month 9 --part 1 --show
   python3 delivery_state.py --year 2026 --month 9 --part 1 --mark-pending sourceaudio
   ```
   Accepted partner keys are `discovery`, `espn`, `hd_updates`, `japan_ntt`,
-  `nbc`, `netmix`, `sourceaudio`, `sourceaudio_exus`, `synchtank`, and
+  `nbc`, `netmix`, `soundmouse`, `sourceaudio`, `sourceaudio_exus`, `synchtank`, and
   `tunesat`; use `all` by itself to change every key. When refreshed metadata
   removes catalog items, run with `--prune-music --prune-mode archive` before
   final packaging so the canonical `1-ORIGINAL/Music` trees are reconciled

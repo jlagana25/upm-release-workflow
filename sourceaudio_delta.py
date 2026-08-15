@@ -473,7 +473,7 @@ def reconcile_sourceaudio_refresh(
     correction_package: bool = True,
     converter: Optional[Callable[[Path, Path], tuple[bool, str]]] = None,
 ) -> DeltaResult:
-    """Reconcile refreshed metadata in place or as a delivered correction.
+    """Reconcile refreshed metadata in place or as an uploaded correction.
 
     An empty/nonexistent AIFF delivery is treated as the initial workflow run,
     because Step 1 exports metadata before Step 11 creates the AIFF files.
@@ -747,16 +747,19 @@ def reconcile_context_sourceaudio(
     dry_run: bool = False,
 ) -> DeltaResult:
     metadata, media, source = _territory_paths(ctx, territory)
-    from delivery_state import partner_is_delivered
+    from delivery_state import partner_needs_correction_package, partner_status
 
     partner_key = "sourceaudio" if territory == "us" else "sourceaudio_exus"
-    correction_package = partner_is_delivered(ctx.specials_dir, partner_key)
+    status = partner_status(ctx.specials_dir, partner_key)
+    correction_package = partner_needs_correction_package(
+        ctx.specials_dir, partner_key
+    )
     logger.info(
         "     Refresh mode: "
         + (
-            "DELIVERED — build a separate Missing correction package"
+            f"{status.upper()} — build a separate Missing correction package"
             if correction_package
-            else "PENDING — update the existing delivery in place"
+            else f"{status.upper()} — update the existing delivery in place"
         )
     )
     preparation_errors = 0

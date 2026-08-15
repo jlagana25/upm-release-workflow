@@ -265,6 +265,38 @@ class SoundMouseTests(unittest.TestCase):
             with report.open(encoding="utf-8-sig", newline="") as handle:
                 self.assertEqual(list(csv.DictReader(handle)), [])
 
+    def test_metadata_validation_accepts_uploaded_missing_package_union(self) -> None:
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = root / "Metadata.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["Filename", "ALBUM ARTWORK FILE NAME"])
+            sheet.append(["old.wav", "old.jpg"])
+            sheet.append(["new.wav", "new.jpg"])
+            workbook.save(metadata)
+            workbook.close()
+            (root / "MEDIA").mkdir()
+            (root / "Covers").mkdir()
+            (root / "Missing" / "MEDIA").mkdir(parents=True)
+            (root / "Missing" / "Covers").mkdir(parents=True)
+            (root / "MEDIA" / "old.wav").write_bytes(b"old")
+            (root / "Covers" / "old.jpg").write_bytes(b"old")
+            (root / "Missing" / "MEDIA" / "new.wav").write_bytes(b"new")
+            (root / "Missing" / "Covers" / "new.jpg").write_bytes(b"new")
+            self.assertTrue(validate_soundmouse_delivery(
+                [metadata],
+                root / "MEDIA",
+                root / "Covers",
+                root / "report.csv",
+                False,
+                logging.getLogger("test"),
+                additional_media_roots=(root / "Missing" / "MEDIA",),
+                additional_cover_roots=(root / "Missing" / "Covers",),
+            ))
+
     def test_full_month_metadata_is_installed_without_range_splitting(self) -> None:
         from openpyxl import Workbook, load_workbook
 

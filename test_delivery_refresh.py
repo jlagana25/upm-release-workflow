@@ -7,9 +7,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from delivery_state import partner_is_delivered, set_partner_status
+from delivery_state import (
+    partner_is_delivered,
+    partner_needs_correction_package,
+    partner_status,
+    set_partner_status,
+)
 from cleanup import remove_non_maintracks
-from final_packaging import CopyOp, _copy_tree_files, _remove_destination_extras
+from final_packaging import (
+    CopyOp,
+    _copy_tree_files,
+    _reconcile_uploaded_copy_op,
+    _remove_destination_extras,
+)
 from prune import _scan_tree
 from soundminer_agent import _build_command
 
@@ -90,8 +100,41 @@ class DeliveryRefreshTests(unittest.TestCase):
             self.assertTrue(partner_is_delivered(root, "netmix"))
             set_partner_status(root, "netmix", False)
             self.assertFalse(partner_is_delivered(root, "NETMIX"))
+            set_partner_status(root, "netmix", "uploaded")
+            self.assertEqual(partner_status(root, "netmix"), "uploaded")
+            self.assertTrue(partner_needs_correction_package(root, "netmix"))
+            set_partner_status(root, "discovery", "uploaded")
+            self.assertFalse(
+                partner_needs_correction_package(root, "discovery")
+            )
             with self.assertRaises(ValueError):
                 set_partner_status(root, "typo-partner", True)
+
+    def test_uploaded_netmix_builds_delta_and_removes_obsolete_local_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "canonical" / "Label" / "Album"
+            destination = root / "Netmix" / "Music" / "Label" / "Album"
+            source.mkdir(parents=True)
+            destination.mkdir(parents=True)
+            (source / "new.wav").write_bytes(b"new")
+            (source / "cover.jpg").write_bytes(b"cover")
+            stale = destination / "old.wav"
+            stale.write_bytes(b"old")
+            op = CopyOp(
+                "Netmix",
+                root / "canonical",
+                root / "Netmix" / "Music",
+                partner_key="netmix",
+            )
+            self.assertTrue(_reconcile_uploaded_copy_op(
+                op, dry_run=False, logger=logging.getLogger("delivery-refresh")
+            ))
+            missing = root / "Netmix" / "Missing"
+            self.assertTrue((missing / "Label" / "Album" / "new.wav").is_file())
+            self.assertTrue((missing / "Label" / "Album" / "cover.jpg").is_file())
+            self.assertTrue((missing / "Netmix Missing Audit.csv").is_file())
+            self.assertFalse(stale.exists())
 
     def test_pending_destination_sync_uses_union_and_removes_extras(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

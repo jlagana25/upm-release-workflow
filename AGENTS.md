@@ -171,7 +171,7 @@ single source; don't reinvent per module), `logging_utils.py` (step logging
 helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 (`soundminer_agent.py` supersedes its SSH/manual path for normal runs),
 `soundminer_agent.py` (HDF1 Aqua LaunchAgent + SSH JSON/status protocol),
-`delivery_state.py` (release-local pending/delivered partner status),
+`delivery_state.py` (release-local pending/uploaded/delivered partner status),
 `workflow_report.py` (structured JSON run report), `sourceaudio_delta.py`
 (post-delivery SourceAudio metadata/audio reconciliation),
 `prune.py` (removes files from prior months the current tracklist no longer
@@ -294,7 +294,7 @@ inline or are submitted to HDF1's login-session agent.
   (e.g. `--only 10` explicitly un-skips SoundExchange).
 - **Column detection** goes through `tracklist_columns.py`. Don't hardcode column
   names in individual modules.
-- **Refreshed SourceAudio metadata reconciles by External Id.** Once delivered
+- **Refreshed SourceAudio metadata reconciles by External Id.** Once uploaded
   AIFFs exist, a later US or Ex-US Domo export rebuilds the sibling `Missing`
   package with additions and filename replacements. It may remove metadata
   removals and superseded filenames from the local `Music` tree only after all
@@ -307,12 +307,14 @@ inline or are submitted to HDF1's login-session agent.
   `CDNAlbumArt` structure and retain the metadata cover filename locally.
   Missing/ambiguous masters fail closed and preserve the existing local media.
 - **Catalog refresh behavior is explicit, not inferred from folder contents.**
-  `delivery_state.py` stores per-partner pending/delivered state in the release's
-  `_WORKFLOW/delivery_status.json`. Pending Step 10 destinations are exact-synced
-  from refreshed canonical sources; delivered destinations are skipped.
-  Delivered SourceAudio US/Ex-US use `Missing` correction packages, and Step 15
-  validates their refreshed metadata against the union of `Music` and the
-  current `Missing` tree. A refresh that includes removals should also use
+  `delivery_state.py` stores per-partner pending/uploaded/delivered state in the
+  release's `_WORKFLOW/delivery_status.json`. ``uploaded`` is the correction
+  boundary for SourceAudio US/Ex-US, Netmix, and SoundMouse; those partners use
+  audited `Missing` packages because metadata has already been mapped to media
+  in the remote service. All other uploaded partners still exact-sync their
+  original folders. Delivered ordinary partners are skipped. Step 15 validates
+  SourceAudio and Netmix against original media plus `Missing`; Step 16 applies
+  the same union to SoundMouse. A refresh that includes removals should also use
   recoverable `--prune-music --prune-mode archive` so canonical sources match the new
   tracklists before Step 10. Never assume a populated folder was delivered.
   Standalone Tunesat cleanup can use `--archive-extras` when recovery is safer

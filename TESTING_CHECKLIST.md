@@ -293,13 +293,16 @@ workflow run must not wait for manual account/password entry.
     value, replace its leaf with the refreshed cover token plus `.webp`, and
     save the result under the metadata-provided cover filename in the master,
     flat-original, and `WAV w COVERS` album locations.
-  - Before a post-run catalog refresh, mark partners already sent to clients:
-    `python3 delivery_state.py <date args> --mark-delivered sourceaudio,sourceaudio_exus`.
+  - Before a post-run catalog refresh, mark partner-system uploads separately
+    from official delivery:
+    `python3 delivery_state.py <date args> --mark-uploaded sourceaudio,sourceaudio_exus`.
     `--show` must list omitted partners as `pending`. Pending Step 10
     destinations are exact-synced after the additive copy, including the union
-    of US and eligible Ex-US files in Tunesat. Delivered destinations must be
-    logged and skipped. For delivered SourceAudio, Step 15 must validate the
-    refreshed metadata against `Music` plus the current `Missing` package. Use
+    of US and eligible Ex-US files in Tunesat. Uploaded SourceAudio, Netmix, and
+    SoundMouse must create an audited `Missing` package; ordinary uploaded
+    partners still refresh in place. Delivered ordinary destinations must be
+    logged and skipped. Step 15 must validate uploaded SourceAudio and Netmix
+    against original media plus `Missing`; SoundMouse does the same in Step 16. Use
     `--prune-music --prune-mode archive` on the refresh
     run so removals also leave the canonical original trees recoverably.
     For a recoverable standalone Tunesat sync, pass

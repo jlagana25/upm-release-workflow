@@ -40,11 +40,13 @@ Behaviour:
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import os
 import shutil
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -402,6 +404,122 @@ def _remove_destination_extras(
     return removed, errors
 
 
+def _files_for_op(op: CopyOp) -> dict[Path, Path]:
+    """Return the exact relative-file manifest for one copy operation."""
+    if not op.src.is_dir():
+        return {}
+    manifest: dict[Path, Path] = {}
+    for root, dirs, files in os.walk(op.src):
+        relative_root = Path(root).relative_to(op.src)
+        if op.label_filter is not None:
+            if relative_root == Path("."):
+                dirs[:] = [d for d in dirs if d.strip() in op.label_filter]
+                continue
+            if relative_root.parts[0].strip() not in op.label_filter:
+                dirs[:] = []
+                continue
+        for filename in files:
+            if filename == ".DS_Store" or filename.startswith("._"):
+                continue
+            if (
+                op.filename_filter is not None
+                and filename.rsplit(".", 1)[0].casefold()
+                not in op.filename_filter
+            ):
+                continue
+            relative = relative_root / filename
+            manifest[relative] = Path(root) / filename
+    return manifest
+
+
+def _archive_correction_dir(path: Path, logger: logging.Logger) -> None:
+    if not path.exists():
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive = path.with_name(f"{path.name}-archived-{stamp}")
+    counter = 2
+    while archive.exists():
+        archive = path.with_name(f"{path.name}-archived-{stamp}-{counter}")
+        counter += 1
+    path.replace(archive)
+    logger.info(f"  Archived prior correction package → {archive.name}")
+
+
+def _reconcile_uploaded_copy_op(
+    op: CopyOp,
+    *,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> bool:
+    """Build an incremental Missing package for an already-uploaded tree.
+
+    Netmix is a direct mirror of ``WAV w COVERS``, so relative paths provide a
+    deterministic delta. New files go into a sibling ``Missing`` tree;
+    removals leave the local original tree and are listed for manual removal
+    from the partner system.
+    """
+    expected = _files_for_op(op)
+    if not expected and not op.src.is_dir():
+        logger.error(f"  ✗ Uploaded {op.partner_key} source is missing: {op.src}")
+        return False
+    actual = {
+        path.relative_to(op.dst): path
+        for path in op.dst.rglob("*")
+        if path.is_file() and path.name != ".DS_Store" and not path.name.startswith("._")
+    } if op.dst.is_dir() else {}
+    additions = sorted(set(expected) - set(actual), key=lambda p: str(p).casefold())
+    removals = sorted(set(actual) - set(expected), key=lambda p: str(p).casefold())
+    missing_dir = op.dst.parent / "Missing"
+    logger.info(
+        f"  {op.partner_key} uploaded refresh: {len(additions)} addition(s), "
+        f"{len(removals)} removal(s)."
+    )
+    if dry_run:
+        logger.info(f"  [DRY RUN] Would rebuild correction package: {missing_dir}")
+        return True
+    if not additions and not removals:
+        logger.info(f"  ✓ Uploaded {op.partner_key} media already matches refreshed source.")
+        return True
+
+    try:
+        _archive_correction_dir(missing_dir, logger)
+        missing_dir.mkdir(parents=True, exist_ok=False)
+        rows: list[dict[str, str]] = []
+        for relative in additions:
+            destination = missing_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(expected[relative], destination)
+            rows.append({
+                "Action": "ADDITION_UPLOAD",
+                "Relative Path": str(relative),
+                "Local Result": f"Prepared in {missing_dir.name}",
+                "Required Manual Action": "Upload this file to Netmix",
+            })
+        # Copy completion is the safety boundary: do not remove an obsolete
+        # local item until every replacement/addition is ready.
+        for relative in removals:
+            actual[relative].unlink()
+            rows.append({
+                "Action": "REMOVE_FROM_NETMIX",
+                "Relative Path": str(relative),
+                "Local Result": "Removed from original Music folder",
+                "Required Manual Action": "Remove this file from Netmix",
+            })
+        report = missing_dir / "Netmix Missing Audit.csv"
+        with report.open("w", encoding="utf-8-sig", newline="") as handle:
+            fields = [
+                "Action", "Relative Path", "Local Result", "Required Manual Action"
+            ]
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        logger.info(f"  ✓ Netmix correction package ready: {missing_dir}")
+        return True
+    except OSError as exc:
+        logger.error(f"  ✗ Could not build Netmix correction package: {exc}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -421,11 +539,28 @@ def copy_originals_to_finals(
     to stop or continue.
     """
     ops = _build_ops(ctx)
-    from delivery_state import partner_is_delivered
+    from delivery_state import (
+        partner_is_delivered,
+        partner_needs_correction_package,
+    )
+
+    correction_ops = [
+        op for op in ops
+        if op.partner_key == "netmix"
+        and partner_needs_correction_package(ctx.specials_dir, op.partner_key)
+    ]
+    if correction_ops:
+        ops = [op for op in ops if op not in correction_ops]
 
     delivered_keys = {
         op.partner_key for op in ops
-        if op.partner_key and partner_is_delivered(ctx.specials_dir, op.partner_key)
+        if (
+            op.partner_key
+            and partner_is_delivered(ctx.specials_dir, op.partner_key)
+            and not partner_needs_correction_package(
+                ctx.specials_dir, op.partner_key
+            )
+        )
     }
     if delivered_keys:
         logger.warning(
@@ -466,6 +601,11 @@ def copy_originals_to_finals(
         res = _run_op(op, dry_run=dry_run, overwrite=overwrite, logger=logger)
         results.append(res)
 
+    corrections_ok = all(
+        _reconcile_uploaded_copy_op(op, dry_run=dry_run, logger=logger)
+        for op in correction_ops
+    )
+
     removed_extras, sync_errors = _remove_destination_extras(
         ops, dry_run=dry_run, logger=logger
     )
@@ -504,7 +644,12 @@ def copy_originals_to_finals(
     total_skipped = sum(r.skipped for r in results)
     total_errors  = sum(r.errors  for r in results)
     n_missing     = sum(1 for r in results if r.source_missing)
-    overall_ok    = all(r.ok for r in results) and covers_ok and sync_errors == 0
+    overall_ok    = (
+        all(r.ok for r in results)
+        and covers_ok
+        and corrections_ok
+        and sync_errors == 0
+    )
 
     logger.info("\n  ─── Step 10 summary ─────────────────────────────────")
     for r in results:

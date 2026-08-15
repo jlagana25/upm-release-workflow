@@ -1,9 +1,10 @@
 """Explicit per-release partner delivery state.
 
-A populated delivery folder does not reveal whether it has already been sent.
+A populated delivery folder does not reveal whether it is still being built,
+has been uploaded into a partner system, or has been officially delivered.
 Refresh behavior therefore uses this small release-local state file instead of
-guessing: pending partners are reconciled in place; delivered partners receive
-separate correction packages.
+guessing.  ``uploaded`` is the correction-package boundary for partner systems
+whose ingest maps metadata to media (SourceAudio, Netmix, and SoundMouse).
 """
 
 from __future__ import annotations
@@ -27,8 +28,16 @@ KNOWN_PARTNERS = frozenset({
     "netmix",
     "sourceaudio",
     "sourceaudio_exus",
+    "soundmouse",
     "synchtank",
     "tunesat",
+})
+VALID_STATUSES = frozenset({"pending", "uploaded", "delivered"})
+CORRECTION_PACKAGE_PARTNERS = frozenset({
+    "netmix",
+    "soundmouse",
+    "sourceaudio",
+    "sourceaudio_exus",
 })
 
 
@@ -51,11 +60,35 @@ def _load(release_root: Path) -> dict:
 
 
 def partner_is_delivered(release_root: Path, partner: str) -> bool:
-    entry = _load(release_root)["partners"].get(partner.casefold(), {})
-    return entry.get("status") == "delivered"
+    return partner_status(release_root, partner) == "delivered"
 
 
-def set_partner_status(release_root: Path, partner: str, delivered: bool) -> Path:
+def partner_status(release_root: Path, partner: str) -> str:
+    entry = _load(release_root)["partners"].get(partner.strip().casefold(), {})
+    status = str(entry.get("status", "pending")).casefold()
+    return status if status in VALID_STATUSES else "pending"
+
+
+def partner_needs_correction_package(release_root: Path, partner: str) -> bool:
+    """True once a correction-package partner has crossed its upload boundary.
+
+    ``delivered`` also qualifies because an officially delivered package has,
+    by definition, already been uploaded.  Other partner types never use a
+    Missing package; their ``delivered`` state simply protects them from a
+    later in-place refresh.
+    """
+    key = partner.strip().casefold()
+    return (
+        key in CORRECTION_PACKAGE_PARTNERS
+        and partner_status(release_root, key) in {"uploaded", "delivered"}
+    )
+
+
+def set_partner_status(
+    release_root: Path,
+    partner: str,
+    status: str | bool,
+) -> Path:
     root = Path(release_root)
     data = _load(root)
     key = partner.strip().casefold()
@@ -66,8 +99,19 @@ def set_partner_status(release_root: Path, partner: str, delivered: bool) -> Pat
             f"Unknown partner {partner!r}; expected one of: "
             + ", ".join(sorted(KNOWN_PARTNERS))
         )
+    # Preserve compatibility with the original bool API used by older scripts.
+    normalized = (
+        ("delivered" if status else "pending")
+        if isinstance(status, bool)
+        else str(status).strip().casefold()
+    )
+    if normalized not in VALID_STATUSES:
+        raise ValueError(
+            f"Invalid status {status!r}; expected one of: "
+            + ", ".join(sorted(VALID_STATUSES))
+        )
     data["partners"][key] = {
-        "status": "delivered" if delivered else "pending",
+        "status": normalized,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     path = state_path(root)
@@ -81,10 +125,13 @@ def set_partner_status(release_root: Path, partner: str, delivered: bool) -> Pat
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="Mark release partners pending or delivered for refresh routing."
+        description=(
+            "Mark release partners pending, uploaded, or delivered for refresh routing."
+        )
     )
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--mark-delivered", metavar="PARTNERS")
+    action.add_argument("--mark-uploaded", metavar="PARTNERS")
     action.add_argument("--mark-pending", metavar="PARTNERS")
     action.add_argument("--show", action="store_true")
     parser.add_argument("--year", type=int)
@@ -102,8 +149,12 @@ def _main() -> int:
             status = data.get(partner, {}).get("status", "pending")
             print(f"{partner}: {status}")
         return 0
-    raw = args.mark_delivered or args.mark_pending
-    delivered = bool(args.mark_delivered)
+    raw = args.mark_delivered or args.mark_uploaded or args.mark_pending
+    status = (
+        "delivered" if args.mark_delivered
+        else "uploaded" if args.mark_uploaded
+        else "pending"
+    )
     requested = [item.strip().casefold() for item in raw.split(",") if item.strip()]
     if "all" in requested:
         if len(requested) != 1:
@@ -117,8 +168,8 @@ def _main() -> int:
         )
     for partner in requested:
         if partner:
-            path = set_partner_status(ctx.specials_dir, partner, delivered)
-            print(f"{partner}: {'delivered' if delivered else 'pending'} → {path}")
+            path = set_partner_status(ctx.specials_dir, partner, status)
+            print(f"{partner}: {status} → {path}")
     return 0
 
 

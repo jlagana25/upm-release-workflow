@@ -109,15 +109,19 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
     pd  = ctx.partner_dirs
     us  = ctx.us_tracklist_csv
     exus = ctx.exus_tracklist_csv
-    from delivery_state import partner_is_delivered
+    from delivery_state import partner_needs_correction_package
 
     sourceaudio_extra = (
         (pd["sourceaudio_music"].parent / "Missing",)
-        if partner_is_delivered(ctx.specials_dir, "sourceaudio") else ()
+        if partner_needs_correction_package(ctx.specials_dir, "sourceaudio") else ()
     )
     sourceaudio_exus_extra = (
         (pd["sourceaudio_exus_music"].parent / "Missing",)
-        if partner_is_delivered(ctx.specials_dir, "sourceaudio_exus") else ()
+        if partner_needs_correction_package(ctx.specials_dir, "sourceaudio_exus") else ()
+    )
+    netmix_extra = (
+        (pd["netmix_music"].parent / "Missing",)
+        if partner_needs_correction_package(ctx.specials_dir, "netmix") else ()
     )
 
     def root_of(media_dir: Path) -> Path:
@@ -129,7 +133,7 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
         # Netmix covers must sit in each album folder (built from WAV w COVERS).
         Check("Netmix",    pm["netmix"],    pd["netmix_music"],
               check_covers=True, cover_source=us, cover_root=pd["netmix_music"],
-              cover_mode="album"),
+              cover_mode="album", additional_media_dirs=netmix_extra),
         # SynchTank covers live in a separate flat Covers folder → present-anywhere.
         Check("SynchTank", pm["synchtank"], pd["synchtank_wav"],
               check_covers=True, cover_source=us, cover_root=root_of(pd["synchtank_wav"]),
@@ -283,32 +287,41 @@ def _check_covers_per_album(chk: "Check", logger: logging.Logger, add) -> bool:
         seen.add((lbl, ano))
         albums.append((lbl, ano, cov))
 
-    media = chk.media_dir
+    media_roots = (chk.media_dir, *chk.additional_media_dirs)
     missing: list[str] = []
     checked = 0
     for lbl, ano, cov in albums:
-        label_dir = media / lbl
-        album_dir: Optional[Path] = None
-        if label_dir.is_dir():
-            for entry in label_dir.iterdir():
-                if entry.is_dir() and entry.name.startswith(f"{ano} -"):
-                    album_dir = entry
-                    break
-        if album_dir is None:
+        album_dirs: list[Path] = []
+        for media in media_roots:
+            label_dir = media / lbl
+            if not label_dir.is_dir():
+                continue
+            album_dirs.extend(
+                entry for entry in label_dir.iterdir()
+                if entry.is_dir() and entry.name.startswith(f"{ano} -")
+            )
+        if not album_dirs:
             continue   # audio folder absent → covered by the audio check
         checked += 1
-        here = {
-            _key(p.name)
-            for p in album_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-        }
+        here = set()
+        for album_dir in album_dirs:
+            here.update(
+                _key(p.name)
+                for p in album_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+            )
         if _key(cov) not in here:
-            missing.append(f"{lbl}/{album_dir.name}/{cov}")
+            missing.append(f"{lbl}/{album_dirs[0].name}/{cov}")
 
     logger.info(f"      per-album cover check: {checked} album folder(s)")
     _echo(logger, "MISSING covers (not in their album folder)", missing)
     for m in missing:
-        add(chk.label, "COVER_NOT_IN_ALBUM_FOLDER", m, str(media))
+        add(
+            chk.label,
+            "COVER_NOT_IN_ALBUM_FOLDER",
+            m,
+            "; ".join(str(root) for root in media_roots),
+        )
 
     if missing:
         logger.error(
