@@ -113,11 +113,13 @@ class CopyResult:
 
 @dataclass
 class CopyOp:
-    """A single source → destination copy unit, optionally label-filtered."""
+    """A single source → destination copy unit with optional filters."""
     name: str
     src:  Path
     dst:  Path
     label_filter: Optional[frozenset[str]] = None  # None = copy everything
+    partner_key: str = ""
+    filename_filter: Optional[frozenset[str]] = None  # normalized stems
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +134,7 @@ def _copy_tree_files(
     overwrite: bool,
     logger: logging.Logger,
     label_filter: Optional[frozenset[str]] = None,
+    filename_filter: Optional[frozenset[str]] = None,
 ) -> tuple[int, int, int]:
     """
     Recursively copy every file under ``src`` into the mirror location
@@ -181,6 +184,11 @@ def _copy_tree_files(
         for fn in sorted(files):
             # Ignore macOS detritus.
             if fn == ".DS_Store" or fn.startswith("._"):
+                continue
+            if (
+                filename_filter is not None
+                and fn.rsplit(".", 1)[0].casefold() not in filename_filter
+            ):
                 continue
 
             src_file = Path(root) / fn
@@ -247,6 +255,7 @@ def _run_op(
         overwrite=overwrite,
         logger=logger,
         label_filter=op.label_filter,
+        filename_filter=op.filename_filter,
     )
 
     res = CopyResult(
@@ -278,37 +287,119 @@ def _build_ops(ctx: ReleaseContext) -> list[CopyOp]:
 
     return [
         # ---- MP3 (3 destinations) ----
-        CopyOp("MP3 → Tunesat",           mp3_src,    pd["tunesat_mp3"]),
-        CopyOp("MP3 → Discovery",         mp3_src,    pd["discovery_mp3"]),
-        CopyOp("MP3 → HD UDrive master",  mp3_src,    pd["hd_mp3_media"]),
+        CopyOp("MP3 → Tunesat",           mp3_src,    pd["tunesat_mp3"], partner_key="tunesat"),
+        CopyOp("MP3 → Discovery",         mp3_src,    pd["discovery_mp3"], partner_key="discovery"),
+        CopyOp("MP3 → HD UDrive master",  mp3_src,    pd["hd_mp3_media"], partner_key="hd_updates"),
 
         # ---- WAV (4 destinations) ----
-        CopyOp("WAV → ESPN",              wav_src,    pd["espn_wav"]),
-        CopyOp("WAV → SynchTank",         wav_src,    pd["synchtank_wav"]),
-        CopyOp("WAV → Discovery",         wav_src,    pd["discovery_wav"]),
-        CopyOp("WAV → HD UDrive master",  wav_src,    pd["hd_wav_media"]),
+        CopyOp("WAV → ESPN",              wav_src,    pd["espn_wav"], partner_key="espn"),
+        CopyOp("WAV → SynchTank",         wav_src,    pd["synchtank_wav"], partner_key="synchtank"),
+        CopyOp("WAV → Discovery",         wav_src,    pd["discovery_wav"], partner_key="discovery"),
+        CopyOp("WAV → HD UDrive master",  wav_src,    pd["hd_wav_media"], partner_key="hd_updates"),
 
         # ---- Covers (1 destination — paired with WAV/SynchTank) ----
-        CopyOp("Covers → SynchTank",      covers,     pd["synchtank_covers"]),
+        CopyOp("Covers → SynchTank",      covers,     pd["synchtank_covers"], partner_key="synchtank"),
 
         # ---- WAV → NBC staging (plain WAV folder copy, no covers) ----
-        CopyOp("WAV → NBC staging",          wav_src,    pd["nbc_staging_media"]),
+        CopyOp("WAV → NBC staging",          wav_src,    pd["nbc_staging_media"], partner_key="nbc"),
 
         # ---- WAV w COVERS → Netmix (covers ride along) ----
-        CopyOp("WAV w COVERS → Netmix",      wavcov_src, pd["netmix_music"]),
+        CopyOp("WAV w COVERS → Netmix",      wavcov_src, pd["netmix_music"], partner_key="netmix"),
 
         # ---- Ex-US (2 destinations; Tunesat is label-filtered) ----
-        CopyOp("Ex-US WAV → ExUS staging", exus_wav_src, pd["exus_staging_media"]),
+        CopyOp("Ex-US WAV → ExUS staging", exus_wav_src, pd["exus_staging_media"], partner_key="exus_staging"),
         CopyOp(
             "Ex-US MP3 → Tunesat",
             exus_mp3_src,
             pd["tunesat_mp3"],
             label_filter=TUNESAT_EXUS_LABELS,
+            partner_key="tunesat",
         ),
 
         # ---- Japan (1 destination) ----
-        CopyOp("Japan → UPM Japan NTT DATA", japan_src, pd["japan_final_media"]),
+        CopyOp("Japan → UPM Japan NTT DATA", japan_src, pd["japan_final_media"], partner_key="japan_ntt"),
     ]
+
+
+def _expected_destination_files(ops: list[CopyOp]) -> Optional[set[Path]]:
+    """Union of relative files expected from every op sharing a destination."""
+    expected: set[Path] = set()
+    for op in ops:
+        if not op.src.is_dir():
+            return None
+        for root, dirs, files in os.walk(op.src):
+            relative_root = Path(root).relative_to(op.src)
+            if op.label_filter is not None:
+                if relative_root == Path("."):
+                    dirs[:] = [d for d in dirs if d.strip() in op.label_filter]
+                    continue
+                if relative_root.parts[0].strip() not in op.label_filter:
+                    dirs[:] = []
+                    continue
+            for filename in files:
+                if filename == ".DS_Store" or filename.startswith("._"):
+                    continue
+                if (
+                    op.filename_filter is not None
+                    and filename.rsplit(".", 1)[0].casefold()
+                    not in op.filename_filter
+                ):
+                    continue
+                expected.add(relative_root / filename)
+    return expected
+
+
+def _remove_destination_extras(
+    ops: list[CopyOp],
+    *,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> tuple[int, int]:
+    """Remove stale files from pending destinations after additive copying."""
+    removed = errors = 0
+    by_destination: dict[Path, list[CopyOp]] = {}
+    for op in ops:
+        by_destination.setdefault(op.dst, []).append(op)
+
+    for destination, destination_ops in by_destination.items():
+        if not destination.is_dir():
+            continue
+        expected = _expected_destination_files(destination_ops)
+        if expected is None:
+            logger.warning(
+                f"  ⚠ Refusing to remove extras from {destination}: a source tree is missing."
+            )
+            continue
+        extras = [
+            path for path in destination.rglob("*")
+            if path.is_file()
+            and path.name != ".DS_Store"
+            and not path.name.startswith("._")
+            and path.relative_to(destination) not in expected
+        ]
+        for path in extras:
+            try:
+                if not dry_run:
+                    path.unlink()
+                removed += 1
+            except OSError as exc:
+                errors += 1
+                logger.error(f"  ✗ Could not remove stale delivery file {path}: {exc}")
+        if not dry_run:
+            for directory in sorted(
+                (path for path in destination.rglob("*") if path.is_dir()),
+                key=lambda path: len(path.parts),
+                reverse=True,
+            ):
+                try:
+                    if not any(directory.iterdir()):
+                        directory.rmdir()
+                except OSError:
+                    pass
+        if extras:
+            verb = "Would remove" if dry_run else "Removed"
+            logger.info(f"  {verb} {len(extras)} stale file(s) from {destination}")
+    return removed, errors
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +421,36 @@ def copy_originals_to_finals(
     to stop or continue.
     """
     ops = _build_ops(ctx)
+    from delivery_state import partner_is_delivered
+
+    delivered_keys = {
+        op.partner_key for op in ops
+        if op.partner_key and partner_is_delivered(ctx.specials_dir, op.partner_key)
+    }
+    if delivered_keys:
+        logger.warning(
+            "  Delivered partner destinations will not be changed by this "
+            f"refresh: {', '.join(sorted(delivered_keys))}"
+        )
+        ops = [op for op in ops if op.partner_key not in delivered_keys]
+
+    # Tunesat's metadata is the exact contract for its smaller subset. Filter
+    # before copying so a refresh does not temporarily copy thousands of
+    # non-Tunesat tracks only to delete them again in Step 13.
+    tunesat_ops = [op for op in ops if op.partner_key == "tunesat"]
+    if tunesat_ops:
+        from cleanup import _basename_key, _load_keep_filenames
+
+        tunesat_filenames = _load_keep_filenames(ctx.cleanup_metadata_csv, logger)
+        if not tunesat_filenames:
+            logger.error(
+                "  ✗ Tunesat metadata did not yield a safe filename keep-list; "
+                "refusing to package or exact-sync its Music folder."
+            )
+            return False
+        normalized = frozenset(_basename_key(name) for name in tunesat_filenames)
+        for op in tunesat_ops:
+            op.filename_filter = normalized
 
     logger.info(f"  Final packaging: {len(ops)} copy operations queued")
     logger.info(f"    Specials root: {ctx.specials_dir}")
@@ -344,6 +465,10 @@ def copy_originals_to_finals(
     for op in ops:
         res = _run_op(op, dry_run=dry_run, overwrite=overwrite, logger=logger)
         results.append(res)
+
+    removed_extras, sync_errors = _remove_destination_extras(
+        ops, dry_run=dry_run, logger=logger
+    )
 
     # ---- Ex-US staging covers -----------------------------------------------
     # The "Ex-US WAV → ExUS staging" copy carries no cover art (unlike the
@@ -379,7 +504,7 @@ def copy_originals_to_finals(
     total_skipped = sum(r.skipped for r in results)
     total_errors  = sum(r.errors  for r in results)
     n_missing     = sum(1 for r in results if r.source_missing)
-    overall_ok    = all(r.ok for r in results) and covers_ok
+    overall_ok    = all(r.ok for r in results) and covers_ok and sync_errors == 0
 
     logger.info("\n  ─── Step 10 summary ─────────────────────────────────")
     for r in results:
@@ -389,6 +514,7 @@ def copy_originals_to_finals(
     logger.info(
         f"  Totals: {total_copied} copied, {total_skipped} skipped, "
         f"{total_errors} errors, {n_missing} source(s) missing"
+        f", {removed_extras} stale destination file(s) removed"
     )
     if overall_ok:
         logger.info("  ✓  Final packaging complete.")

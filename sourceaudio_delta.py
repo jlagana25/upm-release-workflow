@@ -20,16 +20,22 @@ import logging
 import re
 import shutil
 import subprocess
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Iterable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from config import ReleaseContext, context_from_cli_args
 from tracklist_columns import (
+    POSSIBLE_COVER_COLS,
     POSSIBLE_EXTERNAL_ID_COLS,
     POSSIBLE_FILENAME_COLS,
+    POSSIBLE_LABEL_COLS,
+    POSSIBLE_URL_COLS,
     _find_column,
 )
 
@@ -45,6 +51,11 @@ _REPORT_FIELDS = [
     "Expected Filename",
     "Local Result",
     "Required Manual Action",
+]
+_UNISYNC_HEADERS = [
+    "Label", "AlbumNo", "AlbumTitle", "AlbumNoMasters", "ReleaseDate",
+    "WorkTitle", "TrackNo", "workAudioId", "Filename", "PipsCode",
+    "ComposerNames", "AlbumCoverArt", "CDNAlbumArt",
 ]
 
 
@@ -63,6 +74,7 @@ class DeltaResult:
     files_prepared: int = 0
     unavailable_sources: int = 0
     invalid_rows: int = 0
+    preparation_errors: int = 0
     local_files_removed: int = 0
     local_removal_errors: int = 0
 
@@ -75,6 +87,7 @@ class DeltaResult:
         return (
             self.invalid_rows == 0
             and self.unavailable_sources == 0
+            and self.preparation_errors == 0
             and self.local_removal_errors == 0
         )
 
@@ -132,6 +145,65 @@ def _read_metadata(path: Path) -> tuple[dict[str, MetadataTrack], int]:
         return tracks, invalid
 
 
+def _read_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or []), list(reader)
+
+
+def _derive_cover_url(example_url: str, cover_filename: str) -> str:
+    """Reuse a tracklist CDNAlbumArt URL structure with a new cover token."""
+    parsed = urlsplit(str(example_url or "").strip())
+    cover = Path(str(cover_filename or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not cover.stem:
+        return ""
+    parent = parsed.path.rsplit("/", 1)[0]
+    return urlunsplit((parsed.scheme, parsed.netloc, f"{parent}/{cover.stem}.webp", "", ""))
+
+
+def _write_unisync_request(
+    metadata_path: Path,
+    track_ids: set[str],
+) -> Path:
+    """Write a known-good UniSync CSV whose BOM cannot mask workAudioId."""
+    columns, rows = _read_csv_rows(metadata_path)
+    id_col = _find_column(columns, POSSIBLE_EXTERNAL_ID_COLS)
+    filename_col = _find_column(columns, POSSIBLE_FILENAME_COLS)
+    if not id_col or not filename_col:
+        raise ValueError("Cannot build UniSync request without External Id and Filename")
+
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".csv",
+        prefix="sourceaudio_additions_",
+        encoding="utf-8-sig",
+        newline="",
+        delete=False,
+    )
+    path = Path(handle.name)
+    try:
+        writer = csv.DictWriter(handle, fieldnames=_UNISYNC_HEADERS, lineterminator="\n")
+        writer.writeheader()
+        written = 0
+        for row in rows:
+            track_id = _track_id(row.get(id_col, ""))
+            if track_id not in track_ids:
+                continue
+            writer.writerow({
+                "workAudioId": track_id,
+                "Filename": f"{Path(row.get(filename_col, '')).stem}.wav",
+            })
+            written += 1
+    finally:
+        handle.close()
+    if written != len(track_ids):
+        path.unlink(missing_ok=True)
+        raise ValueError(
+            f"UniSync request expected {len(track_ids)} rows but wrote {written}"
+        )
+    return path
+
+
 def _files_with_suffixes(root: Path, suffixes: set[str]) -> Iterable[Path]:
     if not root.is_dir():
         return ()
@@ -148,6 +220,168 @@ def _index_audio(root: Path, suffixes: set[str]) -> dict[str, list[Path]]:
         if track_id:
             index[track_id].append(path)
     return dict(index)
+
+
+def _propagate_downloaded_audio(
+    client_root: Path,
+    destination_media: Path,
+    track_ids: set[str],
+    logger: logging.Logger,
+) -> bool:
+    """Copy newly downloaded canonical WAVs into the normal staging tree."""
+    sources = _index_audio(client_root, {".wav", ".wave"})
+    client_media = client_root / "MEDIA"
+    copied = skipped = errors = 0
+    for track_id in sorted(track_ids):
+        matches = sources.get(track_id, [])
+        if len(matches) != 1:
+            logger.error(
+                f"     ✗ Expected one canonical WAV for {track_id}; found {len(matches)}."
+            )
+            errors += 1
+            continue
+        source = matches[0]
+        try:
+            relative = source.relative_to(client_media)
+        except ValueError:
+            relative = source.relative_to(client_root)
+        destination = destination_media / relative
+        if destination.exists():
+            skipped += 1
+            continue
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            copied += 1
+        except OSError as exc:
+            logger.error(f"     ✗ Could not stage {source.name}: {exc}")
+            errors += 1
+    logger.info(
+        f"     Canonical WAV propagation: {copied} copied, {skipped} already "
+        f"present, {errors} error(s)."
+    )
+    return errors == 0
+
+
+def _download_addition_covers(
+    ctx: ReleaseContext,
+    metadata_path: Path,
+    source_media: Path,
+    addition_ids: set[str],
+    logger: logging.Logger,
+) -> bool:
+    """Download new US album covers using the current tracklist CDN pattern."""
+    if not addition_ids:
+        return True
+    track_columns, track_rows = _read_csv_rows(ctx.us_tracklist_csv)
+    url_col = _find_column(track_columns, POSSIBLE_URL_COLS)
+    example_url = next(
+        (str(row.get(url_col, "")).strip() for row in track_rows if url_col and row.get(url_col)),
+        "",
+    )
+    if not example_url:
+        logger.error("     ✗ No CDNAlbumArt URL pattern found in the US tracklist.")
+        return False
+
+    columns, rows = _read_csv_rows(metadata_path)
+    id_col = _find_column(columns, POSSIBLE_EXTERNAL_ID_COLS)
+    cover_col = _find_column(columns, POSSIBLE_COVER_COLS)
+    label_col = _find_column(columns, POSSIBLE_LABEL_COLS)
+    if not id_col or not cover_col or not label_col:
+        logger.error(
+            "     ✗ Refreshed SourceAudio metadata lacks External Id, Label, "
+            "or Album Cover Art; cannot stage new covers."
+        )
+        return False
+
+    source_index = _index_audio(source_media, {".wav", ".wave"})
+    cover_specs: dict[str, tuple[str, Path]] = {}
+    for row in rows:
+        track_id = _track_id(row.get(id_col, ""))
+        if track_id not in addition_ids:
+            continue
+        cover_name = str(row.get(cover_col, "")).strip()
+        label = str(row.get(label_col, "")).strip()
+        matches = source_index.get(track_id, [])
+        if cover_name and label and len(matches) == 1:
+            cover_specs.setdefault(cover_name, (label, matches[0].parent))
+
+    from config import MASTERS_COVERS_DIR
+    from covers import _sanitize_path_component
+    import requests
+
+    failures = 0
+    for cover_name, (label, album_dir) in sorted(cover_specs.items()):
+        url = _derive_cover_url(example_url, cover_name)
+        if not url:
+            logger.error(f"     ✗ Could not derive cover URL for {cover_name}")
+            failures += 1
+            continue
+        destinations = [
+            MASTERS_COVERS_DIR / _sanitize_path_component(label) / cover_name,
+            ctx.specials_dir / "1-ORIGINAL" / "Covers" / cover_name,
+            album_dir / cover_name,
+        ]
+        if all(path.is_file() and path.stat().st_size > 0 for path in destinations):
+            continue
+        try:
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            if not response.content:
+                raise ValueError("empty response")
+            for destination in destinations:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temp = destination.with_name(f".{destination.name}.tmp")
+                temp.write_bytes(response.content)
+                temp.replace(destination)
+            logger.info(f"     ✓ Staged new album cover: {cover_name}")
+        except Exception as exc:
+            logger.error(f"     ✗ Cover download failed for {cover_name}: {exc}")
+            failures += 1
+    if not cover_specs:
+        logger.error("     ✗ No usable cover rows found for the added US tracks.")
+        return False
+    return failures == 0
+
+
+def _acquire_missing_sources(
+    ctx: ReleaseContext,
+    territory: str,
+    metadata_path: Path,
+    destination_media: Path,
+    track_ids: set[str],
+    logger: logging.Logger,
+) -> bool:
+    """Run the same territory/cache/client UniSync job used by initial delivery."""
+    job_name = "US WAV" if territory == "us" else "Ex-US WAV"
+    base_job = next((job for job in ctx.unisync_jobs if job["name"] == job_name), None)
+    if not base_job:
+        logger.error(f"     ✗ No canonical UniSync job named {job_name!r}.")
+        return False
+    request_path = _write_unisync_request(metadata_path, track_ids)
+    job = dict(base_job)
+    job["name"] = f"{job_name} SourceAudio additions"
+    job["csv"] = str(request_path)
+    logger.info(
+        f"     Fetching {len(track_ids)} SourceAudio addition(s) through the "
+        f"canonical {job_name} route."
+    )
+    logger.info(f"       Territory: {job['territory']}")
+    logger.info(f"       Cache:     {job['cache_path']}")
+    logger.info(f"       Client:    {job['client_path']}")
+    try:
+        from unisync_automation import STATUS_FAILED, run_all_unisync_jobs
+
+        results = run_all_unisync_jobs(
+            SimpleNamespace(unisync_jobs=[job]), False, logger
+        )
+        if results.get(job["name"]) == STATUS_FAILED:
+            return False
+        return _propagate_downloaded_audio(
+            Path(job["client_path"]), destination_media, track_ids, logger
+        )
+    finally:
+        request_path.unlink(missing_ok=True)
 
 
 def _archive_existing_missing(missing_dir: Path, logger: logging.Logger) -> None:
@@ -236,9 +470,10 @@ def reconcile_sourceaudio_refresh(
     source_dir: Path,
     logger: logging.Logger,
     dry_run: bool = False,
+    correction_package: bool = True,
     converter: Optional[Callable[[Path, Path], tuple[bool, str]]] = None,
 ) -> DeltaResult:
-    """Build a SourceAudio ``Missing`` package from refreshed metadata.
+    """Reconcile refreshed metadata in place or as a delivered correction.
 
     An empty/nonexistent AIFF delivery is treated as the initial workflow run,
     because Step 1 exports metadata before Step 11 creates the AIFF files.
@@ -263,6 +498,11 @@ def reconcile_sourceaudio_refresh(
     expected_ids = set(expected)
     existing_ids = set(existing)
     missing_dir = media_dir.parent / "Missing"
+    report_path = (
+        missing_dir / _REPORT_NAME
+        if correction_package
+        else metadata_path.parent / "SourceAudio Refresh Audit.csv"
+    )
 
     additions = sorted(expected_ids - existing_ids)
     removals = sorted(existing_ids - expected_ids)
@@ -282,7 +522,7 @@ def reconcile_sourceaudio_refresh(
         f"{result.removals} removal(s)."
     )
     if not result.has_changes and not result.invalid_rows:
-        if missing_dir.exists():
+        if correction_package and missing_dir.exists():
             if dry_run:
                 logger.info(
                     f"     [DRY RUN] Would archive stale prior package: {missing_dir}"
@@ -293,11 +533,15 @@ def reconcile_sourceaudio_refresh(
         return result
 
     if dry_run:
-        logger.info(f"     [DRY RUN] Would rebuild {missing_dir}")
+        destination = missing_dir if correction_package else media_dir
+        logger.info(f"     [DRY RUN] Would reconcile refreshed audio at {destination}")
         return result
 
-    _archive_existing_missing(missing_dir, logger)
-    missing_dir.mkdir(parents=True, exist_ok=False)
+    if correction_package:
+        _archive_existing_missing(missing_dir, logger)
+        missing_dir.mkdir(parents=True, exist_ok=False)
+    else:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
     source_index = _index_audio(source_dir, _SOURCE_SUFFIXES) if additions else {}
     convert = converter or _convert_to_aif
     rows: list[dict[str, str]] = []
@@ -307,7 +551,16 @@ def reconcile_sourceaudio_refresh(
         desired = expected[track_id].filename
         matches = source_index.get(track_id, [])
         if len(matches) == 1:
-            ok, detail = convert(matches[0], missing_dir / desired)
+            if correction_package:
+                destination = missing_dir / desired
+            else:
+                try:
+                    relative_parent = matches[0].parent.relative_to(source_dir)
+                except ValueError:
+                    relative_parent = Path()
+                destination = media_dir / relative_parent / desired
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            ok, detail = convert(matches[0], destination)
         elif not matches:
             ok, detail = False, f"No source master found under {source_dir}"
         else:
@@ -320,12 +573,15 @@ def reconcile_sourceaudio_refresh(
             result.unavailable_sources += 1
             local_result = f"NOT PREPARED: {detail}"
         rows.append({
-            "Action": "ADDITION_UPLOAD",
+            "Action": "ADDITION_UPLOAD" if correction_package else "ADDITION_IN_PLACE",
             "External Id": track_id,
             "Existing Filename": "",
             "Expected Filename": desired,
             "Local Result": local_result,
-            "Required Manual Action": "Upload prepared AIF and refreshed metadata to SourceAudio",
+            "Required Manual Action": (
+                "Upload prepared AIF and refreshed metadata to SourceAudio"
+                if correction_package else "None — pending local delivery updated"
+            ),
         })
 
     for track_id in renames:
@@ -333,11 +589,16 @@ def reconcile_sourceaudio_refresh(
         old_paths = sorted(existing[track_id], key=lambda path: str(path).casefold())
         obsolete_paths[track_id] = old_paths
         source = old_paths[0]
-        shutil.copy2(source, missing_dir / desired)
+        destination = missing_dir / desired if correction_package else source.with_name(desired)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
         result.files_prepared += 1
         old_names = "; ".join(path.name for path in old_paths)
         rows.append({
-            "Action": "RENAMED_FILENAME_UPLOAD",
+            "Action": (
+                "RENAMED_FILENAME_UPLOAD" if correction_package
+                else "RENAMED_FILENAME_IN_PLACE"
+            ),
             "External Id": track_id,
             "Existing Filename": old_names,
             "Expected Filename": desired,
@@ -345,6 +606,7 @@ def reconcile_sourceaudio_refresh(
             "Required Manual Action": (
                 "Upload the renamed AIF and refreshed metadata, then remove the "
                 "obsolete filename from SourceAudio"
+                if correction_package else "None — pending local delivery updated"
             ),
         })
 
@@ -356,12 +618,18 @@ def reconcile_sourceaudio_refresh(
             path.name for path in obsolete_paths[track_id]
         )
         rows.append({
-            "Action": "REMOVE_FROM_SOURCEAUDIO",
+            "Action": (
+                "REMOVE_FROM_SOURCEAUDIO" if correction_package
+                else "REMOVAL_IN_PLACE"
+            ),
             "External Id": track_id,
             "Existing Filename": old_names,
             "Expected Filename": "",
             "Local Result": "Obsolete local AIFF pending removal",
-            "Required Manual Action": "Remove this obsolete track from SourceAudio",
+            "Required Manual Action": (
+                "Remove this obsolete track from SourceAudio"
+                if correction_package else "None — pending local delivery updated"
+            ),
         })
 
     if result.invalid_rows:
@@ -398,10 +666,15 @@ def reconcile_sourceaudio_refresh(
                 )
             removal_results[track_id] = detail
         for row in rows:
-            if row["Action"] in {"RENAMED_FILENAME_UPLOAD", "REMOVE_FROM_SOURCEAUDIO"}:
+            if row["Action"] in {
+                "RENAMED_FILENAME_UPLOAD", "RENAMED_FILENAME_IN_PLACE",
+                "REMOVE_FROM_SOURCEAUDIO", "REMOVAL_IN_PLACE",
+            }:
                 row["Local Result"] = (
                     row["Local Result"].split("; obsolete", 1)[0]
-                    if row["Action"] == "RENAMED_FILENAME_UPLOAD"
+                    if row["Action"] in {
+                        "RENAMED_FILENAME_UPLOAD", "RENAMED_FILENAME_IN_PLACE"
+                    }
                     else ""
                 )
                 removed_detail = removal_results.get(row["External Id"], "")
@@ -410,14 +683,17 @@ def reconcile_sourceaudio_refresh(
                 )
     else:
         for row in rows:
-            if row["Action"] in {"RENAMED_FILENAME_UPLOAD", "REMOVE_FROM_SOURCEAUDIO"}:
+            if row["Action"] in {
+                "RENAMED_FILENAME_UPLOAD", "RENAMED_FILENAME_IN_PLACE",
+                "REMOVE_FROM_SOURCEAUDIO", "REMOVAL_IN_PLACE",
+            }:
                 row["Local Result"] += "; removal deferred because the refresh package is incomplete"
 
-    _write_report(missing_dir / _REPORT_NAME, rows)
-    logger.info(f"     Audit report: {missing_dir / _REPORT_NAME}")
+    _write_report(report_path, rows)
+    logger.info(f"     Audit report: {report_path}")
     if result.files_prepared:
         logger.info(f"     ✓ Prepared {result.files_prepared} AIF upload candidate(s).")
-    if result.removals or result.renames:
+    if correction_package and (result.removals or result.renames):
         if can_remove:
             logger.warning(
                 f"     ⚠ Removed {result.local_files_removed} obsolete local AIFF(s). "
@@ -429,6 +705,11 @@ def reconcile_sourceaudio_refresh(
                 "     ⚠ Obsolete local AIFF removal was deferred because the "
                 "refresh package is incomplete."
             )
+    elif not correction_package and (result.removals or result.renames):
+        logger.info(
+            f"     ✓ Pending delivery updated in place; removed "
+            f"{result.local_files_removed} obsolete local AIFF(s)."
+        )
     if result.unavailable_sources:
         logger.error(
             f"     ✗ {result.unavailable_sources} added track(s) could not be "
@@ -466,13 +747,51 @@ def reconcile_context_sourceaudio(
     dry_run: bool = False,
 ) -> DeltaResult:
     metadata, media, source = _territory_paths(ctx, territory)
-    return reconcile_sourceaudio_refresh(
+    from delivery_state import partner_is_delivered
+
+    partner_key = "sourceaudio" if territory == "us" else "sourceaudio_exus"
+    correction_package = partner_is_delivered(ctx.specials_dir, partner_key)
+    logger.info(
+        "     Refresh mode: "
+        + (
+            "DELIVERED — build a separate Missing correction package"
+            if correction_package
+            else "PENDING — update the existing delivery in place"
+        )
+    )
+    preparation_errors = 0
+    existing_files = list(_files_with_suffixes(media, _AUDIO_SUFFIXES))
+    additions: set[str] = set()
+    if metadata.is_file() and existing_files:
+        expected, _invalid = _read_metadata(metadata)
+        existing = _index_audio(media, _AUDIO_SUFFIXES)
+        additions = set(expected) - set(existing)
+
+    if additions and not dry_run:
+        available_sources = _index_audio(source, _SOURCE_SUFFIXES)
+        missing_sources = {
+            track_id for track_id in additions
+            if len(available_sources.get(track_id, [])) != 1
+        }
+        if missing_sources and not _acquire_missing_sources(
+            ctx, territory, metadata, source, missing_sources, logger
+        ):
+            preparation_errors += 1
+        if territory == "us" and not _download_addition_covers(
+            ctx, metadata, source, additions, logger
+        ):
+            preparation_errors += 1
+
+    result = reconcile_sourceaudio_refresh(
         metadata_path=metadata,
         media_dir=media,
         source_dir=source,
         logger=logger,
         dry_run=dry_run,
+        correction_package=correction_package,
     )
+    result.preparation_errors += preparation_errors
+    return result
 
 
 def _main() -> int:

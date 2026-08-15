@@ -360,6 +360,7 @@ def remove_non_maintracks(
     metadata_csv:   Optional[Path] = None,
     target_folder:  Optional[Path] = None,
     source_folder:  Optional[Path] = None,
+    archive_extras_to: Optional[Path] = None,
 ) -> bool:
     """
     Bidirectional sync of ``target_folder`` against ``metadata_csv``'s
@@ -577,22 +578,20 @@ def remove_non_maintracks(
             original = key_to_name.get(key, key)
             logger.error(f"      [MISSING — UNRECOVERABLE] {original}")
 
-    # 3. Extras to remove.  Word the preview by intent: a real run says
-    #    "Will DELETE" (each removal is then logged as [DELETED] below); a
-    #    dry-run / report says "Would DELETE" and lists every file.
+    # 3. Extras to remove. A caller may choose a recoverable archive instead
+    #    of permanent deletion; both outcomes remove extras from the delivery.
     will_delete = (not dry_run) and actually_delete
     empty_dirs_preview: list[Path] = []
     if to_delete:
         verb = "Will" if will_delete else "Would"
-        logger.info(
-            f"    ── {verb} DELETE {len(to_delete)} non-keeper file(s) ──"
-        )
+        action = "ARCHIVE" if archive_extras_to is not None else "DELETE"
+        logger.info(f"    ── {verb} {action} {len(to_delete)} non-keeper file(s) ──")
         empty_dirs_preview = _find_empty_dirs_after_deletion(
             target, set(to_delete)
         )
         if not will_delete:
             for p in to_delete:
-                logger.info(f"      [WOULD DELETE] {p.relative_to(target)}")
+                logger.info(f"      [WOULD {action}] {p.relative_to(target)}")
             for d in empty_dirs_preview:
                 logger.info(f"      [WOULD REMOVE DIR] {d.relative_to(target)}")
 
@@ -672,16 +671,28 @@ def remove_non_maintracks(
             )
             return False
 
-    # 2. Delete extras
-    deleted  = 0
+    # 2. Remove extras, either permanently or into a recoverable archive.
+    deleted = archived = 0
     failures: list[tuple[Path, str]] = []
     if to_delete:
-        logger.info(f"  Deleting {len(to_delete)} non-maintrack file(s)…")
-        for p in to_delete:
+        action = "Archiving" if archive_extras_to is not None else "Deleting"
+        logger.info(f"  {action} {len(to_delete)} non-maintrack file(s)…")
+        for index, p in enumerate(to_delete, 1):
             try:
-                p.unlink()
-                logger.info(f"  [DELETED] {p.relative_to(target)}")
-                deleted += 1
+                relative = p.relative_to(target)
+                if archive_extras_to is None:
+                    p.unlink()
+                    deleted += 1
+                else:
+                    archive_path = Path(archive_extras_to) / relative
+                    archive_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(p), str(archive_path))
+                    archived += 1
+                if index % 250 == 0 or index == len(to_delete):
+                    logger.info(
+                        f"  … {index}/{len(to_delete)} non-maintrack file(s) "
+                        f"{'archived' if archive_extras_to is not None else 'deleted'}"
+                    )
             except Exception as exc:
                 logger.error(f"  [FAILED]  {p.relative_to(target)}: {exc}")
                 failures.append((p, str(exc)))
@@ -696,6 +707,7 @@ def remove_non_maintracks(
         f"    Copy failures:               {failed_copies}\n"
         f"    Unrecoverable missing:       {len(unrecoverable_missing)}\n"
         f"    Deleted files:               {deleted}\n"
+        f"    Archived files:              {archived}\n"
         f"    Failed deletions:            {len(failures)}\n"
         f"    Empty dirs removed:          {len(removed_dirs)}\n"
         f"    Remaining MP3 files:         {remaining_mp3s}"
@@ -934,6 +946,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "missing keepers (default: "
                         "ctx.specials_dir/1-ORIGINAL/Music/MP3/MEDIA, "
                         "the Step 5 UniSync delivery).")
+    p.add_argument(
+        "--archive-extras", default=None,
+        help="Move non-keepers into this recoverable archive directory instead "
+             "of permanently deleting them.",
+    )
 
     p.add_argument("--rename", action="store_true",
                    help="Run Step 14 (clean NBC Music filenames) instead of "
@@ -968,6 +985,7 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     csv_override    = Path(args.csv)    if args.csv    else None
     target_override = Path(args.target) if args.target else None
     source_override = Path(args.source) if args.source else None
+    archive_override = Path(args.archive_extras) if args.archive_extras else None
 
     if args.delete_non_maintracks:
         logger.warning(
@@ -983,6 +1001,7 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
         metadata_csv=csv_override,
         target_folder=target_override,
         source_folder=source_override,
+        archive_extras_to=archive_override,
     )
     return 0 if ok else 1
 

@@ -284,8 +284,29 @@ workflow run must not wait for manual account/password entry.
     from the local `Music` folder only after all required AIFs are ready; their
     SourceAudio service entries remain explicitly listed for manual deletion.
   - If an added track has no unique WAV source, the refreshed export is marked
-    failed, existing local media is preserved, and the audit row says `NOT
-    PREPARED`.
+    for retrieval through the same UniSync route as the initial workflow. US
+    uses `United States` + the US WAV cache + `Music/WAV`; Ex-US uses `Rest of
+    World` + `Music/Ex-US (WAV)`. The log must show all three values before the
+    CSV is selected. If retrieval still fails, existing local media is
+    preserved and the audit row says `NOT PREPARED`.
+  - New US album covers use the path structure of an existing `CDNAlbumArt`
+    value, replace its leaf with the refreshed cover token plus `.webp`, and
+    save the result under the metadata-provided cover filename in the master,
+    flat-original, and `WAV w COVERS` album locations.
+  - Before a post-run catalog refresh, mark partners already sent to clients:
+    `python3 delivery_state.py <date args> --mark-delivered sourceaudio,sourceaudio_exus`.
+    `--show` must list omitted partners as `pending`. Pending Step 10
+    destinations are exact-synced after the additive copy, including the union
+    of US and eligible Ex-US files in Tunesat. Delivered destinations must be
+    logged and skipped. For delivered SourceAudio, Step 15 must validate the
+    refreshed metadata against `Music` plus the current `Missing` package. Use
+    `--prune-music --prune-mode archive` on the refresh
+    run so removals also leave the canonical original trees recoverably.
+    For a recoverable standalone Tunesat sync, pass
+    `--archive-extras <release>/_WORKFLOW/refresh_archive/<stamp>/Tunesat-Music`.
+  - A nested authoritative label such as `BTV / pitch` must be preserved by
+    prune even when the first on-disk component has stray whitespace (`BTV `).
+    Verify a refresh prune reports zero false extras for that tree.
 - **Inspect:**
   - NBC CSV exists and is non-trivial:
     `ls -la "{specials}/1-ORIGINAL/Metadata/UPM-US NBCUniversal Metadata Export.csv"` (should be ~MBs, not 0/167 bytes).
@@ -586,6 +607,10 @@ Validates Step 14 (strip characters outside `[A-Za-z0-9_ ]` from filenames under
 - **Inspect:**
   - Pick a file that had special characters (e.g. `&`, parentheses, accented letters) and confirm they're stripped, with the extension and spaces preserved.
   - Confirm **directories were not renamed** (only files).
+  - A transition/recovery NBC run may pass Soundminer's tightly validated
+    `--specials-dir-override`, `--client-label-override`, and
+    `--nbc-metadata-override`; the HDF1 agent must forward those arguments and
+    log the resolved source and destination before touching the GUI.
 - **Rollback/cleanup:**
   - Renames are in place and not automatically reversible. **Always run `--dry-run` first** and review.
   - To restore original names, re-run the Soundminer mirror + conversion (Tests 11–12), which regenerate the tree from source.

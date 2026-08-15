@@ -198,12 +198,42 @@ Then the other machine installs with `pip install -r requirements.lock`.
   sibling `Missing` folder, removals and superseded filenames are removed from
   the local `Music` folder only after the replacement package is complete, and
   an audit CSV lists the SourceAudio service entries that still require manual
-  removal. Missing source masters fail the export closed without deleting
-  existing media.
+  removal. If an added master is not already staged, the refresh automatically
+  reuses the canonical initial-download route: US uses territory `United
+  States`, the US WAV cache, and `Music/WAV`; Ex-US uses `Rest of World` and
+  `Music/Ex-US (WAV)`. The downloaded WAVs are then propagated into the normal
+  SourceAudio staging tree. New US album covers derive their `.webp` download
+  URL from the current tracklist's `CDNAlbumArt` structure while retaining the
+  metadata cover filename locally. Missing source masters fail closed without
+  deleting existing media.
+- Catalog refreshes are delivery-state aware. A partner is `pending` unless it
+  has explicitly been marked delivered in the release-local
+  `_WORKFLOW/delivery_status.json`. Re-running Steps 1, 5–8, and 10 replaces its
+  metadata, retrieves newly referenced masters through the normal UniSync
+  territory/cache/client route, refreshes covers, adds new media, and removes
+  files no longer present in the refreshed source trees. Destinations marked
+  delivered are protected from in-place changes; delivered SourceAudio US and
+  Ex-US instead receive the audited `Missing` correction package described
+  above. Step 15 validates refreshed SourceAudio metadata against the union of
+  the original `Music` tree and the current correction package. Record or
+  inspect state with:
+  ```bash
+  python3 delivery_state.py --year 2026 --month 9 --part 1 --mark-delivered sourceaudio,sourceaudio_exus
+  python3 delivery_state.py --year 2026 --month 9 --part 1 --show
+  python3 delivery_state.py --year 2026 --month 9 --part 1 --mark-pending sourceaudio
+  ```
+  Accepted partner keys are `discovery`, `espn`, `hd_updates`, `japan_ntt`,
+  `nbc`, `netmix`, `sourceaudio`, `sourceaudio_exus`, `synchtank`, and
+  `tunesat`; use `all` by itself to change every key. When refreshed metadata
+  removes catalog items, run with `--prune-music --prune-mode archive` before
+  final packaging so the canonical `1-ORIGINAL/Music` trees are reconciled
+  recoverably as well. Standalone Step 13 also accepts
+  `--archive-extras <directory>` to remove Tunesat non-keepers from its Music
+  folder without permanently deleting them.
 - Step modules: `domo_exports`, `folder_setup`, `album_list_doc`, `unisync_automation`,
   `covers`, `verification`, `final_packaging`, `soundminer`, `audio_conversion`,
   `cleanup`, `final_metadata_verification`, `remediation`, `prune`,
-  `sourceaudio_delta`.
+  `sourceaudio_delta`, `delivery_state`.
 - `soundmouse.py` — Step 16: SoundMouse tracklist/bucket exports, release
   period directory, WAVs from the US/Rest-of-World/Japan UniSync territories,
   covers, and bucket-selected metadata workbooks. The

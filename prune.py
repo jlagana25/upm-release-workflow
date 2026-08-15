@@ -112,7 +112,9 @@ def _build_keepsets(
     titles: dict[tuple[str, str], str] = {}
     title_col = cols.get("albumtitle")
     for _, row in df.iterrows():
-        label    = _row_value(row, cols, "label")
+        # Source deliveries occasionally carry a trailing-space label folder
+        # (notably "BTV ") even though the tracklist says "BTV".
+        label    = _row_value(row, cols, "label").strip()
         albumno  = _row_value(row, cols, "albumno")
         filename = _row_value(row, cols, "filename")
         if not (label and albumno and filename):
@@ -152,11 +154,16 @@ def _scan_tree(root: Path, keep_audio: set, keep_cover: set, want_covers: bool):
             continue
 
         rel = p.relative_to(root).parts
-        if len(rel) != 3:
+        if len(rel) < 3:
             extras.append((p, f"unexpected location ({len(rel)} level(s) under MEDIA)"))
             continue
 
-        label, album_folder, leaf = rel
+        # Normal shape is Label/Album/File. Some authoritative labels are
+        # represented as nested folders, e.g. tracklist label "BTV / pitch"
+        # becomes BTV /pitch/Album/File on disk. Reconstruct the label from all
+        # components before the final Album/File pair and strip each component.
+        label = " / ".join(component.strip() for component in rel[:-2])
+        album_folder, leaf = rel[-2], rel[-1]
         albumno = _albumno_of(album_folder)
         leaf_l = leaf.lower()
 

@@ -2861,6 +2861,20 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--start-date")
     p.add_argument("--end-date")
     p.add_argument("--full-month-content", action="store_true")
+    p.add_argument(
+        "--specials-dir-override", default=None, metavar="PATH",
+        help="Recovery-only: use an existing Specials release root whose "
+             "internal content period differs from the client label.",
+    )
+    p.add_argument(
+        "--client-label-override", default=None, metavar="LABEL",
+        help="Recovery-only client folder label used with "
+             "--specials-dir-override.",
+    )
+    p.add_argument(
+        "--nbc-metadata-override", default=None, metavar="CSV",
+        help="Recovery-only NBC metadata CSV used with a transitioned release.",
+    )
 
     p.add_argument("--dry-run", action="store_true",
                    help="Log the plan and exit without touching the UI.")
@@ -2919,6 +2933,37 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     except ValueError as e:
         logger.error(f"  ✗  {e}")
         return 2
+    if args.specials_dir_override:
+        from config import SPECIALS_BASE
+
+        override = Path(args.specials_dir_override).expanduser().resolve()
+        if override.parent != SPECIALS_BASE.resolve() or not override.name.startswith("UPM-"):
+            logger.error(
+                "  ✗  --specials-dir-override must be one UPM release folder "
+                f"directly under {SPECIALS_BASE}."
+            )
+            return 2
+        ctx.specials_dir = override
+    if args.client_label_override:
+        label = args.client_label_override.strip()
+        if not label or "/" in label or "\\" in label:
+            logger.error("  ✗  Invalid --client-label-override.")
+            return 2
+        ctx.client_delivery_label = label
+    if args.specials_dir_override or args.client_label_override:
+        ctx.partner_dirs = ctx._build_partner_dirs()
+    if args.nbc_metadata_override:
+        metadata_override = Path(args.nbc_metadata_override).expanduser().resolve()
+        if (
+            metadata_override.suffix.casefold() != ".csv"
+            or ctx.specials_dir.resolve() not in metadata_override.parents
+        ):
+            logger.error(
+                "  ✗  --nbc-metadata-override must be a CSV inside the "
+                "selected Specials release folder."
+            )
+            return 2
+        ctx.nbc_metadata_csv = metadata_override
     logger.info(f"Release context: {ctx}")
 
     if args.preflight_only:

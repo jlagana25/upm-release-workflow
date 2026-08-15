@@ -8,7 +8,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sourceaudio_delta import reconcile_sourceaudio_refresh
+from sourceaudio_delta import (
+    _derive_cover_url,
+    _propagate_downloaded_audio,
+    _write_unisync_request,
+    reconcile_sourceaudio_refresh,
+)
 
 
 class SourceAudioDeltaTests(unittest.TestCase):
@@ -124,6 +129,39 @@ class SourceAudioDeltaTests(unittest.TestCase):
         self.assertFalse(result.has_changes)
         self.assertFalse((self.root / "Missing").exists())
 
+    def test_pending_delivery_reconciles_in_place(self) -> None:
+        self._write_metadata([
+            ("100", "Renamed_100.aif"),
+            ("300", "Added_300.aif"),
+        ])
+        old = self.media / "Label" / "Album" / "Old_100.aif"
+        removed = self.media / "Label" / "Album" / "Removed_200.aif"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"old")
+        removed.write_bytes(b"remove")
+        master = self.sources / "Label" / "New Album" / "Master_300.wav"
+        master.parent.mkdir(parents=True)
+        master.write_bytes(b"new")
+
+        result = reconcile_sourceaudio_refresh(
+            metadata_path=self.metadata,
+            media_dir=self.media,
+            source_dir=self.sources,
+            logger=self.logger,
+            correction_package=False,
+            converter=self._fake_convert,
+        )
+        self.assertTrue(result.ok)
+        self.assertFalse(old.exists())
+        self.assertFalse(removed.exists())
+        self.assertEqual((old.parent / "Renamed_100.aif").read_bytes(), b"old")
+        self.assertEqual(
+            (self.media / "Label" / "New Album" / "Added_300.aif").read_bytes(),
+            b"converted:new",
+        )
+        self.assertFalse((self.root / "Missing").exists())
+        self.assertTrue((self.metadata.parent / "SourceAudio Refresh Audit.csv").exists())
+
     def test_clean_refresh_archives_stale_missing_package(self) -> None:
         self._write_metadata([("100", "Matching_100.aif")])
         self.media.mkdir(parents=True)
@@ -143,6 +181,48 @@ class SourceAudioDeltaTests(unittest.TestCase):
         archives = list(self.root.glob("Missing-archived-*"))
         self.assertEqual(len(archives), 1)
         self.assertTrue((archives[0] / "stale.aif").exists())
+
+    def test_unisync_request_uses_known_header_shape(self) -> None:
+        self._write_metadata([
+            ("100", "First_100.aif"),
+            ("200", "Second_200.aif"),
+        ])
+        request = _write_unisync_request(self.metadata, {"200"})
+        try:
+            raw = request.read_bytes()
+            self.assertTrue(raw.startswith(b"\xef\xbb\xbfLabel,"))
+            self.assertIn(b",workAudioId,Filename,", raw.splitlines()[0])
+            self.assertNotIn(b"\r\n", raw)
+            with request.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["workAudioId"], "200")
+            self.assertEqual(rows[0]["Filename"], "Second_200.wav")
+        finally:
+            request.unlink(missing_ok=True)
+
+    def test_propagates_canonical_wav_structure(self) -> None:
+        client = self.root / "Canonical" / "WAV"
+        source = client / "MEDIA" / "Label" / "ALB1 - Album" / "Track_100.wav"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"wav")
+        destination = self.root / "WAV w COVERS" / "MEDIA"
+        ok = _propagate_downloaded_audio(
+            client, destination, {"100"}, self.logger
+        )
+        self.assertTrue(ok)
+        self.assertEqual(
+            (destination / "Label" / "ALB1 - Album" / "Track_100.wav").read_bytes(),
+            b"wav",
+        )
+
+    def test_derives_new_webp_from_existing_cdn_structure(self) -> None:
+        self.assertEqual(
+            _derive_cover_url(
+                "https://dams.cdn.unippm.com/AlbumImages/740x740/old.webp",
+                "3907ad0e.jpg",
+            ),
+            "https://dams.cdn.unippm.com/AlbumImages/740x740/3907ad0e.webp",
+        )
 
 
 if __name__ == "__main__":

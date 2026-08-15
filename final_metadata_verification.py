@@ -101,6 +101,7 @@ class Check:
                                           # "album" = cover must sit in the same
                                           #           {Label}/{AlbumNo - …}/ folder
                                           #           as that album's audio
+    additional_media_dirs: tuple[Path, ...] = ()
 
 
 def _build_checks(ctx: ReleaseContext) -> list[Check]:
@@ -108,6 +109,16 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
     pd  = ctx.partner_dirs
     us  = ctx.us_tracklist_csv
     exus = ctx.exus_tracklist_csv
+    from delivery_state import partner_is_delivered
+
+    sourceaudio_extra = (
+        (pd["sourceaudio_music"].parent / "Missing",)
+        if partner_is_delivered(ctx.specials_dir, "sourceaudio") else ()
+    )
+    sourceaudio_exus_extra = (
+        (pd["sourceaudio_exus_music"].parent / "Missing",)
+        if partner_is_delivered(ctx.specials_dir, "sourceaudio_exus") else ()
+    )
 
     def root_of(media_dir: Path) -> Path:
         # Partner delivery root = the folder that holds Music/Covers/etc.
@@ -125,11 +136,15 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
               cover_mode="tree"),
         Check("Tunesat",   ctx.cleanup_metadata_csv, pd["tunesat_mp3"]),
         Check("NTT Data",  ctx.japan_metadata_csv,   pd["japan_final_media"]),
-        Check("SourceAudio", pm["sourceaudio"], pd["sourceaudio_music"]),
+        Check(
+            "SourceAudio", pm["sourceaudio"], pd["sourceaudio_music"],
+            additional_media_dirs=sourceaudio_extra,
+        ),
         Check(
             "SourceAudio Ex-US",
             pm["sourceaudio_exus"],
             pd["sourceaudio_exus_music"],
+            additional_media_dirs=sourceaudio_exus_extra,
         ),
 
         # ---- Partners without a sheet → checked against the US tracklist ----
@@ -203,6 +218,14 @@ def _disk_keys(root: Path, exts: set[str]) -> set[str]:
         for p in root.rglob("*")
         if p.is_file() and p.suffix.lower() in exts
     }
+
+
+def _disk_keys_many(roots: tuple[Path, ...], exts: set[str]) -> set[str]:
+    keys: set[str] = set()
+    for root in roots:
+        if root.is_dir():
+            keys.update(_disk_keys(root, exts))
+    return keys
 
 
 def _echo(logger: logging.Logger, title: str, items: list[str]) -> None:
@@ -365,6 +388,8 @@ def verify_final_packaging_metadata(
     for chk in checks:
         logger.info(f"\n  ── {chk.label} ──")
         logger.info(f"      media:  {chk.media_dir}")
+        for extra_root in chk.additional_media_dirs:
+            logger.info(f"      correction media: {extra_root}")
 
         if not chk.media_dir.exists():
             logger.info(
@@ -389,7 +414,9 @@ def verify_final_packaging_metadata(
                     str(chk.audio_source))
                 overall_ok = False
             else:
-                have = _disk_keys(chk.media_dir, AUDIO_EXTS)
+                have = _disk_keys_many(
+                    (chk.media_dir, *chk.additional_media_dirs), AUDIO_EXTS
+                )
                 logger.info(f"      audio files on disk: {len(have)}")
                 missing = sorted(want - have)
                 extra   = sorted(have - want)

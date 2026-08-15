@@ -31,7 +31,7 @@ MODULES = [
     "split_se_ingest_forms", "folder_setup", "album_list_doc", "soundminer",
     "make_soundminer_crops", "prune", "unisync_automation", "unisync_prefs",
     "remote_runner", "soundminer_agent", "workflow_report", "auth_manager",
-    "security_scan", "soundmouse", "sourceaudio_delta",
+    "security_scan", "soundmouse", "sourceaudio_delta", "delivery_state",
     "upm_release_workflow",
 ]
 

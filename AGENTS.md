@@ -171,6 +171,7 @@ single source; don't reinvent per module), `logging_utils.py` (step logging
 helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 (`soundminer_agent.py` supersedes its SSH/manual path for normal runs),
 `soundminer_agent.py` (HDF1 Aqua LaunchAgent + SSH JSON/status protocol),
+`delivery_state.py` (release-local pending/delivered partner status),
 `workflow_report.py` (structured JSON run report), `sourceaudio_delta.py`
 (post-delivery SourceAudio metadata/audio reconciliation),
 `prune.py` (removes files from prior months the current tracklist no longer
@@ -299,7 +300,23 @@ inline or are submitted to HDF1's login-session agent.
   removals and superseded filenames from the local `Music` tree only after all
   replacement files are ready. It never deletes from the SourceAudio service;
   those actions remain in `SourceAudio Missing Audit.csv` for manual handling.
+  Missing additions must use the original UniSync routes (US = United States →
+  `Music/WAV`; Ex-US = Rest of World → `Music/Ex-US (WAV)`) before propagation
+  into SourceAudio staging. Never point UniSync directly at `WAV w COVERS` or
+  Ex-US staging. New US covers derive a `.webp` URL from the current
+  `CDNAlbumArt` structure and retain the metadata cover filename locally.
   Missing/ambiguous masters fail closed and preserve the existing local media.
+- **Catalog refresh behavior is explicit, not inferred from folder contents.**
+  `delivery_state.py` stores per-partner pending/delivered state in the release's
+  `_WORKFLOW/delivery_status.json`. Pending Step 10 destinations are exact-synced
+  from refreshed canonical sources; delivered destinations are skipped.
+  Delivered SourceAudio US/Ex-US use `Missing` correction packages, and Step 15
+  validates their refreshed metadata against the union of `Music` and the
+  current `Missing` tree. A refresh that includes removals should also use
+  recoverable `--prune-music --prune-mode archive` so canonical sources match the new
+  tracklists before Step 10. Never assume a populated folder was delivered.
+  Standalone Tunesat cleanup can use `--archive-extras` when recovery is safer
+  than permanent deletion.
 - **Delivery metadata must replace baseline templates.** Step 1 has dedicated
   SourceAudio US and SourceAudio Ex-US cards in addition to the other partner
   metadata cards. A failed export blocks Steps 10–15, and `--skip-domo` must not

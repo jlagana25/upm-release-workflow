@@ -371,6 +371,13 @@ def _build_command(request: dict[str, Any]) -> list[str]:
         command.append("--capture-steps")
     if options.get("resume"):
         command.append("--resume")
+    for option_name, flag in (
+        ("specials_dir_override", "--specials-dir-override"),
+        ("client_label_override", "--client-label-override"),
+        ("nbc_metadata_override", "--nbc-metadata-override"),
+    ):
+        if options.get(option_name):
+            command.extend([flag, str(options[option_name])])
     if workflow == "sourceaudio" and options.get("db_shortcut"):
         command.extend(["--sourceaudio-db-shortcut", str(options["db_shortcut"])])
     return command
