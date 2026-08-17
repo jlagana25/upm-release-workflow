@@ -271,7 +271,8 @@ def _checkpoint_completed(checkpoint: dict, phase: str) -> bool:
 def _normalise_audio_identity(value: str) -> str:
     """Soundminer comparison key, tolerant of extension and mono .M suffix."""
     name = Path(str(value).strip()).name
-    stem = Path(name).stem
+    suffix = Path(name).suffix.casefold()
+    stem = name[:-len(suffix)] if suffix in {".wav", ".aif", ".aiff", ".mp3"} else name
     if stem.casefold().endswith(".m"):
         stem = stem[:-2]
     return stem.casefold()

@@ -50,6 +50,12 @@ class SoundminerReliabilityTests(unittest.TestCase):
             ),
             "A\u0308lter  Don't Ask Baby3 - No. 5",
         )
+        self.assertEqual(
+            soundminer._normalise_audio_identity(
+                "CHALK113_01_Christmas Symphony No. 5 - Beethoven"
+            ),
+            "chalk113_01_christmas symphony no. 5 - beethoven",
+        )
 
     def test_nbc_preflight_fails_before_gui_for_missing_audio(self):
         audio = self.root / "MEDIA"
