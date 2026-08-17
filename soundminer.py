@@ -429,6 +429,95 @@ def _scan_destination(
     return manifest, sorted(wrong)
 
 
+def _punctuation_insensitive_identity(value: str) -> str:
+    """Comparison key used only to prove an old→refreshed filename pair."""
+    ascii_value = (
+        unicodedata.normalize("NFKD", value)
+        .encode("ascii", "ignore")
+        .decode()
+        .casefold()
+    )
+    return re.sub(r"[^a-z0-9]", "", ascii_value)
+
+
+def _quarantine_nbc_superseded_outputs(
+    mirror_dest: Path,
+    expected: set[str],
+    logger: logging.Logger,
+) -> int:
+    """Move proven old-name NBC files aside after refreshed names exist.
+
+    Every unexpected old identity must map to exactly one expected identity
+    after punctuation/accent folding, every target must be distinct, and the
+    exact refreshed output must already exist. Otherwise nothing is moved.
+    """
+    correct_media = mirror_dest / "MEDIA"
+    files_by_identity: dict[str, list[Path]] = {}
+    for path in correct_media.rglob("*") if correct_media.exists() else ():
+        if path.is_file() and path.suffix.lower() == ".wav":
+            files_by_identity.setdefault(
+                _normalise_audio_identity(path.name), []
+            ).append(path)
+    actual = set(files_by_identity)
+    extras = actual - expected
+    if not extras:
+        return 0
+
+    expected_by_folded: dict[str, list[str]] = {}
+    for identity in expected:
+        expected_by_folded.setdefault(
+            _punctuation_insensitive_identity(identity), []
+        ).append(identity)
+    pairs: dict[str, str] = {}
+    for extra in extras:
+        targets = expected_by_folded.get(
+            _punctuation_insensitive_identity(extra), []
+        )
+        if len(targets) != 1:
+            raise _SoundminerError(
+                "NBC filename refresh is not one-to-one; refusing to move "
+                f"unexpected output '{extra}'."
+            )
+        target = targets[0]
+        if target not in actual:
+            raise _SoundminerError(
+                "NBC filename refresh target is not present; refusing to "
+                f"replace '{extra}' with '{target}'."
+            )
+        pairs[extra] = target
+    if len(set(pairs.values())) != len(pairs):
+        raise _SoundminerError(
+            "Multiple old NBC filenames map to the same refreshed output; "
+            "refusing to quarantine them automatically."
+        )
+    if any(len(files_by_identity[extra]) != 1 for extra in extras):
+        raise _SoundminerError(
+            "An old NBC filename has duplicate files; refusing automatic "
+            "filename-refresh quarantine."
+        )
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    quarantine = mirror_dest.parent / f"_filename_updates_quarantine_{stamp}"
+    suffix = 1
+    while quarantine.exists():
+        quarantine = (
+            mirror_dest.parent /
+            f"_filename_updates_quarantine_{stamp}_{suffix}"
+        )
+        suffix += 1
+    for extra in sorted(extras):
+        source = files_by_identity[extra][0]
+        relative = source.relative_to(correct_media)
+        target = quarantine / "superseded" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
+    logger.warning(
+        f"    Quarantined {len(extras)} proven superseded NBC filename(s) at "
+        f"{quarantine}."
+    )
+    return len(extras)
+
+
 def _normalize_nbc_nested_mirror(
     mirror_dest: Path,
     audio_source: Path,
@@ -497,9 +586,13 @@ def _normalize_nbc_nested_mirror(
         suffix += 1
     quarantine.mkdir(parents=True)
     nested_top.replace(quarantine / nested_top.name)
+    superseded = _quarantine_nbc_superseded_outputs(
+        mirror_dest, expected, logger
+    )
     logger.warning(
         f"    Normalized Soundminer's volume-relative NBC tree: moved {moved} "
-        f"missing file(s) into MEDIA; retained duplicate wrapper at {quarantine}."
+        f"missing file(s) into MEDIA, quarantined {superseded} superseded "
+        f"filename(s), and retained the duplicate wrapper at {quarantine}."
     )
     return True
 

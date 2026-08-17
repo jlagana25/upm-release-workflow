@@ -246,6 +246,28 @@ class SoundminerReliabilityTests(unittest.TestCase):
         self.assertEqual(len(quarantines), 1)
         self.assertTrue(any(quarantines[0].rglob("ABC_01_First.wav")))
 
+    def test_superseded_nbc_filename_moves_only_after_exact_refresh_exists(self):
+        destination = self.root / "Music" / "WAV"
+        album = destination / "MEDIA" / "Label" / "Album"
+        album.mkdir(parents=True)
+        (album / "ABC_01_Dont Ask.wav").touch()
+        (album / "ABC_01_Don't Ask.wav").touch()
+
+        moved = soundminer._quarantine_nbc_superseded_outputs(
+            destination,
+            {"abc_01_don't ask"},
+            self.logger,
+        )
+
+        self.assertEqual(moved, 1)
+        self.assertFalse((album / "ABC_01_Dont Ask.wav").exists())
+        self.assertTrue((album / "ABC_01_Don't Ask.wav").exists())
+        quarantines = list(
+            destination.parent.glob("_filename_updates_quarantine_*")
+        )
+        self.assertEqual(len(quarantines), 1)
+        self.assertTrue(any(quarantines[0].rglob("ABC_01_Dont Ask.wav")))
+
 
 if __name__ == "__main__":
     unittest.main()

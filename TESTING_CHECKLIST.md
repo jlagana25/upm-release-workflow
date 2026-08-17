@@ -592,6 +592,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     a sibling `_mirror_quarantine_*` folder for recovery/audit. Expected NBC
     filenames preserve punctuation and decomposed Unicode exactly as
     Soundminer does; only its filename-illegal set (`<>:\"/\\|?*`) is removed.
+    If refreshed metadata changes punctuation/accents, an old output is moved
+    to `_filename_updates_quarantine_*` only when its folded identity maps to
+    one distinct expected name and that exact refreshed file already exists.
 - **Inspect:**
   - `find "{nbc}/Music/WAV" -name "*.wav" | wc -l` — expected record count (e.g. 2148).
   - Step screenshots in `…/Scripts/Python/UPM Release WorkFlow Automation/_logs/soundminer_debug_steps/`.
