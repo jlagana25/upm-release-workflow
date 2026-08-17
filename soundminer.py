@@ -281,10 +281,12 @@ def _soundminer_filename_component(value: str) -> str:
     # Soundminer preserves spaces inside field values; the underscore visible
     # in NBC names is the literal separator in <Source:1>_<TrackTitle:2>.
     value = re.sub(r"\s+", " ", str(value).strip())
-    # With "Strip illegal characters" enabled, v5Pro transliterates accents
-    # and retains only ASCII letters/digits, spaces, and underscores.
-    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
-    value = re.sub(r"[^A-Za-z0-9_ ]", "", value)
+    # v5Pro preserves ordinary punctuation and Unicode, which macOS stores in
+    # decomposed form, but removes the Windows/filesystem-illegal character
+    # set when "Strip illegal characters" is enabled. This transform was
+    # checked against all 5,065 names in the August recovery mirror.
+    value = unicodedata.normalize("NFD", value)
+    value = re.sub(r'[<>:"/\\|?*]', "", value)
     return value.strip(" ._")
 
 

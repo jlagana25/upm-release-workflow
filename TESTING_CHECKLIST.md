@@ -589,7 +589,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     volume root. Normalization is allowed only after that nested tree itself
     exactly matches all expected filenames: missing files move into the
     established `WAV/MEDIA/...` tree and the duplicate wrapper is retained in
-    a sibling `_mirror_quarantine_*` folder for recovery/audit.
+    a sibling `_mirror_quarantine_*` folder for recovery/audit. Expected NBC
+    filenames preserve punctuation and decomposed Unicode exactly as
+    Soundminer does; only its filename-illegal set (`<>:\"/\\|?*`) is removed.
 - **Inspect:**
   - `find "{nbc}/Music/WAV" -name "*.wav" | wc -l` — expected record count (e.g. 2148).
   - Step screenshots in `…/Scripts/Python/UPM Release WorkFlow Automation/_logs/soundminer_debug_steps/`.

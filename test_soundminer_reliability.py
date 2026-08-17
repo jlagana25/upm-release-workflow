@@ -43,6 +43,14 @@ class SoundminerReliabilityTests(unittest.TestCase):
         )
         self.assertEqual(result, {"abc 1_first song", "abc 2_second song"})
 
+    def test_soundminer_filename_component_matches_illegal_character_rules(self):
+        self.assertEqual(
+            soundminer._soundminer_filename_component(
+                '  "Älter" / Don\'t Ask? Baby<3 - No. 5  '
+            ),
+            "A\u0308lter  Don't Ask Baby3 - No. 5",
+        )
+
     def test_nbc_preflight_fails_before_gui_for_missing_audio(self):
         audio = self.root / "MEDIA"
         audio.mkdir()
