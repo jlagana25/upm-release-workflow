@@ -593,7 +593,7 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     filenames preserve punctuation and decomposed Unicode exactly as
     Soundminer does; only its filename-illegal set (`<>:\"/\\|?*`) is removed.
     If refreshed metadata changes punctuation/accents, an old output is moved
-    to `_filename_updates_quarantine_*` only when its folded identity maps to
+    to `_filename_updates_wav_quarantine_*` only when its folded identity maps to
     one distinct expected name and that exact refreshed file already exists.
 - **Inspect:**
   - `find "{nbc}/Music/WAV" -name "*.wav" | wc -l` — expected record count (e.g. 2148).

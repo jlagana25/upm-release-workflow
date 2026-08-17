@@ -263,7 +263,7 @@ class SoundminerReliabilityTests(unittest.TestCase):
         self.assertFalse((album / "ABC_01_Dont Ask.wav").exists())
         self.assertTrue((album / "ABC_01_Don't Ask.wav").exists())
         quarantines = list(
-            destination.parent.glob("_filename_updates_quarantine_*")
+            destination.parent.glob("_filename_updates_wav_quarantine_*")
         )
         self.assertEqual(len(quarantines), 1)
         self.assertTrue(any(quarantines[0].rglob("ABC_01_Dont Ask.wav")))

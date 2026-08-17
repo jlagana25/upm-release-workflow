@@ -444,6 +444,8 @@ def _quarantine_nbc_superseded_outputs(
     mirror_dest: Path,
     expected: set[str],
     logger: logging.Logger,
+    *,
+    output_ext: str = "wav",
 ) -> int:
     """Move proven old-name NBC files aside after refreshed names exist.
 
@@ -451,10 +453,13 @@ def _quarantine_nbc_superseded_outputs(
     after punctuation/accent folding, every target must be distinct, and the
     exact refreshed output must already exist. Otherwise nothing is moved.
     """
+    extension = output_ext.lower().lstrip(".")
+    if extension not in {"wav", "mp3"}:
+        raise ValueError(f"unsupported NBC output extension: {output_ext}")
     correct_media = mirror_dest / "MEDIA"
     files_by_identity: dict[str, list[Path]] = {}
     for path in correct_media.rglob("*") if correct_media.exists() else ():
-        if path.is_file() and path.suffix.lower() == ".wav":
+        if path.is_file() and path.suffix.lower() == f".{extension}":
             files_by_identity.setdefault(
                 _normalise_audio_identity(path.name), []
             ).append(path)
@@ -497,12 +502,15 @@ def _quarantine_nbc_superseded_outputs(
         )
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    quarantine = mirror_dest.parent / f"_filename_updates_quarantine_{stamp}"
+    quarantine = (
+        mirror_dest.parent /
+        f"_filename_updates_{extension}_quarantine_{stamp}"
+    )
     suffix = 1
     while quarantine.exists():
         quarantine = (
             mirror_dest.parent /
-            f"_filename_updates_quarantine_{stamp}_{suffix}"
+            f"_filename_updates_{extension}_quarantine_{stamp}_{suffix}"
         )
         suffix += 1
     for extra in sorted(extras):
