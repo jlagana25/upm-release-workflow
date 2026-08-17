@@ -372,6 +372,14 @@ def _build_command(request: dict[str, Any]) -> list[str]:
     if options.get("resume"):
         command.append("--resume")
     for option_name, flag in (
+        ("skip_delete_records", "--skip-delete-records"),
+        ("skip_import", "--skip-import"),
+        ("skip_embed", "--skip-embed"),
+        ("skip_mirror", "--skip-mirror"),
+    ):
+        if options.get(option_name):
+            command.append(flag)
+    for option_name, flag in (
         ("specials_dir_override", "--specials-dir-override"),
         ("client_label_override", "--client-label-override"),
         ("nbc_metadata_override", "--nbc-metadata-override"),

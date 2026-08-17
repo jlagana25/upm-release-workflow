@@ -84,6 +84,25 @@ class SoundminerAgentTests(unittest.TestCase):
         self.assertIn("--nbc", command)
         self.assertNotIn("--sourceaudio", command)
 
+    def test_agent_forwards_nbc_recovery_phase_skips(self):
+        command = soundminer_agent._build_command({
+            "workflow": "nbc",
+            "pinned_args": ["--year", "2026", "--month", "8", "--part", "1"],
+            "options": {
+                "skip_delete_records": True,
+                "skip_import": True,
+                "skip_embed": True,
+                "skip_mirror": True,
+            },
+        })
+        for flag in (
+            "--skip-delete-records",
+            "--skip-import",
+            "--skip-embed",
+            "--skip-mirror",
+        ):
+            self.assertIn(flag, command)
+
     def test_terminal_wrapper_runs_job_under_caffeinate(self):
         request = {"request_id": "awake-job"}
         log_path = self.root / "job.log"

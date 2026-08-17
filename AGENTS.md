@@ -343,6 +343,10 @@ inline or are submitted to HDF1's login-session agent.
   checks for a locked console or missing Soundminer window. Do not remove those
   guards: a locked Mac yields wallpaper-only captures that can otherwise look
   like progress when a dynamic wallpaper is enabled.
+  Recovery requests may forward the explicit NBC phase skips
+  (`skip_delete_records`, `skip_import`, `skip_embed`, `skip_mirror`) only after
+  the corresponding state has been directly validated; do not use them to
+  bypass a failed or unknown phase.
 - **Authentication is per macOS user and never repository data.** Domo cookies
   live only in the user's private Playwright profile; UniSync owns its own
   login/Keychain and local XML. Code may change only UniSync territory/cache/
