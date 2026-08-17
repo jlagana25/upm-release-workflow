@@ -564,7 +564,10 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     a locked console is detected independently of pixel activity and stops the
     run with a targeted error. A dialog/progress signal observed by the initial
     watcher carries into the idle detector, so a short import completed inside
-    that first window is not later misreported as never having started.
+    that first window is not later misreported as never having started. During
+    Soundminer's modal progress sheets (including Embed Metadata), the app can
+    temporarily expose zero Accessibility windows; a frontmost Soundminer menu
+    bar is accepted as proof that the visible modal UI is still present.
   - `12.5` embed via Database menu → attended pause until embed done (`✓ Embed complete`).
   - A visible **Soundminer Log Window** during import or embed is a hard failure:
     the workflow stops, leaves the log open, and saves a diagnostic screenshot.

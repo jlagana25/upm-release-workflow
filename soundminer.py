@@ -2691,7 +2691,10 @@ def _assert_soundminer_gui_available(
     script = (
         'tell application "System Events"\n'
         f'  if not (exists process "{SOUNDMINER_APP}") then return "missing"\n'
-        f'  tell process "{SOUNDMINER_APP}" to return count of windows\n'
+        f'  tell process "{SOUNDMINER_APP}"\n'
+        '    return ((count of windows) as text) & "|" & '
+        '((count of menu bars) as text) & "|" & (frontmost as text)\n'
+        '  end tell\n'
         'end tell'
     )
     try:
@@ -2713,7 +2716,24 @@ def _assert_soundminer_gui_available(
                 "Soundminer v5Pro exited during GUI automation. Review the "
                 "Soundminer/macOS crash report before resuming."
             )
-        if state.isdigit() and int(state) < 1:
+        parts = state.split("|")
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            logger.debug("        (unexpected Soundminer window probe: %r)", state)
+            return
+        window_count = int(parts[0])
+        menu_count = int(parts[1])
+        frontmost = parts[2] == "true"
+        # During Embed Metadata (and some other modal progress operations),
+        # Soundminer 5Pro temporarily exposes zero AX windows even though its
+        # main window and progress sheet are visibly present.  Its frontmost
+        # process and accessible menu bar remain reliable in that state.
+        if window_count < 1 and menu_count >= 1 and frontmost:
+            logger.debug(
+                "        (Soundminer modal progress state: no AX window, "
+                "frontmost menu bar present)"
+            )
+            return
+        if window_count < 1:
             raise _SoundminerError(
                 "Soundminer v5Pro is running but has no application window. "
                 "Restore or relaunch it before resuming."

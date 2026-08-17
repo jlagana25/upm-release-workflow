@@ -5,7 +5,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import soundminer
 
@@ -107,6 +107,27 @@ class SoundminerReliabilityTests(unittest.TestCase):
         self.assertFalse(soundminer._ioreg_reports_locked(
             '"CGSSessionScreenIsLocked"=No,"kCGSSessionOnConsoleKey"=Yes'
         ))
+
+    def test_modal_progress_state_does_not_look_like_a_missing_window(self):
+        unlocked = Mock(returncode=0, stdout='"CGSSessionScreenIsLocked"=No')
+        modal = Mock(returncode=0, stdout="0|1|true\n", stderr="")
+        with patch.object(soundminer.subprocess, "run", side_effect=[unlocked, modal]):
+            soundminer._assert_soundminer_gui_available(
+                self.logger, require_window=True
+            )
+
+    def test_zero_windows_without_frontmost_menu_fails_closed(self):
+        unlocked = Mock(returncode=0, stdout='"CGSSessionScreenIsLocked"=No')
+        missing_ui = Mock(returncode=0, stdout="0|1|false\n", stderr="")
+        with (
+            patch.object(
+                soundminer.subprocess, "run", side_effect=[unlocked, missing_ui]
+            ),
+            self.assertRaises(soundminer._SoundminerError),
+        ):
+            soundminer._assert_soundminer_gui_available(
+                self.logger, require_window=True
+            )
 
     def test_directory_picker_selects_folder_from_parent(self):
         writes: list[str] = []
