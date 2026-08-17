@@ -892,7 +892,7 @@ def run_soundminer_nbc_workflow(
             expected_count=expected_wav_count,
             expected_manifest=expected_manifest,
             manifest_label="NBC mirror",
-            normalize_nbc_source=audio_source,
+            normalize_nbc_source=audio_folder,
         )
         _mark_checkpoint(ctx, "nbc", "mirror", files=expected_wav_count)
 
