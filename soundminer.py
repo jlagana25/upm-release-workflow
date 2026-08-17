@@ -1906,44 +1906,45 @@ def _click_mirror_ok(
     """
     Confirm the Mirror Settings dialog (trigger its default OK button).
 
-    Approach: bring the dialog into focus, then press Return.  Return is
-    bound to the dialog's default button (OK), but ONLY when the dialog —
-    not one of its text fields, and not another window — has focus.  In
-    testing, pressing Return blind sent it to the focused Filename-Limit
-    field and the dialog stayed open.  So we first click the dialog's title
-    bar (a neutral region that focuses the window without altering any
-    setting), then press Return.
-
-    We click the title bar by position (centred dialog, title near the top)
-    rather than image-matching, and we still try the OK-button image match
-    first in case it succeeds for a precise click.
+    Use the verified Accessibility/logical dialog bounds from the settings
+    configurator. Image matches are returned in Retina screenshot pixels on
+    HDF1 while ``pyautogui.click`` consumes logical display coordinates; using
+    a raw image-match centre can therefore click at twice the intended point.
+    After clicking, explicitly prove the settings dialog closed before the
+    destination path is allowed anywhere near the keyboard focus.
     """
     import pyautogui
 
-    # 1. Precise path: if we can image-match the OK button, click it directly.
-    ok_img = _img(REQUIRED_SCREENSHOTS["mirror_ok"])
-    loc = _locate_safe(ok_img)
-    if loc is not None:
-        center = pyautogui.center(loc)
-        logger.info(f"  12.6c Clicking Mirror Settings OK at {center} (matched)…")
-        pyautogui.click(center.x, center.y)
-        time.sleep(POST_CLICK_WAIT)
-        _save_step_screenshot("12_6c_after_mirror_ok", logger)
-        return
-
-    # 2. Precise geometry path: the configurator already verified the dialog
-    #    bounds, so click the actual OK control rather than sending Return to
-    #    whichever text field happens to have focus.
     if bounds is None:
         bounds = _mirror_dialog_bounds(logger)
     ok_x, ok_y = _mirror_point(bounds, "ok")
     logger.info(
-        "  12.6c Could not match OK button; clicking verified dialog OK at "
+        "  12.6c Clicking verified Mirror Settings OK at "
         f"({ok_x}, {ok_y})…"
     )
     pyautogui.click(ok_x, ok_y)
     time.sleep(POST_CLICK_WAIT)
     _save_step_screenshot("12_6c_after_mirror_ok", logger)
+
+    try:
+        _assert_mirror_dialog_visible(bounds)
+    except _SoundminerError:
+        return
+
+    # A custom Soundminer control can occasionally consume the first click as
+    # focus-only. Retry the same verified control once, then fail closed.
+    logger.warning("        Mirror Settings remained open; retrying verified OK once…")
+    pyautogui.click(ok_x, ok_y)
+    time.sleep(POST_CLICK_WAIT)
+    _save_step_screenshot("12_6c_after_mirror_ok_retry", logger)
+    try:
+        _assert_mirror_dialog_visible(bounds)
+    except _SoundminerError:
+        return
+    raise _SoundminerError(
+        "Mirror Settings remained open after two verified OK clicks; refusing "
+        "to type the destination path into the focused settings field."
+    )
 
 
 def _navigate_mirror_destination(

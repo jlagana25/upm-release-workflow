@@ -149,6 +149,25 @@ class SoundminerReliabilityTests(unittest.TestCase):
             )
         self.assertEqual(writes, ["/Volumes/Test", "MEDIA"])
 
+    def test_mirror_ok_uses_verified_logical_geometry(self):
+        clicks: list[tuple[int, int]] = []
+        fake = types.SimpleNamespace(
+            click=lambda x, y: clicks.append((x, y)),
+        )
+        bounds = (100, 200, 600, 800)
+        with (
+            patch.dict(sys.modules, {"pyautogui": fake}),
+            patch.object(soundminer, "_save_step_screenshot"),
+            patch.object(
+                soundminer,
+                "_assert_mirror_dialog_visible",
+                side_effect=soundminer._SoundminerError("closed"),
+            ),
+            patch.object(soundminer.time, "sleep"),
+        ):
+            soundminer._click_mirror_ok(self.logger, bounds)
+        self.assertEqual(clicks, [soundminer._mirror_point(bounds, "ok")])
+
 
 if __name__ == "__main__":
     unittest.main()

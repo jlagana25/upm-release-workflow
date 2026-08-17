@@ -571,7 +571,10 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
   - `12.5` embed via Database menu → attended pause until embed done (`✓ Embed complete`).
   - A visible **Soundminer Log Window** during import or embed is a hard failure:
     the workflow stops, leaves the log open, and saves a diagnostic screenshot.
-  - `12.6` mirror dialog → settings checklist pause → OK clicked → destination picker → mirror runs.
+  - `12.6` mirror dialog → settings verified → OK clicked using the dialog's
+    logical Accessibility geometry → dialog closure verified → destination
+    picker → mirror runs. Never feed a raw Retina image-match coordinate to a
+    click or type the destination while Mirror Settings remains focused.
   - `12.7` polling shows the `.wav` count climbing, then compares the exact
     expected/actual filename manifests. Equal counts with different files fail.
 - **Inspect:**
