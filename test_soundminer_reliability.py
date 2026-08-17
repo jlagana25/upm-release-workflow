@@ -182,6 +182,27 @@ class SoundminerReliabilityTests(unittest.TestCase):
             soundminer._focus_record_list(self.logger)
         self.assertEqual(clicks, [(605, 309)])
 
+    def test_closed_destination_picker_accepts_processing_screen(self):
+        clicks: list[tuple[int, int]] = []
+        dark_screen = types.SimpleNamespace(
+            width=200,
+            height=100,
+            getpixel=lambda point: (40, 45, 50),
+        )
+        fake = types.SimpleNamespace(
+            size=lambda: (100, 50),
+            screenshot=lambda: dark_screen,
+            click=lambda x, y: clicks.append((x, y)),
+        )
+        no_button = Mock(stdout="none\n", returncode=0)
+        with (
+            patch.dict(sys.modules, {"pyautogui": fake}),
+            patch.object(soundminer.subprocess, "run", return_value=no_button),
+            patch.object(soundminer.time, "sleep"),
+        ):
+            soundminer._confirm_mirror_destination_panel(self.logger)
+        self.assertEqual(clicks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

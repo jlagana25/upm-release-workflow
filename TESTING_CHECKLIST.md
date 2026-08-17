@@ -576,7 +576,10 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
   - `12.6` mirror dialog → settings verified → OK clicked using the dialog's
     logical Accessibility geometry → dialog closure verified → destination
     picker → mirror runs. Never feed a raw Retina image-match coordinate to a
-    click or type the destination while Mirror Settings remains focused.
+    click or type the destination while Mirror Settings remains focused. If
+    the folder-selection Return has already replaced the light picker with
+    Soundminer's dark Processing Records modal, treat the picker as closed and
+    let the exact output manifest—not another blind Open click—prove success.
   - `12.7` polling shows the `.wav` count climbing, then compares the exact
     expected/actual filename manifests. Equal counts with different files fail.
 - **Inspect:**

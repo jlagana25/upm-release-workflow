@@ -2023,18 +2023,28 @@ def _confirm_mirror_destination_panel(logger: logging.Logger) -> None:
         scale_y = screenshot.height / sh
         cx, cy = int(sw * 0.50 * scale_x), int(sh * 0.50 * scale_y)
         r, g, b = screenshot.getpixel((cx, cy))[:3]
-        if min(r, g, b) < 175 or max(r, g, b) - min(r, g, b) > 35:
-            raise _SoundminerError(
-                "Mirror destination panel did not close and its geometry "
-                "could not be verified; refusing to click Open blindly."
-            )
-        open_x, open_y = int(sw * 0.769), int(sh * 0.663)
-        logger.info(
-            f"        Open button not exposed through Accessibility; clicking "
-            f"verified folder-picker Open at ({open_x}, {open_y})…"
+        panel_is_light = (
+            min(r, g, b) >= 175 and max(r, g, b) - min(r, g, b) <= 35
         )
-        pyautogui.click(open_x, open_y)
-        time.sleep(1.0)
+        if panel_is_light:
+            open_x, open_y = int(sw * 0.769), int(sh * 0.663)
+            logger.info(
+                f"        Open button not exposed through Accessibility; "
+                f"clicking verified folder-picker Open at ({open_x}, {open_y})…"
+            )
+            pyautogui.click(open_x, open_y)
+            time.sleep(1.0)
+        else:
+            # _open_panel_go_to_path() already sends Return after selecting the
+            # folder. Soundminer commonly accepts that Return and immediately
+            # replaces the picker with its dark Processing Records modal, so
+            # there is no Open button left to click. The exact destination
+            # count/filename manifest below remains the authoritative proof
+            # that this apparent start was real and complete.
+            logger.info(
+                "        ✓ Destination picker already closed; mirror processing "
+                "has started."
+            )
 
     # Fail immediately if the light folder panel is still covering the screen
     # centre.  This prevents the output poll from idling for ten minutes while
