@@ -105,6 +105,12 @@ def convert_soundmouse_csv_to_xlsx(csv_path: Path, xlsx_path: Path) -> None:
         for row in rows:
             cells = []
             for value in row:
+                # Do not materialize blank CSV fields as empty shared-string
+                # cells. Native Excel omits them, and SoundMouse's parser can
+                # misread an empty shared-string index as a neighboring value.
+                if value == "":
+                    cells.append(None)
+                    continue
                 cell = WriteOnlyCell(worksheet, value=value)
                 cell.data_type = "s"
                 cells.append(cell)
@@ -128,8 +134,13 @@ def _rewrite_inline_strings_as_shared(source: Path, destination: Path) -> None:
     spreadsheet_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     relationships_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
     content_types_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+    # ElementTree's namespace registry is process-global, and only one namespace
+    # can own the empty prefix at a time.  Serialize each OOXML part immediately
+    # after registering *its* default namespace.  Registering Relationships here
+    # too early previously made worksheets/sharedStrings use ``ns0:`` prefixes;
+    # Excel repaired or accepted those files, but SoundMouse's stricter parser
+    # rejected them.
     ET.register_namespace("", spreadsheet_ns)
-    ET.register_namespace("", relationships_ns)
 
     shared_values: list[str] = []
     shared_indexes: dict[str, int] = {}
@@ -179,6 +190,7 @@ def _rewrite_inline_strings_as_shared(source: Path, destination: Path) -> None:
         shared_root, encoding="utf-8", xml_declaration=True
     )
 
+    ET.register_namespace("", relationships_ns)
     relationships = ET.fromstring(members["xl/_rels/workbook.xml.rels"])
     relationship_type = (
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"
@@ -197,6 +209,7 @@ def _rewrite_inline_strings_as_shared(source: Path, destination: Path) -> None:
         relationships, encoding="utf-8", xml_declaration=True
     )
 
+    ET.register_namespace("", content_types_ns)
     content_types = ET.fromstring(members["[Content_Types].xml"])
     part_name = "/xl/sharedStrings.xml"
     if not any(item.get("PartName") == part_name for item in content_types):
@@ -226,6 +239,31 @@ def _assert_soundmouse_xlsx_compatibility(path: Path) -> None:
         names = set(package.namelist())
         if "xl/sharedStrings.xml" not in names:
             raise ValueError(f"{path.name} has no Excel shared-string table")
+        spreadsheet_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        shared_root = ET.fromstring(package.read("xl/sharedStrings.xml"))
+        if any(
+            "".join(item.itertext()) == ""
+            for item in shared_root.findall(f"{{{spreadsheet_ns}}}si")
+        ):
+            raise ValueError(
+                f"{path.name} contains empty shared strings rejected by SoundMouse"
+            )
+        rewritten_parts = {
+            "[Content_Types].xml",
+            "xl/_rels/workbook.xml.rels",
+            "xl/sharedStrings.xml",
+            *(
+                name
+                for name in names
+                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+            ),
+        }
+        for name in rewritten_parts:
+            payload = package.read(name)
+            if b"ns0:" in payload or b"xmlns:ns0=" in payload:
+                raise ValueError(
+                    f"{path.name} contains noncanonical ns0 OOXML prefixes in {name}"
+                )
         for name in names:
             if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
                 if b't="inlineStr"' in package.read(name):

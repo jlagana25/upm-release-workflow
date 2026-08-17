@@ -7,6 +7,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from zipfile import ZipFile
 
 from config import ReleaseContext
 from soundmouse import (
@@ -203,9 +204,22 @@ class SoundMouseTests(unittest.TestCase):
                 writer = csv.writer(handle)
                 writer.writerow(["Code", "Title", "Formula-like", "Long ID"])
                 writer.writerow(["001", "Text, with comma", "=1+1", "12345678901234567890"])
+                writer.writerow(["002", "", "literal", ""])
 
             convert_soundmouse_csv_to_xlsx(csv_path, xlsx_path)
             _assert_soundmouse_xlsx_compatibility(xlsx_path)
+
+            with ZipFile(xlsx_path) as package:
+                rewritten_parts = (
+                    "[Content_Types].xml",
+                    "xl/_rels/workbook.xml.rels",
+                    "xl/sharedStrings.xml",
+                    "xl/worksheets/sheet1.xml",
+                )
+                for name in rewritten_parts:
+                    payload = package.read(name)
+                    self.assertNotIn(b"ns0:", payload)
+                    self.assertNotIn(b"xmlns:ns0=", payload)
 
             workbook = load_workbook(xlsx_path, data_only=False)
             sheet = workbook["Metadata"]
@@ -213,6 +227,10 @@ class SoundMouseTests(unittest.TestCase):
             self.assertEqual(sheet["B2"].value, "Text, with comma")
             self.assertEqual(sheet["C2"].value, "=1+1")
             self.assertEqual(sheet["D2"].value, "12345678901234567890")
+            self.assertEqual(sheet["A3"].value, "002")
+            self.assertIsNone(sheet["B3"].value)
+            self.assertEqual(sheet["C3"].value, "literal")
+            self.assertIsNone(sheet["D3"].value)
             workbook.close()
 
     def test_csv_conversion_rejects_ragged_rows_before_excel(self) -> None:

@@ -40,7 +40,11 @@ setting up a new machine, work through Part 2 top to bottom.
 > **SoundMouse workbook requirement:** Step 16 exports metadata as CSV and
 > converts it to XLSX without controlling Excel. A finished workbook must contain
 > `xl/sharedStrings.xml` and no `t="inlineStr"` worksheet cells; this is required
-> by the SoundMouse uploader even though Excel itself accepts either form.
+> by the SoundMouse uploader even though Excel itself accepts either form. The
+> rewritten OOXML parts must also retain canonical default namespaces (no
+> generated `ns0:` prefixes), because Excel may accept XML that SoundMouse's
+> stricter workbook parser rejects. Blank CSV fields must remain absent cells,
+> not explicit empty shared strings.
 
 ---
 
