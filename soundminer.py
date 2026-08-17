@@ -1244,11 +1244,22 @@ def _activate_soundminer(
         time.sleep(1.5)
 
     if clear_stale_dialogs:
-        # Clear any stuck dialogs from a previous abort.
-        pyautogui.press("escape")
-        time.sleep(0.3)
-        pyautogui.press("escape")
-        time.sleep(0.3)
+        # Clear abandoned pickers from a previous abort. Soundminer can put an
+        # OK-only "open file operation failed" alert above the picker; Escape
+        # cannot dismiss that alert, so accept only that exact known error and
+        # then use Escape to cancel the stale panel underneath. Never click a
+        # generic unknown OK/Yes dialog here.
+        for _attempt in range(4):
+            snapshot = _dialog_accessibility_snapshot(logger)
+            if "The open file operation failed" in snapshot:
+                logger.warning(
+                    "  Clearing stale Soundminer open-panel failure from a "
+                    "previous aborted run."
+                )
+                if _click_known_dialog_ok(logger, "OK"):
+                    continue
+            pyautogui.press("escape")
+            time.sleep(0.3)
 
     logger.debug(f"  {SOUNDMINER_APP} is active.")
     _assert_soundminer_gui_available(logger, require_window=True)
