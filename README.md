@@ -228,7 +228,10 @@ Then the other machine installs with `pip install -r requirements.lock`.
   to refresh their original folders in place; other delivered partners are
   protected from mutation. Step 15 validates SourceAudio and Netmix against the
   union of original media and the current correction package. SoundMouse applies
-  the same union in its Step 16 gate. Record or inspect state with:
+  the same union in its Step 16 gate. A SoundMouse `Missing` package contains
+  only added WAVs, every cover referenced by those added rows (copied from the
+  original package when already present), and uploader-compatible metadata
+  workbooks filtered to the added audio or cover rows. Record or inspect state with:
   ```bash
   python3 delivery_state.py --year 2026 --month 9 --part 1 --mark-uploaded sourceaudio,sourceaudio_exus
   python3 delivery_state.py --year 2026 --month 9 --part 1 --show

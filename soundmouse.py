@@ -633,6 +633,87 @@ def install_soundmouse_metadata(
     return outputs
 
 
+def install_soundmouse_correction_metadata(
+    source_workbooks: list[Path],
+    metadata_directory: Path,
+    audio_additions: set[str],
+    cover_additions: set[str],
+    logger: logging.Logger,
+) -> list[Path]:
+    """Install upload-compatible metadata containing only correction rows.
+
+    A SoundMouse correction upload must not contain the full delivery again.
+    Each emitted workbook keeps the original columns but includes only rows
+    whose audio filename is new or whose referenced cover is new. Workbooks
+    with no matching rows are omitted from the Missing package.
+    """
+    from openpyxl import load_workbook
+
+    metadata_directory.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    with tempfile.TemporaryDirectory(prefix="soundmouse_correction_metadata_") as tmp:
+        scratch = Path(tmp)
+        for source in source_workbooks:
+            workbook = load_workbook(source, read_only=True, data_only=False)
+            try:
+                selected_header: list[str] | None = None
+                selected_rows: list[list[str]] = []
+                for worksheet in workbook.worksheets:
+                    rows = worksheet.iter_rows(values_only=True)
+                    header = next(rows, None)
+                    if not header:
+                        continue
+                    headers = [str(value or "") for value in header]
+                    audio_col = _find_column(headers, POSSIBLE_FILENAME_COLS)
+                    cover_col = _find_column(headers, POSSIBLE_COVER_COLS)
+                    if not audio_col or not cover_col:
+                        continue
+                    audio_index = headers.index(audio_col)
+                    cover_index = headers.index(cover_col)
+                    selected_header = headers
+                    for row in rows:
+                        values = [str(value or "") for value in row]
+                        audio_key = (
+                            _wav_name(values[audio_index])
+                            if audio_index < len(values) else ""
+                        )
+                        cover_key = (
+                            _file_key(values[cover_index])
+                            if cover_index < len(values) else ""
+                        )
+                        if (
+                            audio_key in audio_additions
+                            or cover_key in cover_additions
+                        ):
+                            values.extend([""] * (len(headers) - len(values)))
+                            selected_rows.append(values[:len(headers)])
+                    break
+            finally:
+                workbook.close()
+
+            if selected_header is None:
+                raise ValueError(
+                    f"No worksheet in {source.name} contains both audio and "
+                    "cover filename columns"
+                )
+            if not selected_rows:
+                continue
+
+            csv_path = scratch / source.with_suffix(".csv").name
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(selected_header)
+                writer.writerows(selected_rows)
+            destination = metadata_directory / source.name
+            convert_soundmouse_csv_to_xlsx(csv_path, destination)
+            outputs.append(destination)
+            logger.info(
+                f"  Prepared correction metadata: {destination.name} "
+                f"({len(selected_rows)} row(s))"
+            )
+    return outputs
+
+
 def _wav_name(value: str) -> str:
     """Return a case-insensitive WAV leaf name for tracklist comparisons."""
     name = Path(str(value).strip()).name
@@ -798,12 +879,18 @@ def download_soundmouse_covers(
     logger: logging.Logger,
     *,
     existing_cover_roots: tuple[Path, ...] = (),
+    only_audio_names: set[str] | None = None,
+    only_cover_names: set[str] | None = None,
+    copy_from_roots: tuple[Path, ...] = (),
 ) -> bool:
     """Download unique covers into the workflow period's delivery root."""
     fields, rows = _read_csv(tracklist_csv)
     cover_col = _find_column(fields, POSSIBLE_COVER_COLS)
     url_col = _find_column(fields, POSSIBLE_URL_COLS)
-    if not cover_col or not url_col:
+    filename_col = _find_column(fields, POSSIBLE_FILENAME_COLS)
+    if not cover_col or not url_col or (
+        only_audio_names is not None and not filename_col
+    ):
         logger.error("  ✗ SoundMouse tracklist needs AlbumCoverArt and CDNAlbumArt columns.")
         return False
 
@@ -815,17 +902,41 @@ def download_soundmouse_covers(
     existing_cover_names = set().union(*(
         _disk_file_keys(root) for root in existing_cover_roots
     )) if existing_cover_roots else set()
+    copy_sources: dict[str, list[Path]] = {}
+    for source_root in copy_from_roots:
+        for key, paths in _soundmouse_paths_by_leaf(source_root).items():
+            copy_sources.setdefault(key, []).extend(paths)
     for row in rows:
         name = Path(str(row.get(cover_col, "")).strip()).name
         url = str(row.get(url_col, "")).strip()
-        if not name or name in seen:
+        name_key = name.casefold()
+        audio_key = _wav_name(row.get(filename_col, "")) if filename_col else ""
+        if only_audio_names is not None or only_cover_names is not None:
+            if not (
+                audio_key in (only_audio_names or set())
+                or name_key in (only_cover_names or set())
+            ):
+                continue
+        if not name or name_key in seen:
             continue
-        seen.add(name)
+        seen.add(name_key)
         destination = release_directory / "Covers" / name
-        if name.casefold() in existing_cover_names:
+        if name_key in existing_cover_names:
             continue
         if destination.exists() and not overwrite:
             continue
+        if name_key in copy_sources:
+            if dry_run:
+                logger.info(f"  [DRY RUN] Would copy correction cover: {destination}")
+                continue
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(copy_sources[name_key][0], destination)
+                continue
+            except OSError as exc:
+                logger.error(f"  ✗ Cover copy failed ({name}): {exc}")
+                ok = False
+                continue
         if not url:
             logger.warning(f"  No cover URL for {name}")
             ok = False
@@ -1078,7 +1189,13 @@ def run_soundmouse_step(
             False,
             overwrite,
             logger,
-            existing_cover_roots=(root / "Covers",) if correction_package else (),
+            existing_cover_roots=(),
+            only_audio_names=audio_additions
+            if correction_package and has_delta else None,
+            only_cover_names=cover_additions
+            if correction_package and has_delta else None,
+            copy_from_roots=(root / "Covers",)
+            if correction_package and has_delta else (),
         ):
             return False
         try:
@@ -1088,11 +1205,17 @@ def run_soundmouse_step(
                 logger,
             )
             if correction_package and has_delta:
-                install_soundmouse_metadata(
+                correction_metadata = install_soundmouse_correction_metadata(
                     source_workbooks,
                     correction_root / "Metadata",
+                    audio_additions,
+                    cover_additions,
                     logger,
                 )
+                if (audio_additions or cover_additions) and not correction_metadata:
+                    raise ValueError(
+                        "No correction metadata rows matched the added audio/covers"
+                    )
         except (OSError, ValueError) as exc:
             logger.error(f"  ✗ Could not install SoundMouse metadata: {exc}")
             return False

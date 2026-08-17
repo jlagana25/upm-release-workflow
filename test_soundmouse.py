@@ -17,6 +17,8 @@ from soundmouse import (
     activation_ranges_from_tracklist,
     create_soundmouse_directories,
     convert_soundmouse_csv_to_xlsx,
+    download_soundmouse_covers,
+    install_soundmouse_correction_metadata,
     install_soundmouse_metadata,
     metadata_codes_from_bucket,
     validate_soundmouse_delivery,
@@ -309,6 +311,65 @@ class SoundMouseTests(unittest.TestCase):
                 additional_media_roots=(root / "Missing" / "MEDIA",),
                 additional_cover_roots=(root / "Missing" / "Covers",),
             ))
+
+    def test_uploaded_correction_contains_only_added_metadata_and_related_cover(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_csv = self._csv(
+                root,
+                "metadata.csv",
+                ["Filename", "ALBUM ARTWORK FILE NAME", "Title"],
+                [
+                    {"Filename": "old.wav", "ALBUM ARTWORK FILE NAME": "shared.jpg", "Title": "Old"},
+                    {"Filename": "new.wav", "ALBUM ARTWORK FILE NAME": "shared.jpg", "Title": "New"},
+                ],
+            )
+            source_xlsx = root / "SoundMouseMetadata 01 - ALL.xlsx"
+            convert_soundmouse_csv_to_xlsx(source_csv, source_xlsx)
+            correction = root / "Missing"
+
+            outputs = install_soundmouse_correction_metadata(
+                [source_xlsx],
+                correction / "Metadata",
+                {"new.wav"},
+                set(),
+                logging.getLogger("test"),
+            )
+            self.assertEqual([path.name for path in outputs], [source_xlsx.name])
+            _assert_soundmouse_xlsx_compatibility(outputs[0])
+            workbook = load_workbook(outputs[0], read_only=True)
+            values = list(workbook.active.iter_rows(values_only=True))
+            workbook.close()
+            self.assertEqual([row[0] for row in values], ["Filename", "new.wav"])
+
+            tracklist = self._csv(
+                root,
+                "tracklist.csv",
+                ["Filename", "AlbumCoverArt", "CDNAlbumArt"],
+                [
+                    {"Filename": "old.wav", "AlbumCoverArt": "shared.jpg", "CDNAlbumArt": ""},
+                    {"Filename": "new.wav", "AlbumCoverArt": "shared.jpg", "CDNAlbumArt": ""},
+                ],
+            )
+            original_covers = root / "Covers"
+            original_covers.mkdir()
+            (original_covers / "shared.jpg").write_bytes(b"cover")
+            self.assertTrue(download_soundmouse_covers(
+                tracklist,
+                correction,
+                False,
+                False,
+                logging.getLogger("test"),
+                only_audio_names={"new.wav"},
+                only_cover_names=set(),
+                copy_from_roots=(original_covers,),
+            ))
+            self.assertEqual(
+                (correction / "Covers" / "shared.jpg").read_bytes(),
+                b"cover",
+            )
 
     def test_full_month_metadata_is_installed_without_range_splitting(self) -> None:
         from openpyxl import Workbook, load_workbook
