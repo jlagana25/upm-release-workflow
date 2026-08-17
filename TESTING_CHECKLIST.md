@@ -568,7 +568,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     Soundminer's modal progress sheets (including Embed Metadata), the app can
     temporarily expose zero Accessibility windows; a frontmost Soundminer menu
     bar is accepted as proof that the visible modal UI is still present.
-  - `12.5` embed via Database menu → attended pause until embed done (`✓ Embed complete`).
+  - `12.5` explicitly focuses the central record grid before ⌘A, then embeds
+    via the Database menu. This prevents a post-restart Search Database focus
+    from consuming Select All; the unattended monitor waits for completion.
   - A visible **Soundminer Log Window** during import or embed is a hard failure:
     the workflow stops, leaves the log open, and saves a diagnostic screenshot.
   - `12.6` mirror dialog → settings verified → OK clicked using the dialog's

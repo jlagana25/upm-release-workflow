@@ -1481,7 +1481,8 @@ def _select_all_and_embed(
     import pyautogui
 
     logger.info("  12.5  ⌘A select all → Database → Embed Metadata for Selected Records…")
-    _activate_soundminer(logger)  # ensure focus before keystroke
+    _activate_soundminer(logger)
+    _focus_record_list(logger)
     pyautogui.hotkey("command", "a")
     time.sleep(1.0)
     _save_step_screenshot("12_5a_after_select_all", logger)
@@ -2870,19 +2871,39 @@ def _wait_for_screen_idle(
         time.sleep(SCREEN_IDLE_POLL)
 
 
+def _focus_record_list(logger: logging.Logger) -> None:
+    """Put keyboard focus inside Soundminer's central record grid.
+
+    Activating the app does not imply grid focus: after a relaunch Soundminer
+    restores focus to Search Database, where Command-A merely selects the
+    search text and leaves zero records selected. The grid occupies a stable
+    central region on both supported HDF1 display modes; verify that the point
+    is inside the active Soundminer window before clicking it.
+    """
+    import pyautogui
+
+    _assert_soundminer_gui_available(logger, require_window=True)
+    sw, sh = pyautogui.size()
+    x, y = int(sw * 0.35), int(sh * 0.30)
+    logger.debug(f"        Focusing Soundminer record grid at ({x}, {y}).")
+    pyautogui.click(x, y)
+    time.sleep(0.4)
+
+
 def _select_all_records(logger: logging.Logger) -> None:
     """
     ⌘A in the Soundminer record list so the Mirror operates on EVERY record,
     not just whatever row happened to be selected after a scan or import.
 
     Mirrors the focus-then-keystroke pattern used by _select_all_and_embed:
-    bring Soundminer to the front, then send ⌘A.  Called immediately before
-    opening the Mirror Settings dialog in both the NBC and SourceAudio flows.
+    bring Soundminer to the front, click inside the record grid, then send ⌘A.
+    Called immediately before opening the Mirror Settings dialog in both the
+    NBC and SourceAudio flows.
     """
     import pyautogui
     logger.info("  Selecting all records (⌘A) before Mirror…")
-    _activate_soundminer(logger)   # ensure the record list has focus
-    time.sleep(0.4)
+    _activate_soundminer(logger)
+    _focus_record_list(logger)
     pyautogui.hotkey("command", "a")
     time.sleep(0.8)
     _save_step_screenshot("select_all_before_mirror", logger)

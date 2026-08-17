@@ -168,6 +168,20 @@ class SoundminerReliabilityTests(unittest.TestCase):
             soundminer._click_mirror_ok(self.logger, bounds)
         self.assertEqual(clicks, [soundminer._mirror_point(bounds, "ok")])
 
+    def test_record_grid_focus_uses_stable_central_point(self):
+        clicks: list[tuple[int, int]] = []
+        fake = types.SimpleNamespace(
+            size=lambda: (1729, 1032),
+            click=lambda x, y: clicks.append((x, y)),
+        )
+        with (
+            patch.dict(sys.modules, {"pyautogui": fake}),
+            patch.object(soundminer, "_assert_soundminer_gui_available"),
+            patch.object(soundminer.time, "sleep"),
+        ):
+            soundminer._focus_record_list(self.logger)
+        self.assertEqual(clicks, [(605, 309)])
+
 
 if __name__ == "__main__":
     unittest.main()
