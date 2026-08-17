@@ -1517,6 +1517,10 @@ def _import_metadata(
         if path.is_file() and path.suffix.lower() == ".wav"
     )
     safe_wait_minutes = min(30, max(3, math.ceil(expected_records / 480)))
+    minimum_runtime = min(
+        15 * 60,
+        max(60, math.ceil(expected_records / 1200) * 60),
+    )
 
     def _import_poll_guard() -> bool:
         dismissed = _dismiss_import_dialogs_once(logger)
@@ -1534,6 +1538,7 @@ def _import_metadata(
         logger       = logger,
         on_poll      = _import_poll_guard,
         initial_activity = import_start_observed,
+        minimum_runtime = minimum_runtime,
     )
     _raise_if_soundminer_log_window(logger, phase="import")
     logger.info("        ✓ Import complete.")
@@ -2855,6 +2860,7 @@ def _wait_for_screen_idle(
     logger:               logging.Logger,
     on_poll:              "Optional[Callable[[], bool]]" = None,
     initial_activity:     bool = False,
+    minimum_runtime:      int = 0,
 ) -> None:
     """
     Block until the Soundminer UI stops changing — the automated stand-in for
@@ -2941,7 +2947,11 @@ def _wait_for_screen_idle(
         idle_for = now - last_change
 
         # Normal completion: we saw the phase run, and it's now been still.
-        if saw_activity and idle_for >= stability:
+        if (
+            saw_activity
+            and idle_for >= stability
+            and elapsed >= minimum_runtime
+        ):
             logger.info(
                 f"        {phase_label} finished — UI idle {int(stability)}s "
                 f"({int(elapsed)}s total)."
@@ -2960,11 +2970,17 @@ def _wait_for_screen_idle(
             return
 
         if now >= next_log:
-            state = (
-                f"UI idle {int(idle_for)}s/{int(stability)}s"
-                if saw_activity
-                else f"awaiting first activity ({int(elapsed)}s)"
-            )
+            if saw_activity and elapsed < minimum_runtime:
+                state = (
+                    f"minimum runtime {int(elapsed)}s/"
+                    f"{int(minimum_runtime)}s"
+                )
+            else:
+                state = (
+                    f"UI idle {int(idle_for)}s/{int(stability)}s"
+                    if saw_activity
+                    else f"awaiting first activity ({int(elapsed)}s)"
+                )
             logger.info(f"        … {phase_label} running ({int(elapsed)}s; {state})")
             next_log = now + PROGRESS_DOT_INTERVAL
 
@@ -3018,6 +3034,7 @@ def _wait_with_manual_handshake(
     logger:       logging.Logger,
     on_poll:      "Optional[Callable[[], bool]]" = None,
     initial_activity: bool = False,
+    minimum_runtime: int = 0,
 ) -> None:
     """
     Block for a phase whose completion we can't poll (scan, import, embed).
@@ -3049,6 +3066,7 @@ def _wait_with_manual_handshake(
             logger               = logger,
             on_poll              = on_poll,
             initial_activity     = initial_activity,
+            minimum_runtime      = minimum_runtime,
         )
         return
     else:
