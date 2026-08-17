@@ -1,6 +1,8 @@
 import csv
 import logging
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -105,6 +107,26 @@ class SoundminerReliabilityTests(unittest.TestCase):
         self.assertFalse(soundminer._ioreg_reports_locked(
             '"CGSSessionScreenIsLocked"=No,"kCGSSessionOnConsoleKey"=Yes'
         ))
+
+    def test_directory_picker_selects_folder_from_parent(self):
+        writes: list[str] = []
+        fake = types.SimpleNamespace(
+            hotkey=lambda *args: None,
+            press=lambda *args: None,
+            write=lambda value, **kwargs: writes.append(value),
+        )
+        with (
+            patch.dict(sys.modules, {"pyautogui": fake}),
+            patch.object(soundminer, "_set_clipboard", return_value=False),
+            patch.object(soundminer, "_save_step_screenshot"),
+            patch.object(soundminer.time, "sleep"),
+        ):
+            soundminer._open_panel_go_to_path(
+                "/Volumes/Test/MEDIA",
+                self.logger,
+                select_directory=True,
+            )
+        self.assertEqual(writes, ["/Volumes/Test", "MEDIA"])
 
 
 if __name__ == "__main__":

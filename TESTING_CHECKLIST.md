@@ -548,6 +548,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
   - `12.4` creates a runtime-only import CSV without Domo's `GRAND TOTAL`
     footer, then both pickers navigate; attended pause until you confirm import
     done (`✓ Import complete`). The original Domo CSV remains unchanged.
+    Folder pickers must navigate to the target's parent, select the target
+    folder row, and confirm it; navigating inside the folder leaves macOS Open
+    disabled and is a hard failure.
     Normal runs require no Enter. The duplicate warning is accepted, but an
     unmatched-fields dialog is accepted only for the audited
     `is_SongBasedonLyrics`, `HasVocals`, and `Is_Explicit` set. A new field is

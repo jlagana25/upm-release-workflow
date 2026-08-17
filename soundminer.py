@@ -1002,7 +1002,7 @@ def _scan_sounds_into_database(
     _save_step_screenshot("11b_scan_dialog", logger)
 
     logger.info(f"        → Selecting folder to scan: {scan_folder}")
-    _open_panel_go_to_path(str(scan_folder), logger)
+    _open_panel_go_to_path(str(scan_folder), logger, select_directory=True)
     time.sleep(2.0)
     _save_step_screenshot("11c_after_scan_folder", logger)
 
@@ -1365,7 +1365,7 @@ def _import_metadata(
     _save_step_screenshot("12_4b_after_csv", logger)
 
     logger.info(f"        → Selecting audio folder: {audio_folder}")
-    _open_panel_go_to_path(str(audio_folder), logger)
+    _open_panel_go_to_path(str(audio_folder), logger, select_directory=True)
     time.sleep(2.0)
     _save_step_screenshot("12_4c_after_audio", logger)
 
@@ -1900,7 +1900,7 @@ def _navigate_mirror_destination(
     """
     logger.info(f"  12.6d Selecting mirror destination: {mirror_dest}")
     time.sleep(DIALOG_OPEN_WAIT)
-    _open_panel_go_to_path(str(mirror_dest), logger)
+    _open_panel_go_to_path(str(mirror_dest), logger, select_directory=True)
     _confirm_mirror_destination_panel(logger)
     time.sleep(2.0)
     _save_step_screenshot("12_6d_after_dest", logger)
@@ -2477,10 +2477,17 @@ def _dismiss_alert_if_present(
 def _open_panel_go_to_path(
     path:   str,
     logger: logging.Logger,
+    *,
+    select_directory: bool = False,
 ) -> None:
     """
-    Inside an open macOS NSOpenPanel, navigate to `path` via Cmd+Shift+G,
-    paste via clipboard, then two Enters (navigate + confirm).
+    Inside an open macOS NSOpenPanel, navigate to `path` via Cmd+Shift+G.
+
+    File selection pastes the complete file path, then confirms it. Directory
+    selection instead navigates to the parent and type-selects the directory
+    itself before confirming. Pasting a directory path directly navigates
+    *inside* it, where Soundminer's folder picker leaves the Open button
+    disabled because no folder row is selected.
 
     Same shape as unisync_automation._open_panel_go_to_path() — see that
     function for the rationale on each step (clipboard vs typing, double
@@ -2502,8 +2509,11 @@ def _open_panel_go_to_path(
     pyautogui.hotkey("command", "a")
     time.sleep(0.2)
 
-    # Deliver the path via clipboard paste (immune to keyboard-layout drift)
-    if _set_clipboard(path, logger):
+    target = Path(path)
+    navigation_path = str(target.parent if select_directory else target)
+
+    # Deliver the navigation path via clipboard paste (immune to keyboard-layout drift)
+    if _set_clipboard(navigation_path, logger):
         time.sleep(0.15)
         pyautogui.hotkey("command", "v")
     else:
@@ -2511,7 +2521,7 @@ def _open_panel_go_to_path(
             "    Clipboard unavailable — falling back to typing the path "
             "(special characters may be unreliable)."
         )
-        pyautogui.write(path, interval=0.04)
+        pyautogui.write(navigation_path, interval=0.04)
     time.sleep(0.5)
     _save_step_screenshot("dlg_03_after_paste", logger)
 
@@ -2520,12 +2530,22 @@ def _open_panel_go_to_path(
     time.sleep(0.9)
     _save_step_screenshot("dlg_04_after_first_enter", logger)
 
-    # Second Enter — click Open / confirm
+    if select_directory:
+        # The list has focus after Go-to-Folder closes. Type-select the exact
+        # child folder so Open becomes enabled, then confirm the selection.
+        pyautogui.write(target.name, interval=0.04)
+        time.sleep(0.7)
+        _save_step_screenshot("dlg_05_directory_selected", logger)
+
+    # Second Enter — click Open / confirm the file or selected directory.
     pyautogui.press("enter")
     time.sleep(0.9)
     _save_step_screenshot("dlg_05_after_second_enter", logger)
 
-    logger.debug(f"    NSOpenPanel → {path}")
+    logger.debug(
+        f"    NSOpenPanel → {path}"
+        + (" (directory selected from parent)" if select_directory else "")
+    )
 
 
 def _set_clipboard(text: str, logger: logging.Logger) -> bool:
