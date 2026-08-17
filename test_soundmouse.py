@@ -312,7 +312,7 @@ class SoundMouseTests(unittest.TestCase):
                 additional_cover_roots=(root / "Missing" / "Covers",),
             ))
 
-    def test_uploaded_correction_contains_only_added_metadata_and_related_cover(self) -> None:
+    def test_uploaded_audio_correction_omits_unchanged_album_cover(self) -> None:
         from openpyxl import load_workbook
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -362,14 +362,10 @@ class SoundMouseTests(unittest.TestCase):
                 False,
                 False,
                 logging.getLogger("test"),
-                only_audio_names={"new.wav"},
+                only_audio_names=None,
                 only_cover_names=set(),
-                copy_from_roots=(original_covers,),
             ))
-            self.assertEqual(
-                (correction / "Covers" / "shared.jpg").read_bytes(),
-                b"cover",
-            )
+            self.assertFalse((correction / "Covers").exists())
 
     def test_full_month_metadata_is_installed_without_range_splitting(self) -> None:
         from openpyxl import Workbook, load_workbook

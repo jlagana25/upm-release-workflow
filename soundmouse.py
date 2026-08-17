@@ -1130,10 +1130,11 @@ def run_soundmouse_step(
         for child in (
             correction_root,
             correction_root / "MEDIA",
-            correction_root / "Covers",
             correction_root / "Metadata",
         ):
             child.mkdir(parents=True, exist_ok=True)
+        if cover_additions:
+            (correction_root / "Covers").mkdir(parents=True, exist_ok=True)
     logger.info(
         f"  SoundMouse refresh delta: {len(audio_additions)} audio addition(s), "
         f"{len(audio_removals)} audio removal(s), "
@@ -1190,12 +1191,14 @@ def run_soundmouse_step(
             overwrite,
             logger,
             existing_cover_roots=(),
-            only_audio_names=audio_additions
-            if correction_package and has_delta else None,
+            # An audio-only or filename correction does not need another copy
+            # of its existing album artwork. Only genuinely new cover names
+            # belong in an uploaded/delivered correction package.
+            only_audio_names=None,
             only_cover_names=cover_additions
             if correction_package and has_delta else None,
             copy_from_roots=(root / "Covers",)
-            if correction_package and has_delta else (),
+            if correction_package and has_delta and cover_additions else (),
         ):
             return False
         try:

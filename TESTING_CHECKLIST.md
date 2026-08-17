@@ -746,11 +746,11 @@ workbooks selected by the bucket.
     `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in
     `SoundMouse <ActivationRange>_Missing.csv`; a clean report is header-only.
   - After marking SoundMouse `uploaded` or `delivered`, a refresh with additions
-    creates `Missing/MEDIA`, `Missing/Covers`, and `Missing/Metadata`. The cover
-    folder includes every cover referenced by added rows even when that cover
-    already exists in the original delivery, and each correction workbook
-    contains only added-audio or added-cover rows while retaining the required
-    shared-string XLSX serialization.
+    creates `Missing/MEDIA` and `Missing/Metadata`; `Missing/Covers` is created
+    only when a genuinely new cover filename is introduced. Audio-only additions
+    and filename corrections must not duplicate existing album artwork. Each
+    correction workbook contains only added-audio or added-cover rows while
+    retaining the required shared-string XLSX serialization.
 - **Part naming:** Part 1 uses `06-01-26 to 06-15-26`; Part 2 uses
   `06-15-26 to 07-01-26`. The corresponding workflow-period directories remain
   inclusive (`01_to_14` and `15_to_30`).
