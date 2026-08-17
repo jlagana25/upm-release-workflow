@@ -371,6 +371,8 @@ def _build_command(request: dict[str, Any]) -> list[str]:
         command.append("--capture-steps")
     if options.get("resume"):
         command.append("--resume")
+    if options.get("restart_app"):
+        command.append("--restart-app")
     for option_name, flag in (
         ("skip_delete_records", "--skip-delete-records"),
         ("skip_import", "--skip-import"),

@@ -542,6 +542,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     `--skip-delete-records --skip-import --skip-embed` (jumps to mirror).
   - Prefer `--resume` after a failure; the checkpoint skips a phase only after
     the exact output manifest is revalidated.
+  - `--restart-app` is recovery-only for a stuck Soundminer UI. It requests a
+    graceful quit, refuses to force-kill after 30 seconds, relaunches, and must
+    be paired only with phase skips whose state was directly validated.
 - **Expected output:**
   - `12.2` database switch → `✓ verified` or `⚠ proceeding` (both OK; ⌘6 is deterministic).
   - `12.3` `✓ Records cleared`.

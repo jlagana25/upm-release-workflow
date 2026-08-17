@@ -89,6 +89,7 @@ class SoundminerAgentTests(unittest.TestCase):
             "workflow": "nbc",
             "pinned_args": ["--year", "2026", "--month", "8", "--part", "1"],
             "options": {
+                "restart_app": True,
                 "skip_delete_records": True,
                 "skip_import": True,
                 "skip_embed": True,
@@ -96,6 +97,7 @@ class SoundminerAgentTests(unittest.TestCase):
             },
         })
         for flag in (
+            "--restart-app",
             "--skip-delete-records",
             "--skip-import",
             "--skip-embed",

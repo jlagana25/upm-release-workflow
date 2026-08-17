@@ -1266,6 +1266,50 @@ def _activate_soundminer(
     _save_step_screenshot("12_2a_activated", logger)
 
 
+def _restart_soundminer(logger: logging.Logger) -> None:
+    """Gracefully restart a stuck Soundminer UI for validated recovery only."""
+    logger.warning("  Recovery: gracefully restarting Soundminer v5Pro…")
+    result = subprocess.run(
+        ["osascript", "-e", f'tell application "{SOUNDMINER_APP}" to quit'],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode:
+        raise _SoundminerError(
+            "Soundminer did not accept a graceful quit request: "
+            + result.stderr.strip()
+        )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        running = subprocess.run(
+            ["pgrep", "-x", SOUNDMINER_APP],
+            capture_output=True,
+            text=True,
+        )
+        if running.returncode != 0:
+            break
+        time.sleep(1)
+    else:
+        raise _SoundminerError(
+            "Soundminer remained running after a 30-second graceful quit; "
+            "refusing to force-kill it."
+        )
+    opened = subprocess.run(
+        ["open", "-a", SOUNDMINER_APP],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if opened.returncode:
+        raise _SoundminerError(
+            "Soundminer relaunch failed: " + opened.stderr.strip()
+        )
+    time.sleep(LAUNCH_WAIT)
+    _assert_soundminer_gui_available(logger, require_window=True)
+    logger.info("  ✓ Soundminer restarted cleanly.")
+
+
 def _switch_to_nbcuniversal(logger: logging.Logger) -> None:
     """
     Switch the active database to NBCUniversal via the ⌘5 keyboard shortcut
@@ -3040,6 +3084,14 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
                    help="Step 12: skip 12.5 — assume metadata is already embedded.")
     p.add_argument("--skip-mirror", action="store_true",
                    help="Step 12: skip 12.6 / 12.7 — stop after embed.")
+    p.add_argument(
+        "--restart-app",
+        action="store_true",
+        help=(
+            "Recovery-only: gracefully quit and relaunch Soundminer before "
+            "the selected workflow. Never force-kills the app."
+        ),
+    )
     p.add_argument("--capture-steps", action="store_true",
                    help="Save numbered step screenshots to "
                         f"{DEBUG_STEP_DIR}.")
@@ -3107,6 +3159,13 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
             return 2
         ctx.nbc_metadata_csv = metadata_override
     logger.info(f"Release context: {ctx}")
+
+    if args.restart_app:
+        try:
+            _restart_soundminer(logger)
+        except _SoundminerError as exc:
+            logger.error(f"  ✗ Soundminer recovery restart failed: {exc}")
+            return 1
 
     if args.preflight_only:
         return 0 if run_soundminer_gui_preflight(logger) else 1
