@@ -562,7 +562,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     a hard failure. A phase that shows no positive UI activity also fails
     instead of advancing on a fixed timeout. Loss of the Soundminer window or
     a locked console is detected independently of pixel activity and stops the
-    run with a targeted error.
+    run with a targeted error. A dialog/progress signal observed by the initial
+    watcher carries into the idle detector, so a short import completed inside
+    that first window is not later misreported as never having started.
   - `12.5` embed via Database menu → attended pause until embed done (`✓ Embed complete`).
   - A visible **Soundminer Log Window** during import or embed is a hard failure:
     the workflow stops, leaves the log open, and saves a diagnostic screenshot.

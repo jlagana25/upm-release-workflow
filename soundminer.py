@@ -1008,7 +1008,7 @@ def _scan_sounds_into_database(
 
     # The scan can raise the same Unmatched Fields / Dupes dialogs the import
     # path does; auto-dismiss them (best-effort).
-    _watch_and_dismiss_import_dialogs(logger)
+    scan_start_observed = _watch_and_dismiss_import_dialogs(logger)
 
     _wait_with_manual_handshake(
         phase_label  = "scan",
@@ -1017,6 +1017,7 @@ def _scan_sounds_into_database(
         unattended   = unattended,
         logger       = logger,
         on_poll      = lambda: _dismiss_import_dialogs_once(logger),
+        initial_activity = scan_start_observed,
     )
     logger.info("        ✓ Scan into database complete.")
 
@@ -1427,7 +1428,7 @@ def _import_metadata(
     # After the panels are confirmed, Soundminer raises the "Unmatched Fields"
     # and "Check for Dupes Warning" dialogs, which BLOCK the import until OK'd.
     # Auto-dismiss them (best-effort; operator handles any during the wait).
-    _watch_and_dismiss_import_dialogs(logger)
+    import_start_observed = _watch_and_dismiss_import_dialogs(logger)
 
     # Soundminer does not expose a machine-readable imported-record count.
     # Its canvas can also remain visually static while records are still being
@@ -1456,6 +1457,7 @@ def _import_metadata(
         unattended   = unattended,
         logger       = logger,
         on_poll      = _import_poll_guard,
+        initial_activity = import_start_observed,
     )
     _raise_if_soundminer_log_window(logger, phase="import")
     logger.info("        ✓ Import complete.")
@@ -2426,7 +2428,7 @@ def _dismiss_dialog_if_present(
 def _watch_and_dismiss_import_dialogs(
     logger:        logging.Logger,
     watch_seconds: float = 45.0,
-) -> None:
+) -> bool:
     """
     When "Import text into database" runs with check-duplicates enabled, and
     when the CSV has headers the DB doesn't know, Soundminer raises two
@@ -2441,6 +2443,7 @@ def _watch_and_dismiss_import_dialogs(
     """
     end = time.monotonic() + watch_seconds
     seen = 0
+    start_observed = False
     while time.monotonic() < end:
         # Use the same complete dismissal pass as the later unattended poll.
         # This includes the Accessibility-based OK click when image matching
@@ -2450,13 +2453,16 @@ def _watch_and_dismiss_import_dialogs(
         hit = _dismiss_import_dialogs_once(logger)
         if hit:
             seen += 1
+            start_observed = True
         # Once the progress bar is up, the gating dialogs are done — stop early.
         if not hit and _locate_safe(_img(OPTIONAL_DIALOG_SCREENSHOTS["importing_text"])) is not None:
             logger.info("        Import progress bar visible — dialogs cleared.")
+            start_observed = True
             break
         time.sleep(0.5 if hit else 2.0)
     if seen:
         logger.info(f"        Auto-dismissed {seen} import dialog(s).")
+    return start_observed
 
 
 def _soundminer_log_window_visible(logger: logging.Logger) -> bool:
@@ -2726,6 +2732,7 @@ def _wait_for_screen_idle(
     no_activity_fallback: int,
     logger:               logging.Logger,
     on_poll:              "Optional[Callable[[], bool]]" = None,
+    initial_activity:     bool = False,
 ) -> None:
     """
     Block until the Soundminer UI stops changing — the automated stand-in for
@@ -2760,7 +2767,10 @@ def _wait_for_screen_idle(
     start        = time.monotonic()
     last_fp      = None
     last_change  = start
-    saw_activity = False
+    # The import/scan dialog watcher runs before this generic idle loop.
+    # Preserve its positive start signal so a short operation that finishes
+    # inside that watcher is not later misclassified as "never started."
+    saw_activity = initial_activity
     next_log     = start + PROGRESS_DOT_INTERVAL
     next_gui_guard = start
 
@@ -2865,6 +2875,7 @@ def _wait_with_manual_handshake(
     unattended:   bool,
     logger:       logging.Logger,
     on_poll:      "Optional[Callable[[], bool]]" = None,
+    initial_activity: bool = False,
 ) -> None:
     """
     Block for a phase whose completion we can't poll (scan, import, embed).
@@ -2895,6 +2906,7 @@ def _wait_with_manual_handshake(
             no_activity_fallback = soft_minutes * 60,
             logger               = logger,
             on_poll              = on_poll,
+            initial_activity     = initial_activity,
         )
         return
     else:
