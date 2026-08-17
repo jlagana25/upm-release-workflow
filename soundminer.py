@@ -609,7 +609,7 @@ def run_soundminer_gui_preflight(logger: logging.Logger) -> bool:
         return False
     try:
         import pyautogui
-        _activate_soundminer(logger)
+        _activate_soundminer(logger, clear_stale_dialogs=False)
         screenshot = pyautogui.screenshot().convert("L")
         extrema = screenshot.getextrema()
         if not extrema or extrema[1] - extrema[0] < 10:
@@ -1211,12 +1211,18 @@ def run_soundminer_sourceaudio_workflow(
 # 12.2 — Activate Soundminer + switch to NBCUniversal database
 # ---------------------------------------------------------------------------
 
-def _activate_soundminer(logger: logging.Logger) -> None:
+def _activate_soundminer(
+    logger: logging.Logger,
+    *,
+    clear_stale_dialogs: bool = True,
+) -> None:
     """
     Bring Soundminer v5Pro to the foreground; launch it if necessary.
 
-    A pair of Escapes after activation dismisses any stuck modal left over
-    from a previous aborted run (same defensive pattern UniSync uses).
+    A pair of Escapes after activation normally dismisses any stuck modal left
+    over from a previous aborted run (same defensive pattern UniSync uses).
+    Read-only diagnostics pass ``clear_stale_dialogs=False`` so inspection can
+    never cancel or dismiss the very state it is trying to capture.
     """
     import pyautogui
 
@@ -1237,11 +1243,12 @@ def _activate_soundminer(logger: logging.Logger) -> None:
     else:
         time.sleep(1.5)
 
-    # Clear any stuck dialogs from a previous abort
-    pyautogui.press("escape")
-    time.sleep(0.3)
-    pyautogui.press("escape")
-    time.sleep(0.3)
+    if clear_stale_dialogs:
+        # Clear any stuck dialogs from a previous abort.
+        pyautogui.press("escape")
+        time.sleep(0.3)
+        pyautogui.press("escape")
+        time.sleep(0.3)
 
     logger.debug(f"  {SOUNDMINER_APP} is active.")
     _assert_soundminer_gui_available(logger, require_window=True)
