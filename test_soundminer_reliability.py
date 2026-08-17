@@ -203,6 +203,35 @@ class SoundminerReliabilityTests(unittest.TestCase):
             soundminer._confirm_mirror_destination_panel(self.logger)
         self.assertEqual(clicks, [])
 
+    def test_complete_nested_nbc_mirror_is_normalized_and_quarantined(self):
+        destination = self.root / "Music" / "WAV"
+        correct = destination / "MEDIA" / "Label" / "Album"
+        correct.mkdir(parents=True)
+        (correct / "ABC_01_First.wav").touch()
+        audio_source = Path(
+            "/Volumes/Pegasus/_Specials/UPM/Release/2-STAGING/"
+            "SME WAV 48K NBC/MEDIA"
+        )
+        nested = destination.joinpath(*audio_source.parts[3:])
+        nested_album = nested / "Label" / "Album"
+        nested_album.mkdir(parents=True)
+        (nested_album / "ABC_01_First.wav").touch()
+        (nested_album / "ABC_02_Second.wav").touch()
+
+        changed = soundminer._normalize_nbc_nested_mirror(
+            destination,
+            audio_source,
+            {"abc_01_first", "abc_02_second"},
+            self.logger,
+        )
+
+        self.assertTrue(changed)
+        self.assertTrue((correct / "ABC_02_Second.wav").is_file())
+        self.assertFalse((destination / "_Specials").exists())
+        quarantines = list(destination.parent.glob("_mirror_quarantine_*"))
+        self.assertEqual(len(quarantines), 1)
+        self.assertTrue(any(quarantines[0].rglob("ABC_01_First.wav")))
+
 
 if __name__ == "__main__":
     unittest.main()

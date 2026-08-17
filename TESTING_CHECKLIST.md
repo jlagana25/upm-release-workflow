@@ -582,6 +582,11 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     let the exact output manifest—not another blind Open click—prove success.
   - `12.7` polling shows the `.wav` count climbing, then compares the exact
     expected/actual filename manifests. Equal counts with different files fail.
+    Soundminer 5 may expand `Mirror Source Folder Structure` from the Pegasus
+    volume root. Normalization is allowed only after that nested tree itself
+    exactly matches all expected filenames: missing files move into the
+    established `WAV/MEDIA/...` tree and the duplicate wrapper is retained in
+    a sibling `_mirror_quarantine_*` folder for recovery/audit.
 - **Inspect:**
   - `find "{nbc}/Music/WAV" -name "*.wav" | wc -l` — expected record count (e.g. 2148).
   - Step screenshots in `…/Scripts/Python/UPM Release WorkFlow Automation/_logs/soundminer_debug_steps/`.

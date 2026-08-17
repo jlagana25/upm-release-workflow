@@ -426,6 +426,81 @@ def _scan_destination(
     return manifest, sorted(wrong)
 
 
+def _normalize_nbc_nested_mirror(
+    mirror_dest: Path,
+    audio_source: Path,
+    expected: set[str],
+    logger: logging.Logger,
+) -> bool:
+    """Normalize Soundminer 5's volume-relative NBC mirror tree.
+
+    HDF1 can preserve the source path from the mounted volume root, producing
+    ``WAV/_Specials/.../SME WAV 48K NBC/MEDIA/...`` instead of the established
+    ``WAV/MEDIA/...`` layout. Normalize only after the nested tree itself is a
+    complete, duplicate-free match for the expected filename manifest. Missing
+    files move into MEDIA; the duplicate wrapper remains recoverable in a
+    sibling quarantine.
+    """
+    parts = audio_source.resolve().parts
+    if len(parts) < 5 or parts[1] != "Volumes":
+        return False
+    nested_relative = Path(*parts[3:])
+    nested_media = mirror_dest / nested_relative
+    nested_top = mirror_dest / nested_relative.parts[0]
+    if not nested_media.is_dir() or nested_media == mirror_dest / "MEDIA":
+        return False
+
+    nested_counter, wrong = _scan_destination(nested_media, ("wav",))
+    nested_ids = set(nested_counter)
+    duplicates = [name for name, count in nested_counter.items() if count > 1]
+    if nested_ids != expected or duplicates or wrong:
+        logger.warning(
+            "    Nested NBC mirror is not yet safe to normalize: "
+            f"{len(expected - nested_ids)} missing, "
+            f"{len(nested_ids - expected)} unexpected, "
+            f"{len(duplicates)} duplicate, {len(wrong)} wrong-format."
+        )
+        return False
+
+    correct_media = mirror_dest / "MEDIA"
+    present, present_wrong = _scan_destination(correct_media, ("wav",))
+    if present_wrong:
+        return False
+    present_ids = set(present)
+    moved = 0
+    for source_file in sorted(nested_media.rglob("*")):
+        if not source_file.is_file() or source_file.suffix.lower() != ".wav":
+            continue
+        identity = _normalise_audio_identity(source_file.name)
+        if identity in present_ids:
+            continue
+        relative = source_file.relative_to(nested_media)
+        target = correct_media / relative
+        if target.exists():
+            raise _SoundminerError(
+                "NBC nested-mirror normalization found an occupied target "
+                f"with a different audio identity: {target}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source_file.replace(target)
+        present_ids.add(identity)
+        moved += 1
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    quarantine = mirror_dest.parent / f"_mirror_quarantine_{stamp}"
+    suffix = 1
+    while quarantine.exists():
+        quarantine = mirror_dest.parent / f"_mirror_quarantine_{stamp}_{suffix}"
+        suffix += 1
+    quarantine.mkdir(parents=True)
+    nested_top.replace(quarantine / nested_top.name)
+    logger.warning(
+        f"    Normalized Soundminer's volume-relative NBC tree: moved {moved} "
+        f"missing file(s) into MEDIA; retained duplicate wrapper at {quarantine}."
+    )
+    return True
+
+
 def _validate_destination_manifest(
     destination: Path,
     expected: set[str],
@@ -817,6 +892,7 @@ def run_soundminer_nbc_workflow(
             expected_count=expected_wav_count,
             expected_manifest=expected_manifest,
             manifest_label="NBC mirror",
+            normalize_nbc_source=audio_source,
         )
         _mark_checkpoint(ctx, "nbc", "mirror", files=expected_wav_count)
 
@@ -2074,6 +2150,7 @@ def _wait_for_mirror_complete(
     expected_count: Optional[int] = None,
     expected_manifest: Optional[set[str]] = None,
     manifest_label: str = "Soundminer mirror",
+    normalize_nbc_source: Optional[Path] = None,
 ) -> None:
     """
     Poll ``mirror_dest`` for new output files until the count stabilises
@@ -2157,6 +2234,19 @@ def _wait_for_mirror_complete(
 
         # Stability window: count stopped changing — mirror is done.
         if first_seen_at is not None and (now - last_change) >= MIRROR_STABILITY_WINDOW:
+            if (
+                normalize_nbc_source is not None
+                and expected_manifest is not None
+                and expected_count is not None
+                and last_count != expected_count
+            ):
+                if _normalize_nbc_nested_mirror(
+                    mirror_dest,
+                    normalize_nbc_source,
+                    expected_manifest,
+                    logger,
+                ):
+                    last_count = _count_extensions(exts)
             if expected_count is not None and last_count != expected_count:
                 raise _SoundminerError(
                     f"Mirror stopped at {last_count} output file(s), but the "
