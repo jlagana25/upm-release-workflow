@@ -9,11 +9,36 @@ from pathlib import Path
 from unittest.mock import patch
 
 from config import DOMO_CARDS, ReleaseContext
-from domo_exports import CARD_CONFIGS, verify_exports_exist
+from domo_exports import CARD_CONFIGS, _xlsx_to_csv, verify_exports_exist
 from final_metadata_verification import _build_checks
 
 
 class DomoDeliveryMetadataTests(unittest.TestCase):
+    def test_nbc_export_drops_domo_grand_total_footer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            import pandas as pd
+
+            root = Path(tmp)
+            source = root / "nbc.xlsx"
+            output = root / "nbc.csv"
+            pd.DataFrame(
+                [
+                    {"Filename": "track_1.wav", "TrackTitle": "One"},
+                    {"Filename": "GRAND TOTAL", "TrackTitle": ""},
+                ]
+            ).to_excel(source, index=False)
+
+            _xlsx_to_csv(
+                source,
+                output,
+                logging.getLogger("test-domo-exports"),
+                drop_summary_rows=True,
+            )
+
+            exported = pd.read_csv(output, dtype=str).fillna("")
+            self.assertEqual(exported["Filename"].tolist(), ["track_1.wav"])
+            self.assertFalse(source.exists())
+
     def test_sourceaudio_cards_target_delivery_metadata_folders(self) -> None:
         ctx = ReleaseContext(2026, 8, 1)
         cards = {card["key"]: card for card in CARD_CONFIGS}

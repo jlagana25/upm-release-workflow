@@ -399,6 +399,18 @@ class ReleaseContext:
         # May 2026
         self.month_display = f"{self.month_name} {self.year_str}"
 
+        # The July 2026 full-month content was the one-time transition delivery
+        # marketed to clients as August 2026 Part 1.  Keep the internal release
+        # ID/date range tied to July, but make every partner path and metadata
+        # filename use the already-established client label.  Centralising the
+        # exception here prevents individual steps from drifting back to a
+        # newly-created "July 2026 Full Release" tree.
+        transition_client_folder = (
+            "August 2026 Part 1"
+            if self.release_id == "UPM-2026-07-FULL"
+            else None
+        )
+
         # May 2026 Part 1, May 2026 Part 2, or May 2026 Full.
         if self.is_date_range:
             assert range_start is not None and range_end is not None
@@ -417,6 +429,8 @@ class ReleaseContext:
                     f"{range_start.strftime('%B')} {range_start.day} {range_start.year}\u2013"
                     f"{range_end.strftime('%B')} {range_end.day} {range_end.year}"
                 )
+        elif transition_client_folder:
+            self.month_display_folder = transition_client_folder
         else:
             self.month_display_folder = (
                 f"{self.month_name} {self.year_str} Full"
@@ -430,7 +444,9 @@ class ReleaseContext:
             f"{self.month_display_folder} Releases"
             if self.is_date_range
             else (
-                f"{self.month_display_folder} Release"
+                self.month_display_folder
+                if transition_client_folder
+                else f"{self.month_display_folder} Release"
                 if self.is_full_month
                 else self.month_display_folder
             )
@@ -441,7 +457,9 @@ class ReleaseContext:
             self.month_display_folder
             if self.is_date_range
             else (
-                f"{self.month_name} {self.year_str} (Full)"
+                "August 2026 (Part 1)"
+                if transition_client_folder
+                else f"{self.month_name} {self.year_str} (Full)"
                 if self.is_full_month
                 else f"{self.month_name} {self.year_str} (Part {self.part})"
             )

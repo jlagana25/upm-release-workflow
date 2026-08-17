@@ -109,6 +109,11 @@ example `Universal Production Music September 1–14 2026 Releases - NBC` and
 `Universal Production Music September 29–October 12 2026 Releases - NBC`.
 Cross-month ranges are supported. `--full-month-content` lets the transition
 Part 2 include all August releases without changing its Part 2 client label.
+The internal `UPM-2026-07-FULL` release is permanently mapped to the Part 1
+client label, so re-running `--previous-month` during August continues to update
+the existing August Part 1 partner folders instead of creating July Full paths.
+NBC Domo exports also discard Domo's `GRAND TOTAL` summary footer before the
+CSV is installed, preventing Soundminer from treating it as a missing filename.
 
 MTV-Viacom is retired from the workflow. Folder setup filters any matching
 legacy folder out of the shared Specials baseline, so fresh and additively

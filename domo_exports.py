@@ -262,6 +262,10 @@ CARD_CONFIGS: list[dict] = [
         "card_id":     DOMO_CARDS["nbc_metadata"],
         "description": "NBC Metadata",
         "output_fn":   lambda ctx: ctx.nbc_metadata_csv,
+        # This card can append a Domo summary row whose Filename is
+        # "GRAND TOTAL".  Soundminer treats that value as an audio filename
+        # and reports a scan failure, so strip summary rows during conversion.
+        "drop_summary_rows": True,
     },
     {
         # Step 13 (non-maintrack cleanup) compares the MP3 files in the
@@ -667,7 +671,12 @@ def _export_card(
         install_temp.replace(output_path)
         logger.info(f"     Saved XLSX → {output_path.name}")
     else:
-        _xlsx_to_csv(downloaded, output_path, logger)
+        _xlsx_to_csv(
+            downloaded,
+            output_path,
+            logger,
+            drop_summary_rows=card.get("drop_summary_rows", False),
+        )
 
 
 def _navigate_to_card(
@@ -1004,7 +1013,13 @@ def _trigger_excel_download(
 # Excel → CSV
 # ---------------------------------------------------------------------------
 
-def _xlsx_to_csv(xlsx_path: Path, csv_path: Path, logger: logging.Logger) -> None:
+def _xlsx_to_csv(
+    xlsx_path: Path,
+    csv_path: Path,
+    logger: logging.Logger,
+    *,
+    drop_summary_rows: bool = False,
+) -> None:
     try:
         import pandas as pd
     except ImportError:
@@ -1017,6 +1032,22 @@ def _xlsx_to_csv(xlsx_path: Path, csv_path: Path, logger: logging.Logger) -> Non
             "    pip install openpyxl"
         )
     df = pd.read_excel(xlsx_path, dtype=str).fillna("")
+    if drop_summary_rows and not df.empty:
+        first_column = df.columns[0]
+        normalized = (
+            df[first_column]
+            .astype(str)
+            .str.upper()
+            .str.replace(r"[\s_]+", "", regex=True)
+        )
+        summary_mask = normalized.isin({"GRANDTOTAL", "TOTAL"})
+        removed = int(summary_mask.sum())
+        if removed:
+            df = df.loc[~summary_mask].copy()
+            logger.warning(
+                f"     Removed {removed} Domo summary footer row(s) "
+                f"from {first_column!r}."
+            )
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     install_temp = csv_path.with_name(f".{csv_path.name}.domo-export.tmp")
     try:

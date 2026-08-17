@@ -54,9 +54,13 @@ setting up a new machine, work through Part 2 top to bottom.
 | Run a normal release, Part 1 | `python3 upm_release_workflow.py --year 2026 --month 5 --part 1` |
 | Run a normal release, Part 2 | `python3 upm_release_workflow.py --year 2026 --month 5 --part 2` |
 | August transition Part 2 (all August content) | `python3 upm_release_workflow.py --year 2026 --month 8 --part 2 --full-month-content` |
+| August transition Part 1 refresh (July full-month content) | `python3 upm_release_workflow.py --previous-month` (while run date is August 2026; targets the existing August 2026 Part 1 client folders) |
 | Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-14` |
 | Previous month (full month), auto from today | `python3 upm_release_workflow.py --previous-month` |
 | Previous month relative to a given month | `python3 upm_release_workflow.py --previous-month --year 2026 --month 6` |
+
+For the NBC metadata export, confirm the saved CSV contains only real audio
+filenames; a Domo `GRAND TOTAL` footer must be removed automatically.
 | Preview the whole run incl. non-maintrack deletions | add `--dry-run` |
 | Re-do a step that already produced output | add `--overwrite` |
 | Resume after a failure, skipping finished steps | add the matching `--skip-*` flags |
