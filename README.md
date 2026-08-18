@@ -95,6 +95,14 @@ python3 upm_release_workflow.py --previous-month --only 16           # SoundMous
 python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --start-at 12.7
 ```
 
+For an authentic SourceAudio screen-recording demo, `ai_team_demo.py` runs one
+isolated 20-track US path: Domo SourceAudio metadata, WorkAudioId-based UniSync
+WAV retrieval, WAV w COVERS preparation, the normal HDF1 Soundminer agent's AIFF
+mirror, manifest verification, and a Finder reveal of the final SourceAudio
+partner package. Codex can remain visible beside the active app to show written
+step explanations. See **Authentic SourceAudio AI-team demo** in
+`TESTING_CHECKLIST.md`.
+
 Every run writes a structured JSON report under
 `~/Documents/Scripts/Python/_Logs/UPM Release Workflow/reports/<release-id>/`
 with step results, timing, diagnostics, artifact paths, and key output counts.

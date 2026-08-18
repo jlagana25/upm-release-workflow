@@ -220,6 +220,8 @@ def _accept_request(
             if (
                 existing.get("release_id") == request.get("release_id")
                 and existing.get("workflow") == workflow
+                and existing.get("options", {}).get("specials_dir_override")
+                == request.get("options", {}).get("specials_dir_override")
             ):
                 existing_id = str(existing.get("request_id", existing_path.stem))
                 logger.warning(
@@ -390,6 +392,8 @@ def _build_command(request: dict[str, Any]) -> list[str]:
             command.extend([flag, str(options[option_name])])
     if workflow == "sourceaudio" and options.get("db_shortcut"):
         command.extend(["--sourceaudio-db-shortcut", str(options["db_shortcut"])])
+    if workflow == "sourceaudio" and options.get("sourceaudio_us_only"):
+        command.append("--sourceaudio-us-only")
     return command
 
 

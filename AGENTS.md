@@ -355,6 +355,11 @@ inline or are submitted to HDF1's login-session agent.
   (`skip_delete_records`, `skip_import`, `skip_embed`, `skip_mirror`) only after
   the corresponding state has been directly validated; do not use them to
   bypass a failed or unknown phase.
+  The `sourceaudio_us_only` option is reserved for an isolated demo/recovery
+  request that also pins a separate `specials_dir_override`; normal Step 11
+  must continue to process both US and Ex-US pairs. Override requests use the
+  override folder name for checkpoints and request de-duplication so they can
+  never attach to or reset the canonical release's SourceAudio job.
 - **Authentication is per macOS user and never repository data.** Domo cookies
   live only in the user's private Playwright profile; UniSync owns its own
   login/Keychain and local XML. Code may change only UniSync territory/cache/

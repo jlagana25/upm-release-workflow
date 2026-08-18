@@ -390,6 +390,46 @@ Validates Step 5 (UniSync UI automation) for **one** job before running all. Uni
   - Remove downloaded files for the test territory if they shouldn't persist (delete the territory subfolder under the client path).
   - UniSync is "download missing" by nature, so re-running fills gaps rather than duplicating — generally no cleanup needed.
 
+### Authentic SourceAudio AI-team demo
+
+This command demonstrates the real US SourceAudio path in five written steps:
+Domo's SourceAudio metadata card, a varied 20-row External Id selection,
+WorkAudioId-based US WAV retrieval through normal XML-configured UniSync,
+preparation of the `WAV w COVERS/MEDIA` Soundminer source, HDF1's normal
+login-session agent running the SourceAudio scan and AIFF mirror, and Finder
+inspection of the final partner package. It does not run Ex-US or unrelated
+partners.
+
+The demo uses a separate UPM release root named
+`<release-id>-AI-SOURCEAUDIO-DEMO`, directly under the normal Specials base.
+Soundminer therefore sees the same path layout as production without touching
+the canonical release. A rerun archives the previous demo root under
+`_AI Team Demo Archive`. The final deliverable contains the selected SourceAudio
+metadata, Soundminer-produced AIFF media, and a WorkAudioId manifest under:
+
+`3-FINAL PACKAGING/Universal Production Music <release label> AI Demo - SourceAudio`
+
+During a Codex-assisted recording, explanations are posted in the task so Codex
+can remain visible on the left. Show Domo and UniSync on the right for the first
+phases, then show an authenticated HDF1 Screen Sharing window on the right for
+the real Soundminer phase. No spoken narration or notification popups are used.
+Soundminer retains its correctness gates and settling windows, so this authentic
+demo is not forcibly terminated at five minutes and may take longer.
+
+Do not run the real command until screen recording is active. Make sure both
+Pegasus volumes are mounted, place Codex on the left and the active workflow app
+on the right, and do not use the mouse or keyboard once GUI automation begins.
+
+```bash
+cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
+python3 ai_team_demo.py --previous-month --year 2026 --month 8
+```
+
+The `--previous-month --year 2026 --month 8` pair deliberately resolves to the
+July 2026 full-month date range; it does not depend on the current date. To
+rehearse only the printed plan without opening either application, add
+`--dry-run`.
+
 ---
 
 ## 7. Covers test

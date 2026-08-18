@@ -51,8 +51,19 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from config import ReleaseContext, UNISYNC_XML_PATH as CONFIG_UNISYNC_XML_PATH, current_hostname
+from config import (
+    ReleaseContext,
+    UNISYNC_XML_PATH as CONFIG_UNISYNC_XML_PATH,
+    context_from_cli_args,
+    current_hostname,
+)
 from auth_manager import secure_private_file, unisync_auth_configured
+from tracklist_columns import (
+    POSSIBLE_ALBUMNO_COLS,
+    POSSIBLE_ALBUMTITLE_COLS,
+    POSSIBLE_LABEL_COLS,
+    _find_column,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1978,7 +1989,11 @@ def _run_test(args) -> None:
     )
     logger = logging.getLogger("unisync_test")
 
-    ctx = ReleaseContext(year=args.year, month=args.month, part=args.part)
+    try:
+        ctx = context_from_cli_args(args)
+    except ValueError as exc:
+        logger.error(f"Invalid release arguments: {exc}")
+        sys.exit(1)
     logger.info(f"Release context: {ctx}")
     logger.info(f"  dry_run: {args.dry_run}")
 
@@ -1995,7 +2010,11 @@ def _run_test(args) -> None:
                 f"  Available: {[j['name'] for j in ctx.unisync_jobs]}"
             )
             sys.exit(1)
-        jobs_to_run = matches
+        jobs_to_run = [dict(matches[0])]
+        if args.csv_path:
+            jobs_to_run[0]["csv"] = str(Path(args.csv_path).expanduser())
+        if args.client_path:
+            jobs_to_run[0]["client_path"] = str(Path(args.client_path).expanduser())
         logger.info(f"Running single job: {matches[0]['name']}")
     elif args.start_from:
         names_lower = [j["name"].lower() for j in ctx.unisync_jobs]
@@ -2018,40 +2037,56 @@ def _run_test(args) -> None:
         jobs_to_run = ctx.unisync_jobs
         logger.info(f"Running all {len(jobs_to_run)} jobs sequentially.")
 
+    limited_csv: Path | None = None
+    if args.max_tracks:
+        limited_csv = _write_limited_test_csv(
+            jobs_to_run[0]["csv"], args.max_tracks, logger
+        )
+        if limited_csv is None:
+            sys.exit(1)
+        jobs_to_run[0]["csv"] = str(limited_csv)
+
     # Run
     results: dict[str, str] = {}
-    if args.dry_run:
-        for job in jobs_to_run:
-            logger.info(
-                f"\n[DRY RUN] {job['name']}\n"
-                f"  Cache:  {job['cache_path']}\n"
-                f"  Client: {job['client_path']}\n"
-                f"  CSV:    {job['csv']}"
-            )
-            results[job["name"]] = STATUS_SKIPPED
-    else:
-        try:
-            import pyautogui  # noqa: F401
-        except ImportError:
-            logger.error("pyautogui not installed.  Run: pip install pyautogui Pillow")
-            sys.exit(1)
+    try:
+        if args.dry_run:
+            for job in jobs_to_run:
+                logger.info(
+                    f"\n[DRY RUN] {job['name']}\n"
+                    f"  Cache:  {job['cache_path']}\n"
+                    f"  Client: {job['client_path']}\n"
+                    f"  CSV:    {job['csv']}"
+                )
+                results[job["name"]] = STATUS_SKIPPED
+        else:
+            try:
+                import pyautogui  # noqa: F401
+            except ImportError:
+                logger.error("pyautogui not installed.  Run: pip install pyautogui Pillow")
+                sys.exit(1)
 
-        for i, job in enumerate(jobs_to_run):
-            logger.info(f"\n{'─' * 52}")
-            logger.info(f"Job {i + 1}/{len(jobs_to_run)}: {job['name']}")
-            logger.info(f"  Cache:  {job['cache_path']}")
-            logger.info(f"  Client: {job['client_path']}")
-            logger.info(f"  CSV:    {job['csv']}")
-            status = _run_single_job(
-                job, dry_run=False, logger=logger, overwrite=args.overwrite
-            )
-            results[job["name"]] = status
+            for i, job in enumerate(jobs_to_run):
+                logger.info(f"\n{'─' * 52}")
+                logger.info(f"Job {i + 1}/{len(jobs_to_run)}: {job['name']}")
+                logger.info(f"  Cache:  {job['cache_path']}")
+                logger.info(f"  Client: {job['client_path']}")
+                logger.info(f"  CSV:    {job['csv']}")
+                status = _run_single_job(
+                    job, dry_run=False, logger=logger, overwrite=args.overwrite
+                )
+                results[job["name"]] = status
 
-            if status == STATUS_FAILED:
-                logger.error(f"Stopping — '{job['name']}' failed.")
-                for remaining in jobs_to_run[i + 1:]:
-                    results[remaining["name"]] = STATUS_FAILED
-                break
+                if status == STATUS_FAILED:
+                    logger.error(f"Stopping — '{job['name']}' failed.")
+                    for remaining in jobs_to_run[i + 1:]:
+                        results[remaining["name"]] = STATUS_FAILED
+                    break
+    finally:
+        if limited_csv is not None:
+            try:
+                limited_csv.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(f"Could not remove temporary demo CSV: {exc}")
 
     logger.info("\n" + "─" * 52)
     logger.info("Summary:")
@@ -2062,14 +2097,133 @@ def _run_test(args) -> None:
     sys.exit(0 if all(s in ("ok", "skipped") for s in results.values()) else 1)
 
 
+def _write_limited_test_csv(
+    source_csv: str, max_tracks: int, logger: logging.Logger
+) -> Path | None:
+    """Create a varied temporary N-row CSV for a short GUI test run.
+
+    Selection favors one track from each distinct label/album pair, then fills
+    from still-unseen albums, then from the remaining rows. This keeps a small
+    screen-recording batch representative without changing the source export.
+    """
+    import csv
+    import tempfile
+
+    source = Path(source_csv)
+    if not source.is_file():
+        logger.error(f"Test tracklist not found: {source}")
+        return None
+
+    try:
+        with source.open(encoding="utf-8-sig", newline="") as src:
+            reader = csv.DictReader(src)
+            header = reader.fieldnames
+            if not header:
+                logger.error(f"Test tracklist is empty: {source}")
+                return None
+            all_rows = [
+                row for row in reader
+                if any((cell or "").strip() for cell in row.values())
+            ]
+    except (OSError, csv.Error) as exc:
+        logger.error(f"Could not read test tracklist {source}: {exc}")
+        return None
+
+    if not all_rows:
+        logger.error(f"Test tracklist has no data rows: {source}")
+        return None
+
+    label_col = _find_column(header, POSSIBLE_LABEL_COLS)
+    album_col = (
+        _find_column(header, POSSIBLE_ALBUMNO_COLS)
+        or _find_column(header, POSSIBLE_ALBUMTITLE_COLS)
+    )
+
+    selected: list[dict[str, str]] = []
+    selected_ids: set[int] = set()
+    seen_labels: set[str] = set()
+    seen_albums: set[str] = set()
+
+    def _value(row: dict[str, str], column: str | None) -> str:
+        return ((row.get(column) if column else "") or "").strip().casefold()
+
+    def _take(index: int, row: dict[str, str]) -> None:
+        selected.append(row)
+        selected_ids.add(index)
+        label = _value(row, label_col)
+        album = _value(row, album_col)
+        if label:
+            seen_labels.add(label)
+        if album:
+            seen_albums.add(album)
+
+    # First pass: maximize both label and album variety.
+    for index, row in enumerate(all_rows):
+        label = _value(row, label_col)
+        album = _value(row, album_col)
+        label_is_new = not label or label not in seen_labels
+        album_is_new = not album or album not in seen_albums
+        if label_is_new and album_is_new:
+            _take(index, row)
+        if len(selected) == max_tracks:
+            break
+
+    # Second pass: keep adding new albums even when labels repeat.
+    if len(selected) < max_tracks:
+        for index, row in enumerate(all_rows):
+            if index in selected_ids:
+                continue
+            album = _value(row, album_col)
+            if album and album not in seen_albums:
+                _take(index, row)
+            if len(selected) == max_tracks:
+                break
+
+    # Final fallback for sparse exports with fewer distinct albums.
+    if len(selected) < max_tracks:
+        for index, row in enumerate(all_rows):
+            if index not in selected_ids:
+                _take(index, row)
+            if len(selected) == max_tracks:
+                break
+
+    try:
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8-sig",
+            newline="",
+            prefix="upm_ai_demo_",
+            suffix=".csv",
+            delete=False,
+        )
+        with handle:
+            writer = csv.DictWriter(handle, fieldnames=header)
+            writer.writeheader()
+            writer.writerows(selected)
+    except OSError as exc:
+        logger.error(f"Could not create temporary demo CSV: {exc}")
+        return None
+
+    path = Path(handle.name)
+    logger.info(
+        f"Prepared temporary demo tracklist with {len(selected)} track(s), "
+        f"{len(seen_labels)} label(s), and {len(seen_albums)} album(s): {path}"
+    )
+    return path
+
+
 if __name__ == "__main__":
     import argparse
 
     p = argparse.ArgumentParser(description="Run UniSync export jobs.")
     p.add_argument("--test",    action="store_true", required=True)
-    p.add_argument("--year",    type=int, required=True)
-    p.add_argument("--month",   type=int, required=True)
-    p.add_argument("--part",    type=int, choices=[1, 2], required=True)
+    p.add_argument("--year",    type=int)
+    p.add_argument("--month",   type=int)
+    p.add_argument("--part",    type=int, choices=[1, 2])
+    p.add_argument("--previous-month", action="store_true",
+                   help="Use a resolved full-month release context.")
+    p.add_argument("--start-date", help="Exact 14-day range start (YYYY-MM-DD)")
+    p.add_argument("--end-date", help="Exact 14-day range end (YYYY-MM-DD)")
     p.add_argument("--job",     default=None,
                    help="Run a single job by name (e.g. 'US MP3').  "
                         "Omit to run all six.")
@@ -2077,6 +2231,15 @@ if __name__ == "__main__":
                    help="Resume from a specific job by name, skipping all "
                         "earlier jobs.  Useful for re-running after a "
                         "partial failure.  Mutually exclusive with --job.")
+    p.add_argument("--max-tracks", type=int, default=None, metavar="N",
+                   help="TEST ONLY: copy the first N nonblank CSV rows to a "
+                        "temporary request file. Requires --job.")
+    p.add_argument("--client-path", default=None, metavar="PATH",
+                   help="TEST ONLY: override the selected job's output folder. "
+                        "Requires --job; useful for an isolated demo.")
+    p.add_argument("--csv-path", default=None, metavar="PATH",
+                   help="TEST ONLY: use an isolated CSV for the selected job. "
+                        "Requires --job.")
     p.add_argument("--dry-run", action="store_true",
                    help="Log paths without driving the UI.")
     p.add_argument("--overwrite", action="store_true",
@@ -2107,6 +2270,10 @@ if __name__ == "__main__":
 
     if args.job and args.start_from:
         p.error("--job and --start-from are mutually exclusive.")
+    if (args.max_tracks or args.client_path or args.csv_path) and not args.job:
+        p.error("--max-tracks, --client-path, and --csv-path require --job.")
+    if args.max_tracks is not None and args.max_tracks <= 0:
+        p.error("--max-tracks must be positive.")
 
     if args.timeout is not None:
         if args.timeout <= 0:

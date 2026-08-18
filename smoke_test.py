@@ -32,7 +32,7 @@ MODULES = [
     "make_soundminer_crops", "prune", "unisync_automation", "unisync_prefs",
     "remote_runner", "soundminer_agent", "workflow_report", "auth_manager",
     "security_scan", "soundmouse", "sourceaudio_delta", "delivery_state",
-    "upm_release_workflow",
+    "upm_release_workflow", "ai_team_demo",
 ]
 
 failures: list[str] = []

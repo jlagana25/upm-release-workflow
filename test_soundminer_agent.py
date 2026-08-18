@@ -105,6 +105,22 @@ class SoundminerAgentTests(unittest.TestCase):
         ):
             self.assertIn(flag, command)
 
+    def test_agent_forwards_sourceaudio_demo_scope(self):
+        command = soundminer_agent._build_command({
+            "workflow": "sourceaudio",
+            "pinned_args": ["--year", "2026", "--month", "7", "--part", "1"],
+            "options": {
+                "sourceaudio_us_only": True,
+                "specials_dir_override": "/Volumes/Pegasus/demo",
+                "client_label_override": "July 2026 AI Demo",
+                "db_shortcut": "8",
+            },
+        })
+        self.assertIn("--sourceaudio-us-only", command)
+        self.assertIn("--specials-dir-override", command)
+        self.assertIn("--client-label-override", command)
+        self.assertIn("--sourceaudio-db-shortcut", command)
+
     def test_terminal_wrapper_runs_job_under_caffeinate(self):
         request = {"request_id": "awake-job"}
         log_path = self.root / "job.log"

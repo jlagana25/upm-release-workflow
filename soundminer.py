@@ -217,7 +217,8 @@ class _SoundminerError(RuntimeError):
 
 
 def _checkpoint_path(ctx: ReleaseContext, workflow: str) -> Path:
-    return RUNTIME_DIR / f"{ctx.release_id}-{workflow}-checkpoint.json"
+    checkpoint_id = getattr(ctx, "soundminer_checkpoint_id", ctx.release_id)
+    return RUNTIME_DIR / f"{checkpoint_id}-{workflow}-checkpoint.json"
 
 
 def _load_checkpoint(ctx: ReleaseContext, workflow: str) -> dict:
@@ -1211,6 +1212,7 @@ def run_soundminer_sourceaudio_workflow(
     manual_verify_mirror_settings:  Optional[bool] = None,
     db_shortcut:                    Optional[str]  = None,
     resume:                         bool           = False,
+    us_only:                        bool           = False,
 ) -> bool:
     """
     SourceAudio delivery (Step 11 — runs right before the NBC Soundminer step).
@@ -1241,6 +1243,9 @@ def run_soundminer_sourceaudio_workflow(
          ctx.specials_dir / "2-STAGING" / "SME WAV ExUS" / "MEDIA",
          ctx.partner_dirs["sourceaudio_exus_music"]),
     ]
+    if us_only:
+        pairs = pairs[:1]
+        logger.info("  Demo/recovery scope: SourceAudio US pair only.")
 
     for tag, src, dest in pairs:
         logger.info(f"  SourceAudio {tag}: {src}")
@@ -1280,7 +1285,9 @@ def run_soundminer_sourceaudio_workflow(
         _activate_soundminer(logger)
 
         for idx, (tag, src, dest) in enumerate(pairs):
-            logger.info(f"\n  ── SourceAudio pair {idx + 1}/2: {tag} ──")
+            logger.info(
+                f"\n  ── SourceAudio pair {idx + 1}/{len(pairs)}: {tag} ──"
+            )
             if not src.exists():
                 logger.error(
                     f"  ✗  Source folder not found: {src}\n"
@@ -3313,6 +3320,11 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--sourceaudio-db-shortcut", default="8", metavar="KEY",
                    help="Database shortcut digit for the SourceAudio DB "
                         "(default '8' = ⌘8). Only used for Step 11.")
+    p.add_argument(
+        "--sourceaudio-us-only",
+        action="store_true",
+        help="Demo/recovery scope: run only the US SourceAudio scan and AIFF mirror.",
+    )
     p.add_argument("--previous-month", action="store_true",
                    help="Full-month (previous-month) run.  --year/--month "
                         "optional: omit both to target the month before today, "
@@ -3414,6 +3426,9 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
             )
             return 2
         ctx.specials_dir = override
+        # Keep demo/recovery checkpoints isolated from the canonical release
+        # checkpoint even when the pinned date arguments are the same.
+        ctx.soundminer_checkpoint_id = override.name
     if args.client_label_override:
         label = args.client_label_override.strip()
         if not label or "/" in label or "\\" in label:
@@ -3472,6 +3487,7 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
             unattended=unattended,
             db_shortcut=args.sourceaudio_db_shortcut,
             resume=args.resume,
+            us_only=args.sourceaudio_us_only,
         )
         overall_ok = overall_ok and ok_sa
         if not ok_sa and run_nbc:

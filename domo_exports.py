@@ -1090,7 +1090,13 @@ def _select_cards(
     if not tokens:
         return list(CARD_CONFIGS)
 
+    exact_keys = {tok for tok in tokens if any(c["key"].lower() == tok for c in CARD_CONFIGS)}
+
     def _matches(card: dict, tok: str) -> bool:
+        # An exact key must win over substring matching. In particular,
+        # ``us_tracklist`` is also a substring of ``exus_tracklist``.
+        if tok in exact_keys:
+            return card["key"].lower() == tok
         return tok in card["key"].lower() or tok in card["description"].lower()
 
     selected = [c for c in CARD_CONFIGS if any(_matches(c, t) for t in tokens)]
@@ -1125,10 +1131,18 @@ def _run_test(args) -> None:
     if cards is None:
         sys.exit(1)
 
+    output_override = (
+        Path(args.output_path).expanduser() if args.output_path else None
+    )
+    if output_override is not None and len(cards) != 1:
+        logger.error("--output-path requires --only to select exactly one card.")
+        sys.exit(1)
+
     if args.dry_run:
-        # Dry-run always previews ALL cards via the orchestrator path so
-        # users can see the full pipeline plan; --only is ignored here.
-        run_domo_exports(ctx, dry_run=True, logger=logger)
+        logger.info("[DRY RUN] Would export:")
+        for card in cards:
+            output_path = output_override or card["output_fn"](ctx)
+            logger.info(f"  {card['description']} → {output_path}")
         return
 
     logger.info(
@@ -1156,14 +1170,18 @@ def _run_test(args) -> None:
             _authenticate(page, logger)
 
             for card in cards:
-                output_path = card["output_fn"](ctx)
+                output_path = output_override or card["output_fn"](ctx)
                 logger.info(
                     f"\n  ── {card['description']} (card {card['card_id']}) ──"
                 )
                 logger.info(f"     Output: {output_path}")
                 try:
                     _export_card(page, card, output_path, ctx, logger)
-                    _reconcile_sourceaudio_export(card, ctx, logger)
+                    # An isolated test/demo destination must not trigger the
+                    # production SourceAudio refresh reconciler, which reads
+                    # and may update the normal partner delivery tree.
+                    if output_override is None:
+                        _reconcile_sourceaudio_export(card, ctx, logger)
                     results[card["key"]] = "ok"
                     logger.info(f"     ✓ Saved: {output_path}")
                 except PlaywrightTimeoutError as exc:
@@ -1234,6 +1252,11 @@ if __name__ == "__main__":
             "--only \"SoundExchange, Japan JMD\".  Omit to run all cards in a "
             "single browser session."
         ),
+    )
+    p.add_argument(
+        "--output-path", default=None, metavar="PATH",
+        help="TEST ONLY: save a single --only card to an isolated path instead "
+             "of its normal production destination.",
     )
     p.add_argument("--dry-run", action="store_true",
                    help="Preview all six destination paths without exporting.")
