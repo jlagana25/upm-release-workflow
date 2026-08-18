@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import csv
 import logging
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from zipfile import ZipFile
+from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from config import ReleaseContext
 from soundmouse import (
+    _assert_native_excel_soundmouse_xlsx,
     _assert_soundmouse_xlsx_compatibility,
     _domo_configs,
     _partition_soundmouse_rows,
@@ -22,6 +25,7 @@ from soundmouse import (
     install_soundmouse_correction_metadata,
     install_soundmouse_metadata,
     metadata_codes_from_bucket,
+    normalize_soundmouse_xlsx_with_excel,
     validate_soundmouse_delivery,
 )
 
@@ -254,6 +258,60 @@ class SoundMouseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "shared-string table"):
                 _assert_soundmouse_xlsx_compatibility(path)
 
+    def test_native_excel_normalization_is_required_and_value_preserving(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "metadata.csv"
+            xlsx_path = root / "SoundMouseMetadata 01 - ALL.xlsx"
+            excel_app = root / "Microsoft Excel.app"
+            excel_app.mkdir()
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Filename", "Title", "Blank"])
+                writer.writerow(["Track_001.wav", "=literal", ""])
+            convert_soundmouse_csv_to_xlsx(csv_path, xlsx_path)
+
+            with self.assertRaisesRegex(ValueError, "not rewritten by Microsoft Excel"):
+                _assert_native_excel_soundmouse_xlsx(xlsx_path)
+
+            def fake_excel_run(*args, **kwargs):
+                self.assertEqual(args[0], ["osascript"])
+                self.assertIn(str(xlsx_path), kwargs["input"])
+                self.assertIn("UPM_NATIVE_SAVE_MARKER", kwargs["input"])
+                self.assertIn("save active workbook", kwargs["input"])
+                with ZipFile(xlsx_path) as package:
+                    members = {
+                        name: package.read(name) for name in package.namelist()
+                    }
+                members["docProps/app.xml"] = members["docProps/app.xml"].replace(
+                    b"Microsoft Excel Compatible / Openpyxl 3.1.5",
+                    b"Microsoft Macintosh Excel",
+                )
+                rebuilt = root / "native.xlsx"
+                with ZipFile(rebuilt, "w", compression=ZIP_DEFLATED) as package:
+                    for name, payload in members.items():
+                        package.writestr(name, payload)
+                rebuilt.replace(xlsx_path)
+                return subprocess.CompletedProcess(args[0], 0, "", "")
+
+            with patch("soundmouse.sys.platform", "darwin"), patch(
+                "soundmouse.subprocess.run", side_effect=fake_excel_run
+            ):
+                normalize_soundmouse_xlsx_with_excel(
+                    xlsx_path,
+                    logging.getLogger("test"),
+                    excel_app=excel_app,
+                )
+
+            _assert_native_excel_soundmouse_xlsx(xlsx_path)
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(xlsx_path, data_only=False)
+            self.assertEqual(workbook.active["A2"].value, "Track_001.wav")
+            self.assertEqual(workbook.active["B2"].value, "=literal")
+            self.assertIsNone(workbook.active["C2"].value)
+            workbook.close()
+
     def test_metadata_validation_checks_audio_and_covers(self) -> None:
         from openpyxl import Workbook
 
@@ -354,6 +412,7 @@ class SoundMouseTests(unittest.TestCase):
                 {"new.wav"},
                 set(),
                 logging.getLogger("test"),
+                normalize_with_excel=False,
             )
             self.assertEqual([path.name for path in outputs], [source_xlsx.name])
             _assert_soundmouse_xlsx_compatibility(outputs[0])
@@ -400,7 +459,10 @@ class SoundMouseTests(unittest.TestCase):
             workbook.close()
 
             outputs = install_soundmouse_metadata(
-                [source], root / "delivery" / "Metadata", logging.getLogger("test")
+                [source],
+                root / "delivery" / "Metadata",
+                logging.getLogger("test"),
+                normalize_with_excel=False,
             )
             self.assertEqual(len(outputs), 1)
             installed = load_workbook(outputs[0], data_only=False)

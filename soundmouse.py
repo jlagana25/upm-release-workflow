@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import logging
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -70,12 +73,13 @@ def metadata_csv_filename(code: str) -> str:
 
 
 def convert_soundmouse_csv_to_xlsx(csv_path: Path, xlsx_path: Path) -> None:
-    """Convert a Domo CSV export into a clean, upload-compatible XLSX.
+    """Convert a Domo CSV export into a clean intermediate XLSX.
 
     Every CSV field is written as literal text, so leading zeroes, long IDs,
     and values beginning with ``=`` survive unchanged. The XLSX package is then
-    normalized to use Excel's shared-string table, which the SoundMouse uploader
-    requires, without automating Excel or touching any open workbooks.
+    normalized to use Excel's shared-string table. The installed delivery copy
+    is subsequently rewritten and verified by native Excel because SoundMouse
+    rejects Python-generated packages even when their OOXML is structurally valid.
     """
     if not csv_path.is_file():
         raise FileNotFoundError(f"SoundMouse CSV export is missing: {csv_path}")
@@ -270,6 +274,137 @@ def _assert_soundmouse_xlsx_compatibility(path: Path) -> None:
                     raise ValueError(
                         f"{path.name} still contains inline strings rejected by SoundMouse"
                     )
+
+
+def _soundmouse_workbook_value_digest(path: Path) -> str:
+    """Hash workbook values and dimensions without depending on OOXML bytes."""
+    from openpyxl import load_workbook
+
+    digest = hashlib.sha256()
+    workbook = load_workbook(path, data_only=False, read_only=False)
+    try:
+        for worksheet in workbook.worksheets:
+            digest.update(worksheet.title.encode("utf-8"))
+            digest.update(f"\0{worksheet.max_row}\0{worksheet.max_column}\0".encode())
+            for row in worksheet.iter_rows(values_only=True):
+                for value in row:
+                    if value is None:
+                        digest.update(b"N\0")
+                    else:
+                        encoded = str(value).encode("utf-8")
+                        digest.update(type(value).__name__.encode("ascii"))
+                        digest.update(f":{len(encoded)}:".encode("ascii"))
+                        digest.update(encoded)
+                        digest.update(b"\0")
+    finally:
+        workbook.close()
+    return digest.hexdigest()
+
+
+def _assert_native_excel_soundmouse_xlsx(path: Path) -> None:
+    """Require the native Excel rewrite proven to pass SoundMouse upload."""
+    _assert_soundmouse_xlsx_compatibility(path)
+    with ZipFile(path) as package:
+        application = package.read("docProps/app.xml")
+    if b"<Application>Microsoft Macintosh Excel</Application>" not in application:
+        raise ValueError(
+            f"{path.name} was not rewritten by Microsoft Excel; SoundMouse "
+            "has rejected structurally valid Python-generated XLSX files"
+        )
+
+
+def _applescript_literal(value: str) -> str:
+    """Quote an arbitrary string for an AppleScript source literal."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def normalize_soundmouse_xlsx_with_excel(
+    path: Path,
+    logger: logging.Logger,
+    *,
+    timeout_seconds: int = 120,
+    excel_app: Path = Path("/Applications/Microsoft Excel.app"),
+) -> None:
+    """Clear formats and force a native Microsoft Excel save in place.
+
+    SoundMouse rejected otherwise valid shared-string OOXML produced by Python,
+    while the same values passed after Excel's Clear Formats + Save operation.
+    This final rewrite is therefore a correctness gate, not optional cosmetic
+    formatting. The value digest must be identical before and after Excel.
+    """
+    path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"SoundMouse workbook is missing: {path}")
+    if sys.platform != "darwin":
+        raise ValueError(
+            "Native Microsoft Excel normalization requires macOS and cannot "
+            f"be performed for {path.name}"
+        )
+    if not excel_app.exists():
+        raise ValueError(
+            f"Microsoft Excel is required to finalize {path.name} for SoundMouse"
+        )
+
+    _assert_soundmouse_xlsx_compatibility(path)
+    before_digest = _soundmouse_workbook_value_digest(path)
+    workbook_path = _applescript_literal(str(path))
+    workbook_name = _applescript_literal(path.name)
+    script = f"""
+tell application "Microsoft Excel"
+    set previousAlerts to display alerts
+    set display alerts to false
+    try
+        open workbook workbook file name {workbook_path}
+        delay 2
+        if (name of active workbook) is not {workbook_name} then
+            error "Excel opened an unexpected workbook"
+        end if
+        set originalHeader to value of range "A1" of active sheet
+        set value of range "A1" of active sheet to "UPM_NATIVE_SAVE_MARKER"
+        set value of range "A1" of active sheet to originalHeader
+        clear formats (used range of active sheet)
+        save active workbook
+        delay 1
+        close active workbook saving no
+        set display alerts to previousAlerts
+    on error errorMessage number errorNumber
+        try
+            if (name of active workbook) is {workbook_name} then
+                close active workbook saving no
+            end if
+        end try
+        set display alerts to previousAlerts
+        error errorMessage number errorNumber
+    end try
+end tell
+"""
+    logger.info(f"  Finalizing with native Microsoft Excel: {path.name}")
+    try:
+        completed = subprocess.run(
+            ["osascript"],
+            input=script,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            "Microsoft Excel normalization timed out. Open the workbook once "
+            "in Excel and approve access to its delivery folder, close it, "
+            "then rerun Step 16."
+        ) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "unknown Excel error").strip()
+        raise ValueError(f"Microsoft Excel could not finalize {path.name}: {detail}")
+
+    _assert_native_excel_soundmouse_xlsx(path)
+    after_digest = _soundmouse_workbook_value_digest(path)
+    if after_digest != before_digest:
+        raise ValueError(
+            f"Microsoft Excel changed metadata values while finalizing {path.name}"
+        )
+    logger.info(f"  ✓ Native Excel validation passed: {path.name}")
 
 
 def _file_key(value: object) -> str:
@@ -637,7 +772,7 @@ def _export_domo_cards(
                         convert_soundmouse_csv_to_xlsx(output, xlsx_output)
                         output.unlink()
                         logger.info(
-                            f"  Converted CSV → upload-compatible XLSX: "
+                            f"  Converted CSV → staged XLSX: "
                             f"{xlsx_output.name}"
                         )
                 except Exception as exc:  # browser errors are logged per card
@@ -653,8 +788,10 @@ def install_soundmouse_metadata(
     source_workbooks: list[Path],
     metadata_directory: Path,
     logger: logging.Logger,
+    *,
+    normalize_with_excel: bool = True,
 ) -> list[Path]:
-    """Atomically install cleaned full-period workbooks in the delivery."""
+    """Atomically install and natively finalize full-period workbooks."""
     metadata_directory.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
     for source in source_workbooks:
@@ -666,6 +803,8 @@ def install_soundmouse_metadata(
         finally:
             if temporary.exists():
                 temporary.unlink()
+        if normalize_with_excel:
+            normalize_soundmouse_xlsx_with_excel(destination, logger)
         outputs.append(destination)
         logger.info(f"  Installed metadata: {destination.name}")
     return outputs
@@ -677,6 +816,8 @@ def install_soundmouse_correction_metadata(
     audio_additions: set[str],
     cover_additions: set[str],
     logger: logging.Logger,
+    *,
+    normalize_with_excel: bool = True,
 ) -> list[Path]:
     """Install upload-compatible metadata containing only correction rows.
 
@@ -744,6 +885,8 @@ def install_soundmouse_correction_metadata(
                 writer.writerows(selected_rows)
             destination = metadata_directory / source.name
             convert_soundmouse_csv_to_xlsx(csv_path, destination)
+            if normalize_with_excel:
+                normalize_soundmouse_xlsx_with_excel(destination, logger)
             outputs.append(destination)
             logger.info(
                 f"  Prepared correction metadata: {destination.name} "

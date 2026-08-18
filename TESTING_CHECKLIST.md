@@ -38,13 +38,17 @@ setting up a new machine, work through Part 2 top to bottom.
 > Microsoft/UniSync, never into this workflow. See `AUTHENTICATION.md`.
 
 > **SoundMouse workbook requirement:** Step 16 exports metadata as CSV and
-> converts it to XLSX without controlling Excel. A finished workbook must contain
+> converts it to XLSX, then requires native Microsoft Excel to apply Clear
+> Formats and save the installed delivery copy. A finished workbook must contain
 > `xl/sharedStrings.xml` and no `t="inlineStr"` worksheet cells; this is required
 > by the SoundMouse uploader even though Excel itself accepts either form. The
 > rewritten OOXML parts must also retain canonical default namespaces (no
 > generated `ns0:` prefixes), because Excel may accept XML that SoundMouse's
 > stricter workbook parser rejects. Blank CSV fields must remain absent cells,
-> not explicit empty shared strings.
+> not explicit empty shared strings. The workflow also verifies that Excel is
+> the final writer and that no metadata value changed during normalization. On
+> a new Mac, open one SoundMouse workbook in Excel once and grant access to the
+> delivery location before attempting an unattended Step 16 run.
 
 ---
 
@@ -745,6 +749,8 @@ workbooks selected by the bucket.
   - Metadata contains only the `SoundMouseMetadata NN - … .xlsx` files named
     by the SoundMouse bucket card. Each card is downloaded as CSV first and
     converted to a clean XLSX; no Domo workbook formatting is carried forward.
+    Native Excel then applies Clear Formats and saves each installed workbook;
+    Step 16 fails if Excel was not the final writer or changed a metadata value.
   - The final SoundMouse validation unions every `Filename` and album-artwork
     filename across those selected workbooks and confirms they exist under
     `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in
@@ -754,7 +760,7 @@ workbooks selected by the bucket.
     only when a genuinely new cover filename is introduced. Audio-only additions
     and filename corrections must not duplicate existing album artwork. Each
     correction workbook contains only added-audio or added-cover rows while
-    retaining the required shared-string XLSX serialization.
+    retaining the required shared-string serialization and native Excel save.
 - **Part naming:** Part 1 uses `06-01-26 to 06-15-26`; Part 2 uses
   `06-15-26 to 07-01-26`. The corresponding workflow-period directories remain
   inclusive (`01_to_14` and `15_to_30`).

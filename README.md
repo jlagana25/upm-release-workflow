@@ -138,9 +138,11 @@ every edit — it catches broken imports, arg/step-registry drift, and other
 refactor breakage before they fail mid-release.
 
 Step 16 exports SoundMouse metadata from Domo as CSV first and converts each
-CSV to a clean shared-string XLSX package required by the SoundMouse uploader.
-The conversion is unattended, preserves every CSV field as text, and does not
-require or control Microsoft Excel.
+CSV to a clean shared-string XLSX package, then uses Microsoft Excel to apply
+Clear Formats and perform the final native save required by the SoundMouse
+uploader. The workflow verifies that every metadata value is unchanged and
+fails closed if Excel was not the final writer. Excel needs one-time access to
+the SoundMouse delivery location; normal runs are unattended afterward.
 
 ## Version control & two-machine sync
 

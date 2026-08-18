@@ -47,8 +47,10 @@ validation signal:
 - **Domo exports** — Steps 1 and 16 drive an authenticated Domo browser session via
   Playwright. Needs credentials and interactive login.
 - **SoundMouse CSV→XLSX normalization** — Step 16 exports metadata cards as CSV,
-  builds clean XLSX workbooks with an OOXML shared-string table
-  because the SoundMouse uploader rejects inline-string serialization.
+  builds clean XLSX workbooks with an OOXML shared-string table, then requires
+  native Microsoft Excel to Clear Formats and save the installed copy because
+  the SoundMouse uploader rejects Python-only serialization even when the OOXML
+  is structurally valid. Excel is a real-machine-only dependency.
 - **DOCX→PDF** — Step 4 shells out to LibreOffice/Word.
 
 What you **can** do here (this is where you add value):
@@ -326,6 +328,12 @@ inline or are submitted to HDF1's login-session agent.
 - **Soundminer must fail closed.** Never restore count-only mirror success,
   generic OK/Yes clicking, or a no-activity timeout that proceeds anyway.
   Metadata/source and destination filename manifests are correctness gates.
+- **SoundMouse XLSX must fail closed.** CSV conversion is only an intermediate
+  stage. Every installed full or correction workbook must finish with native
+  Excel Clear Formats + Save, retain identical metadata values, contain shared
+  strings with no inline/empty-string cells, and identify Microsoft Macintosh
+  Excel as the final writer. A structurally valid Python-only XLSX is not upload
+  compatible.
   An incremental refresh may proceed only when the destination is a strict
   subset of the expected manifest (missing only); unexpected, duplicate, or
   wrong-format outputs still fail before GUI mutation.
