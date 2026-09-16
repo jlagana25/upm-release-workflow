@@ -78,7 +78,6 @@ def write_workflow_report(
         "output_counts": {
             "sourceaudio_us_aiff": _count_files(ctx.partner_dirs["sourceaudio_music"], (".aif", ".aiff")),
             "sourceaudio_exus_aiff": _count_files(ctx.partner_dirs["sourceaudio_exus_music"], (".aif", ".aiff")),
-            "nbc_wav": _count_files(ctx.partner_dirs["nbc_wav_music"], (".wav",)),
             "soundmouse_wav": _count_files(ctx.soundmouse_release_dir / "MEDIA", (".wav",)),
         },
         "diagnostics": _diagnostics_from_log(log_path),

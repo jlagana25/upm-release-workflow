@@ -1,6 +1,7 @@
 # Per-user authentication and privacy
 
-The repository contains workflow code only. Domo and UniSync authentication is
+The repository contains workflow code only. Domo, DAMS, BMAT SFTP, SynchTank
+S3, UniSync, and Monday authentication is
 owned by the macOS user running the workflow and must never be copied with the
 repo or onto a Pegasus delivery.
 
@@ -12,16 +13,27 @@ Run these commands while logged into the recipient's own macOS account:
 cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
 make install
 python3 auth_manager.py --enroll-domo-keychain
+python3 auth_manager.py --enroll-domo-api-keychain
 python3 auth_manager.py --setup domo
+python3 auth_manager.py --setup dams
 python3 auth_manager.py --setup unisync
+python3 auth_manager.py --enroll-bmat-keychain
+python3 auth_manager.py --enroll-synchtank-keychain
+python3 auth_manager.py --enroll-tunesat-keychain
+python3 auth_manager.py --enroll-monday-keychain
 python3 auth_manager.py --status
 ```
 
-- `--enroll-domo-keychain` asks macOS Keychain itself to collect and confirm the
-  UMG email, then the password, through labeled hidden Terminal prompts. Python
-  never receives the enrollment values, and they never enter command arguments.
-  They are stored as two workflow-owned items in the current user's Login
-  Keychain.
+- `--enroll-domo-keychain` collects the UMG email and password once each through
+  labeled hidden Terminal prompts. Python passes each exact in-memory value to
+  Keychain for storage and confirmation; values never enter command arguments,
+  environment variables, logs, or files. The stored values are checked exactly.
+- `--enroll-domo-api-keychain` separately collects a Domo API client ID and
+  client secret through hidden prompts. It requests a short-lived token from
+  `api.domo.com` using HTTP Basic authentication and the minimal `data` scope,
+  then stores both values through macOS Security.framework only after Domo
+  accepts them. The pair is replaced atomically: a partial Keychain failure
+  restores the previous values. Tokens and credential values are never logged.
 - Domo opens an isolated Playwright profile and waits for that user's Microsoft
   SSO/MFA. The resulting cookies stay under
   `~/.upm_release_workflow/domo_browser_profile`. Normal runs can select the
@@ -29,18 +41,62 @@ python3 auth_manager.py --status
 - UniSync opens its installed app. The user signs in there; the workflow never
   collects the credential. UniSync's local preferences stay at
   `~/Library/SMUniSync/UniSync.xml`.
+- Soundmouse Uploader owns its remembered account and Keychain entry. The
+  workflow never reads or stores that password; it can press the app's Sign In
+  button only when retained account details are already available, then
+  requires workspace `UPPM` and module `Music` before adding a package.
+- DAMS opens a separate private Playwright profile. The user chooses UMG
+  Employee SSO during `--setup dams`; normal BMAT runs reuse that retained
+  session for read-only album navigation and downloads.
+- `--enroll-bmat-keychain` collects the SFTP username and password through
+  hidden prompts, atomically stores and verifies both values in Login Keychain,
+  and never writes either value to argv, the environment, logs, or files.
+- `--enroll-synchtank-keychain` collects the AWS access-key ID and secret
+  access key through hidden prompts, atomically stores and verifies both values
+  in Login Keychain, and never writes either value to argv, the environment,
+  logs, or files.
+- `--enroll-tunesat-keychain` collects the separate TuneSat SFTP username and
+  password through hidden prompts and atomically stores and verifies both in
+  Login Keychain without placing either value in argv, the environment, logs,
+  or files.
+- `--enroll-monday-keychain` collects that operator's Monday personal API token
+  once through a hidden Terminal prompt and validates it before changing
+  Keychain. It uses macOS Security.framework directly rather than putting the
+  token in a `security` command or exposing additional Keychain prompts. The token stays in the current
+  user's Login Keychain and inherits that Monday user's board permissions; it
+  is loaded into memory only for validation and Step 18 API requests. Enrollment
+  verifies the stored value exactly; a rejected token is never stored. Monday API eligibility
+  also requires an active admin/member account with a confirmed email; viewers,
+  disabled users, and users with unconfirmed email addresses cannot use the API.
 - Status output is deliberately redacted. It reports only configured/missing
   and whether permissions are private.
-- macOS Keychain remains owned by the current user. The workflow reads only its
-  two Domo items when a Microsoft account/password form is visible and never
-  exports or logs their values. UniSync continues to own its own Keychain data.
+- macOS Keychain remains owned by the current user. The workflow reads its two
+  Domo SSO items only when a Microsoft account/password form is visible and
+  reads the separate API pair only for Domo API connections. It never exports
+  or logs their values. UniSync continues to own its own Keychain data.
 
 ## Unattended release runs
 
 Setup is the only interactive authentication operation. Normal workflow runs:
 
 - reuse the private Domo profile and allow Microsoft/Domo silent SSO to finish;
+- reuse the private DAMS profile for bounded silent UMG Employee SSO;
+- load BMAT SFTP credentials into memory only for Step 17 and accept/persist a
+  first-seen host key while rejecting a changed key on later runs;
+- load SynchTank AWS credentials into memory only for its standalone S3
+  delivery and upload `delivery.complete` only after exact remote verification;
+- load TuneSat SFTP credentials into memory only for its standalone delivery,
+  pin the first-seen host key, and reject later host-key changes;
 - reuse UniSync's current-user application/Keychain session after each relaunch;
+- reuse Soundmouse Uploader's retained current-user sign-in without reading its
+  credentials, and fail rather than prompt during a delivery;
+- close completed UniSync Microsoft `Working...` tabs after each job by exact
+  title, host, and UniSync Azure client-ID matching;
+- use the same private Domo profile for Step 5's one-time stalled-source
+  recovery: follow Card → DataSet → Edit ETL, run the owning DataFlow through
+  its three-dot menu, verify the newest History entry is successful, and then
+  replace only the affected export;
+- load the current user's Monday token from Keychain and pin the API version;
 - never prompt for a password, MFA response, or an Enter keypress; and
 - allow up to three minutes for UMG's unattended Microsoft→Domo redirect, then
   fail with a redacted setup command if interactive reauthentication is needed.
@@ -62,16 +118,21 @@ creation mask so new cookie databases are private immediately.
 
 ## Offboarding or workstation reassignment
 
-Quit UniSync and any workflow Domo browser, then use the recoverable reset:
+Quit UniSync and any workflow Domo or DAMS browser, then use the recoverable reset:
 
 ```bash
 python3 auth_manager.py --reset all --confirm-reset
 python3 auth_manager.py --delete-domo-keychain --confirm-reset
+python3 auth_manager.py --delete-domo-api-keychain --confirm-reset
+python3 auth_manager.py --delete-monday-keychain --confirm-reset
+python3 auth_manager.py --delete-bmat-keychain --confirm-reset
 ```
 
 Browser/XML artifacts are moved into a timestamped directory in `~/.Trash`, not
 permanently deleted. The second command permanently deletes only the two Domo
-Keychain items created by this workflow. If UniSync still signs in
+Keychain items created by this workflow. The third command deletes only the
+two workflow-owned Domo API items, and the fourth deletes only the Monday
+token. If UniSync still signs in
 automatically, use UniSync's own **Sign Out** command to remove its app-managed
 Keychain session. Then onboard the next user with the setup commands above.
 

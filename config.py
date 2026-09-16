@@ -19,6 +19,7 @@ from calendar import monthrange
 from datetime import date, datetime
 import os
 from pathlib import Path
+import re
 
 # ---------------------------------------------------------------------------
 # Fixed volume roots — checked by preflight before any work begins
@@ -58,12 +59,13 @@ MASTERS_COVERS_DIR = Path("/Volumes/Pegasus32 R8 - 1/UPM-US-Masters/Covers")
 UPM_CACHE_MP3 = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/MP3")
 UPM_CACHE_WAV = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/WAV")
 SOUNDMOUSE_BASE = Path("/Volumes/Pegasus32 R8 - 2/SoundMouse")
+BMAT_BASE = Path("/Volumes/Pegasus32 R8 - 1/_Specials/BMAT")
 
 # Retired partner folders can remain in the shared Specials baseline for
 # historical releases. New release trees must not inherit them. Matching is
-# punctuation/case-insensitive so both "MTV-Viacom" and layout variants are
-# excluded without depending on a particular dated folder prefix.
-RETIRED_PARTNER_TOKENS: frozenset[str] = frozenset({"mtvviacom"})
+# punctuation/case-insensitive so historical layout variants are excluded
+# without depending on a particular dated folder prefix.
+RETIRED_PARTNER_TOKENS: frozenset[str] = frozenset({"mtvviacom", "nbc", "nbcuniversal"})
 
 
 def is_retired_partner_name(name: str) -> bool:
@@ -101,6 +103,7 @@ LOGS_DIR = Path(os.environ.get(
 ))
 PRIVATE_STATE_DIR = USER_HOME / ".upm_release_workflow"
 DOMO_PROFILE_DIR = PRIVATE_STATE_DIR / "domo_browser_profile"
+DAMS_PROFILE_DIR = PRIVATE_STATE_DIR / "dams_browser_profile"
 UNISYNC_PREFS_DIR = USER_HOME / "Library" / "SMUniSync"
 UNISYNC_XML_PATH = UNISYNC_PREFS_DIR / "UniSync.xml"
 MISSING_COVER_REPORT = Path("/Volumes/UPM Builds/Missing_CDCover_Downloads.csv")
@@ -118,7 +121,6 @@ DOMO_CARDS: dict[str, str] = {
     "exus_tracklist":   "1389146023",
     "album_list":       "1741693601",
     "japan_metadata":   "242186821",
-    "nbc_metadata":     "233748559",
     # Tunesat Metadata — Step 13 (non-maintrack cleanup) reads this CSV's
     # "File Name" column to decide what stays in the Tunesat Music folder.
     # Same date-range filter as the other cards (Part 1: days 01–14,
@@ -162,7 +164,7 @@ SOUNDMOUSE_DOMO_CARDS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 #
 # Soundminer v5Pro runs on a SEPARATE Mac on the same network, not on the
-# box that runs this pipeline.  Step 12 is therefore triggered over SSH and
+# box that runs this pipeline. Step 11 is therefore delegated to that machine
 # executed *on that remote Mac*, where the GUI, Soundminer, and the
 # reference screenshots all live.  Both Pegasus volumes are mounted at the
 # SAME paths on both machines, so every path the pipeline computes is valid
@@ -176,7 +178,7 @@ SOUNDMOUSE_DOMO_CARDS: dict[str, str] = {
 #      process that ends up driving the UI (one-time, in System Settings).
 #
 # Fill these in for your environment.  REMOTE_SOUNDMINER_ENABLED gates
-# whether the orchestrator runs Step 12 remotely (True) or locally (False).
+# whether the legacy remote runner is enabled.
 
 # SSH-triggered remote execution is DISABLED for this deployment.
 #
@@ -203,12 +205,12 @@ REMOTE_SOUNDMINER_ENABLED = False
 # ---------------------------------------------------------------------------
 # Machine detection
 # ---------------------------------------------------------------------------
-# The workflow can be launched from EITHER machine.  Step 12 (Soundminer) can
+# The workflow can be launched from EITHER machine. Step 11 (Soundminer) can
 # only be driven on the Soundminer Mac itself (its GUI/console session owns the
 # capturable display).  So the orchestrator auto-detects which machine it is
-# running on by hostname and chooses how to run Step 12:
+# running on by hostname and chooses how to run Step 11:
 #
-#   • On the Soundminer machine  → run Step 12 INLINE (drive the GUI locally).
+#   • On the Soundminer machine  → run Step 11 INLINE (drive the GUI locally).
 #   • On the pipeline machine    → submit to HDF1 login-session agent. Legacy
 #                                   manual handoff is recovery-only.
 #
@@ -219,7 +221,7 @@ import socket as _socket
 
 # Short hostname of the Soundminer Mac (the box that runs Soundminer's GUI).
 SOUNDMINER_HOSTNAME = "USMPSMDHDF1"
-# Short hostname of the pipeline Mac (where Steps 1–11/12.7/13/14 normally run).
+# Short hostname of the pipeline Mac (where non-Soundminer steps normally run).
 PIPELINE_HOSTNAME   = "USMPSMDHDF2"
 
 
@@ -269,7 +271,7 @@ REMOTE_SOUNDMINER: dict[str, str] = {
     ),
     # Same files, but the path AS SEEN IN THE REMOTE MAC'S OWN CONSOLE /
     # Screen Sharing Terminal session, where the volume mounts under
-    # /Users/hdfuser/….  This is what the Step 12 hand-off banner tells the
+    # /Users/hdfuser/…. This is what the Step 11 hand-off banner tells the
     # operator to `cd` into, because Path C runs soundminer.py there.
     "console_repo_path": os.environ.get(
         "UPM_SOUNDMINER_REPO",
@@ -327,6 +329,10 @@ REQUIRED_APPS: dict[str, str] = {
 # Possible DOCX-to-PDF converters (tried in order)
 DOCX_TO_PDF_METHODS: list[str] = ["libreoffice", "soffice"]
 
+# One-time bridge from the August full-month transition into the Friday-cutoff
+# rolling cadence. All later exact-date deliveries remain exactly 14 days.
+_INITIAL_ROLLING_RANGE = (date(2026, 9, 1), date(2026, 9, 11))
+
 
 # ---------------------------------------------------------------------------
 # ReleaseContext — the single source of truth for one run
@@ -358,8 +364,15 @@ class ReleaseContext:
             raise ValueError("previous-month cannot be combined with another date mode")
         if (range_start is None) != (range_end is None):
             raise ValueError("range_start and range_end must be supplied together")
-        if range_start is not None and (range_end - range_start).days != 13:
-            raise ValueError("date-range deliveries must cover exactly 14 inclusive days")
+        if (
+            range_start is not None
+            and (range_start, range_end) != _INITIAL_ROLLING_RANGE
+            and (range_end - range_start).days != 13
+        ):
+            raise ValueError(
+                "date-range deliveries must cover exactly 14 inclusive days "
+                "(except the 2026-09-01 through 2026-09-11 transition)"
+            )
         if part not in (1, 2):
             raise ValueError(f"part must be 1 or 2, got {part!r}")
         if full_month_content and part != 2:
@@ -385,15 +398,33 @@ class ReleaseContext:
         # Keep it explicitly named so it cannot collide with the normal Part 1
         # release for the same calendar month.
         self.is_full_month = previous_month
+        is_august_part2_transition = (
+            year == 2026 and month == 8 and part == 2
+        )
         if self.is_date_range:
             assert range_start is not None and range_end is not None
             self.release_variant = "RANGE"
-            self.release_id = f"UPM-{range_start.isoformat()}_to_{range_end.isoformat()}"
+            # Rolling deliveries use the inclusive period start as their compact,
+            # cadence-independent identity.  The end date remains first-class
+            # release context and is validated below; it does not need to be
+            # repeated in every folder, report, queue request, or Monday key.
+            # This stays equally useful if the operating cadence later changes
+            # from 14 days to weekly.
+            self.release_id = f"UPM{range_start.strftime('%Y%m%d')}"
+        elif is_august_part2_transition:
+            # August Part 2 is the bridge into date-based workflow IDs while
+            # retaining its already-announced client-facing Part 2 name.  The
+            # full-month transition command starts on August 1; a legacy
+            # half-month invocation remains distinct and starts on August 15.
+            transition_day = 1 if full_month_content else 15
+            self.release_variant = "P2"
+            self.release_id = f"UPM{year:04d}{month:02d}{transition_day:02d}"
         else:
             self.release_variant = "FULL" if self.is_full_month else f"P{self.part}"
             self.release_id = f"UPM-{self.year_str}-{self.month_num}-{self.release_variant}"
-        # e.g. 2026-05-P1, 2026-05-P2, or 2026-05-FULL
-        self.tracklist_token = self.release_id.removeprefix("UPM-")
+        # e.g. 2026-05-P1 for legacy IDs or 20260901 for compact IDs.  Remove
+        # the brand prefix without assuming whether the ID includes a dash.
+        self.tracklist_token = self.release_id.removeprefix("UPM").lstrip("-")
 
         # ---- Display strings -------------------------------------------------
         # May 2026
@@ -438,10 +469,35 @@ class ReleaseContext:
                 else f"{self.month_name} {self.year_str} Part {self.part}"
             )
 
+        # Partner-facing rolling delivery names keep the full inclusive range
+        # but abbreviate month names. Internal reports can continue using the
+        # long-form month_display_folder value above.
+        if self.is_date_range and range_start is not None and range_end is not None:
+            if (
+                range_start.year == range_end.year
+                and range_start.month == range_end.month
+            ):
+                self.delivery_display_folder = (
+                    f"{range_start.strftime('%b')} {range_start.day}–{range_end.day} "
+                    f"{range_start.year}"
+                )
+            elif range_start.year == range_end.year:
+                self.delivery_display_folder = (
+                    f"{range_start.strftime('%b')} {range_start.day}–"
+                    f"{range_end.strftime('%b')} {range_end.day} {range_start.year}"
+                )
+            else:
+                self.delivery_display_folder = (
+                    f"{range_start.strftime('%b')} {range_start.day} {range_start.year}–"
+                    f"{range_end.strftime('%b')} {range_end.day} {range_end.year}"
+                )
+        else:
+            self.delivery_display_folder = self.month_display_folder
+
         # Exact client-facing delivery label. Part deliveries intentionally do
         # not add "Release"; rolling date ranges use the requested plural.
         self.client_delivery_label = (
-            f"{self.month_display_folder} Releases"
+            f"{self.delivery_display_folder} Releases"
             if self.is_date_range
             else (
                 self.month_display_folder
@@ -452,9 +508,11 @@ class ReleaseContext:
             )
         )
 
+        self.final_packaging_delivery_label = self.client_delivery_label
+
         # May 2026 (Part 1), May 2026 (Part 2), or May 2026 (Full).
         self.month_display_text = (
-            self.month_display_folder
+            self.delivery_display_folder
             if self.is_date_range
             else (
                 "August 2026 (Part 1)"
@@ -466,9 +524,18 @@ class ReleaseContext:
         )
 
         # ---- Folder names ----------------------------------------------------
-        # Both internal roots use the canonical release ID.
-        self.specials_root = self.release_id
-        self.hd_folder = self.release_id
+        # Monday/Domo use a compact UPMYYYYMMDD batch key for date-based runs,
+        # but mounted-volume working directories retain the established
+        # hyphenated UPM-YYYY-MM-DD convention. Keep those identities separate.
+        compact_match = re.fullmatch(r"UPM(\d{4})(\d{2})(\d{2})", self.release_id)
+        self.storage_root = (
+            f"UPM-{compact_match.group(1)}-{compact_match.group(2)}-"
+            f"{compact_match.group(3)}"
+            if compact_match
+            else self.release_id
+        )
+        self.specials_root = self.storage_root
+        self.hd_folder = self.storage_root
 
         # ---- Release date range ---------------------------------------------
         last_day = monthrange(year, month)[1]
@@ -538,24 +605,36 @@ class ReleaseContext:
             / f"SoundMouse {self.soundmouse_activation_range}_Missing.csv"
         )
 
+        # ---- Step 17: BMAT custom-content delivery -------------------------
+        # The releases card is filtered to this workflow's exact date range.
+        # The submission export is an inventory that Step 17 narrows to those
+        # catalogues and then reconciles against the persistent local ledger.
+        self.bmat_releases_csv = (
+            TRACKLISTS_DIR / "BMAT"
+            / f"CUSTOM BMAT RELEASES-{self.tracklist_token}.csv"
+        )
+        self.bmat_submission_xlsx = (
+            TRACKLISTS_DIR / "BMAT"
+            / f"BMAT Custom Content Production Submissions-{self.tracklist_token}.xlsx"
+        )
+
+        # Required pre-workflow control inventory for the Monday source board.
+        self.monday_audio_batch_csv = (
+            TRACKLISTS_DIR / "Monday"
+            / f"UPM-Audio-Batch-{self.tracklist_token}.csv"
+        )
+
         _japan_folder = self.partner_folder_name("Japan NTT DATA")
         self.japan_metadata_csv = (
             self.specials_dir
             / "3-FINAL PACKAGING"
             / _japan_folder
-            / f"{self.month_display_folder} NTT Data Metadata.csv"
+            / f"{self.delivery_display_folder} NTT Data Metadata.csv"
         )
-        self.nbc_metadata_csv = (
-            self.specials_dir
-            / "1-ORIGINAL"
-            / "Metadata"
-            / f"UPM-US NBCUniversal Metadata Export-{self.release_variant}.csv"
-        )
-
         # ---- Album list document paths --------------------------------------
         _doc_stem = (
             f"Universal Production Music - "
-            f"{self.month_display_folder} Album List"
+            f"{self.delivery_display_folder} Album List"
         )
         self.album_list_docx = self.hd_staging_dir / f"{_doc_stem}.docx"
         self.album_list_pdf  = self.hd_staging_dir / f"{_doc_stem}.pdf"
@@ -578,7 +657,7 @@ class ReleaseContext:
             / self.partner_folder_name("Tunesat")
         )
         self.cleanup_metadata_csv = (
-            _tunesat_root / "Metadata" / f"UPM {self.month_display_folder} Metadata.csv"
+            _tunesat_root / "Metadata" / f"UPM {self.delivery_display_folder} Metadata.csv"
         )
         self.cleanup_target_folder = _tunesat_root / "Music"
 
@@ -650,7 +729,7 @@ class ReleaseContext:
 
     @classmethod
     def for_date_range(cls, start: str | date, end: str | date) -> "ReleaseContext":
-        """Build an exact 14-day delivery context, including cross-month ranges."""
+        """Build a rolling delivery context, including the one-time transition."""
         start_date = date.fromisoformat(start) if isinstance(start, str) else start
         end_date = date.fromisoformat(end) if isinstance(end, str) else end
         return cls(
@@ -662,7 +741,10 @@ class ReleaseContext:
         )
 
     def partner_folder_name(self, partner: str) -> str:
-        return f"Universal Production Music {self.client_delivery_label} - {partner}"
+        return (
+            "Universal Production Music "
+            f"{self.client_delivery_label} - {partner}"
+        )
 
     def pinned_cli_args(self) -> list[str]:
         """Return CLI arguments that recreate this exact release context.
@@ -701,12 +783,10 @@ class ReleaseContext:
 
         Each partner's metadata lands in its 3-FINAL PACKAGING Metadata folder.
         Tunesat is NOT here — it reuses self.cleanup_metadata_csv (same path,
-        and Step 13 reads it there).  NBC and NTT Data are NOT here either —
-        they keep their existing destinations (nbc_metadata_csv is read by the
-        Soundminer NBC step from 1-ORIGINAL; japan_metadata_csv already lands in
-        the NTT DATA deliverable folder).
+        and Step 13 reads it there). NTT Data is not here because
+        japan_metadata_csv already lands in the NTT DATA deliverable folder.
         """
-        mdf = self.month_display_folder
+        mdf = self.delivery_display_folder
         fp  = self.specials_dir / "3-FINAL PACKAGING"
 
         def _r(name: str) -> Path:
@@ -732,7 +812,7 @@ class ReleaseContext:
         }
 
     def _build_partner_dirs(self) -> dict[str, Path]:
-        mdf = self.month_display_folder
+        mdf = self.delivery_display_folder
         fp  = self.specials_dir / "3-FINAL PACKAGING"
         hdf = self.hd_final_dir
         st  = self.specials_dir / "2-STAGING"
@@ -754,7 +834,6 @@ class ReleaseContext:
             "hd_wav_media":     hdf / "WAV (UDrive 2.0)" / f"Universal Production Music {self.client_delivery_label} (SW)" / "MEDIA",
 
             # WAV w COVERS destinations (Step 10)
-            "nbc_staging_media": st / "SME WAV 48K NBC" / "MEDIA",
             "netmix_music":     _r("Netmix")    / "Music",
 
             # Ex-US destinations (Step 10)
@@ -762,11 +841,6 @@ class ReleaseContext:
 
             # Japan (Step 10)
             "japan_final_media": fp / self.partner_folder_name("Japan NTT DATA") / "MEDIA",
-
-            # NBC music (Steps 12.6, 12.7)
-            "nbc_wav_music":    _r("NBC") / "Music" / "WAV",
-            "nbc_mp3_music":    _r("NBC") / "Music" / "MP3",
-            "nbc_music_root":   _r("NBC") / "Music",
 
             # SourceAudio (Step 11 — Soundminer scan → AIFF mirror)
             "sourceaudio_music":      _r("SourceAudio") / "Music",
@@ -783,6 +857,7 @@ class ReleaseContext:
                 "cache_path":  str(UPM_CACHE_MP3),
                 "client_path": str(music / "MP3"),
                 "csv":         str(self.us_tracklist_csv),
+                "domo_card_key": "us_tracklist",
             },
             {
                 "name":        "US WAV",
@@ -790,6 +865,7 @@ class ReleaseContext:
                 "cache_path":  str(UPM_CACHE_WAV),
                 "client_path": str(music / "WAV"),
                 "csv":         str(self.us_tracklist_csv),
+                "domo_card_key": "us_tracklist",
             },
             # NOTE: "US WAV w COVERS" is intentionally NOT a UniSync job.
             # WAV w COVERS is identical to the WAV download plus an album
@@ -804,6 +880,7 @@ class ReleaseContext:
                 "cache_path":  str(UPM_CACHE_MP3),
                 "client_path": str(music / "Ex-US (MP3)"),
                 "csv":         str(self.exus_tracklist_csv),
+                "domo_card_key": "exus_tracklist",
             },
             {
                 "name":        "Ex-US WAV",
@@ -811,6 +888,7 @@ class ReleaseContext:
                 "cache_path":  str(UPM_CACHE_WAV),
                 "client_path": str(music / "Ex-US (WAV)"),
                 "csv":         str(self.exus_tracklist_csv),
+                "domo_card_key": "exus_tracklist",
             },
             {
                 "name":        "Japan WAV",
@@ -818,6 +896,7 @@ class ReleaseContext:
                 "cache_path":  str(UPM_CACHE_WAV),
                 "client_path": str(music / "Japan"),
                 "csv":         str(self.japan_metadata_csv),
+                "domo_card_key": "japan_metadata",
             },
         ]
 
@@ -837,7 +916,7 @@ class ReleaseContext:
             # job["metadata_csv"]  → Path(…/Tunesat/Metadata/UPM May 2026 Metadata.csv)
             # job["music_folder"]  → Path(…/Tunesat/Music)
         """
-        mdf = self.month_display_folder
+        mdf = self.delivery_display_folder
         partner_root = (
             self.specials_dir
             / "3-FINAL PACKAGING"

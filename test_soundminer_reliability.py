@@ -48,13 +48,25 @@ class SoundminerReliabilityTests(unittest.TestCase):
             soundminer._soundminer_filename_component(
                 '  "Älter" / Don\'t Ask? Baby<3 - No. 5  '
             ),
-            "A\u0308lter  Don't Ask Baby3 - No. 5",
+            "Älter  Don't Ask Baby3 - No. 5",
+        )
+        self.assertEqual(
+            soundminer._soundminer_filename_component("Attack & Release"),
+            "Attack  Release",
+        )
+        self.assertEqual(
+            soundminer._soundminer_filename_component("Title -  EDM"),
+            "Title -  EDM",
         )
         self.assertEqual(
             soundminer._normalise_audio_identity(
                 "CHALK113_01_Christmas Symphony No. 5 - Beethoven"
             ),
             "chalk113_01_christmas symphony no. 5 - beethoven",
+        )
+        self.assertEqual(
+            soundminer._normalise_audio_identity("Feliz cumplean\u0303os.wav"),
+            "feliz cumpleaños",
         )
 
     def test_nbc_preflight_fails_before_gui_for_missing_audio(self):
@@ -113,6 +125,33 @@ class SoundminerReliabilityTests(unittest.TestCase):
         unexpected = allowed.replace("Is_Explicit", "NewSensitiveField")
         with self.assertRaises(soundminer._SoundminerError):
             soundminer._validate_unmatched_dialog_text(unexpected)
+
+    def test_fast_scan_uses_populated_grid_as_positive_activity(self):
+        import numpy as np
+
+        wait = Mock()
+        with (
+            patch.object(
+                soundminer,
+                "_screen_fingerprint",
+                side_effect=[
+                    np.zeros((45, 80), dtype="int16"),
+                    np.full((45, 80), 20, dtype="int16"),
+                ],
+            ),
+            patch.object(soundminer, "_menu_click"),
+            patch.object(soundminer, "_open_panel_go_to_path"),
+            patch.object(soundminer, "_save_step_screenshot"),
+            patch.object(soundminer, "_watch_and_dismiss_import_dialogs", return_value=False),
+            patch.object(soundminer, "_wait_with_manual_handshake", wait),
+            patch.object(soundminer.time, "sleep"),
+        ):
+            soundminer._scan_sounds_into_database(
+                self.root, self.logger, unattended=True
+            )
+
+        self.assertTrue(wait.call_args.kwargs["initial_activity"])
+        self.assertTrue(callable(wait.call_args.kwargs["on_poll"]))
 
     def test_console_lock_parser_distinguishes_locked_session(self):
         self.assertTrue(soundminer._ioreg_reports_locked(
@@ -195,6 +234,39 @@ class SoundminerReliabilityTests(unittest.TestCase):
         ):
             soundminer._focus_record_list(self.logger)
         self.assertEqual(clicks, [(605, 309)])
+
+    def test_embed_monitors_central_progress_sheet_sensitively(self):
+        fake = types.SimpleNamespace(hotkey=lambda *args: None)
+        wait = Mock()
+        with (
+            patch.dict(sys.modules, {"pyautogui": fake}),
+            patch.object(soundminer, "_activate_soundminer"),
+            patch.object(soundminer, "_focus_record_list"),
+            patch.object(soundminer, "_menu_click"),
+            patch.object(soundminer, "_save_step_screenshot"),
+            patch.object(soundminer, "_wait_with_manual_handshake", wait),
+            patch.object(soundminer.time, "sleep"),
+        ):
+            soundminer._select_all_and_embed(self.logger, unattended=True)
+
+        self.assertEqual(
+            wait.call_args.kwargs["fingerprint_region"],
+            (0.32, 0.30, 0.68, 0.66),
+        )
+        self.assertLess(
+            wait.call_args.kwargs["activity_threshold"],
+            soundminer.SCREEN_IDLE_DIFF,
+        )
+
+    def test_embed_progress_bar_red_pixels_are_detected(self):
+        import numpy as np
+
+        empty = np.zeros((90, 160, 3), dtype="uint8")
+        progress = empty.copy()
+        progress[40:45, 30:80] = (190, 70, 80)
+
+        self.assertFalse(soundminer._has_red_progress_pixels(empty))
+        self.assertTrue(soundminer._has_red_progress_pixels(progress))
 
     def test_closed_destination_picker_accepts_processing_screen(self):
         clicks: list[tuple[int, int]] = []

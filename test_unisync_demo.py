@@ -3,11 +3,54 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-from unisync_automation import _write_limited_test_csv
+from unisync_automation import STATUS_OK, _run_single_job, _write_limited_test_csv
 
 
 class UniSyncDemoTests(unittest.TestCase):
+    def test_zero_progress_refreshes_source_once_and_rechecks_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "tracklist.csv"
+            destination = root / "output"
+            destination.mkdir()
+            with source.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Filename", "workAudioId"])
+                writer.writerow(["track", "123"])
+
+            job = {
+                "name": "US WAV",
+                "territory": "United States",
+                "cache_path": str(root / "cache"),
+                "client_path": str(destination),
+                "csv": str(source),
+                "domo_card_key": "us_tracklist",
+            }
+            refresh = Mock()
+
+            def refresh_source(_job: dict) -> bool:
+                destination.joinpath("track.wav").write_bytes(b"audio")
+                return True
+
+            refresh.side_effect = refresh_source
+            with patch(
+                "unisync_automation._drive_unisync_for_csv",
+                return_value=STATUS_OK,
+            ) as drive:
+                status = _run_single_job(
+                    job,
+                    False,
+                    logging.getLogger("test-unisync-refresh"),
+                    source_refresh=refresh,
+                )
+
+            self.assertEqual(STATUS_OK, status)
+            self.assertEqual(1, refresh.call_count)
+            # Initial pass plus the two bounded zero-progress retries.
+            self.assertEqual(3, drive.call_count)
+
     def test_limited_csv_preserves_header_and_requested_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "tracklist.csv"

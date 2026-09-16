@@ -18,6 +18,7 @@ from soundmouse import (
     _domo_configs,
     _partition_soundmouse_rows,
     _soundmouse_unisync_jobs,
+    _soundmouse_unisync_territories,
     activation_ranges_from_tracklist,
     create_soundmouse_directories,
     convert_soundmouse_csv_to_xlsx,
@@ -66,8 +67,8 @@ class SoundMouseTests(unittest.TestCase):
         self.assertEqual(part1.month_display_folder, "June 2026 Part 1")
         self.assertEqual(part2.month_display_folder, "June 2026 Part 2")
         self.assertIn(
-            "Universal Production Music June 2026 Part 1 - NBC",
-            str(part1.partner_dirs["nbc_music_root"]),
+            "Universal Production Music June 2026 Part 1 - SourceAudio",
+            str(part1.partner_dirs["sourceaudio_music"]),
         )
         self.assertEqual(
             part2.pinned_cli_args(),
@@ -84,8 +85,8 @@ class SoundMouseTests(unittest.TestCase):
         self.assertEqual(transition_part1.release_start, "2026-07-01")
         self.assertEqual(transition_part1.release_end, "2026-07-31")
         self.assertEqual(
-            transition_part1.partner_folder_name("NBC"),
-            "Universal Production Music August 2026 Part 1 - NBC",
+            transition_part1.partner_folder_name("SourceAudio"),
+            "Universal Production Music August 2026 Part 1 - SourceAudio",
         )
         self.assertEqual(
             transition_part1.partner_metadata["sourceaudio"].name,
@@ -93,42 +94,104 @@ class SoundMouseTests(unittest.TestCase):
         )
 
         transition = ReleaseContext(2026, 8, 2, full_month_content=True)
+        self.assertEqual(transition.release_id, "UPM20260801")
+        self.assertEqual(transition.specials_root, "UPM-2026-08-01")
+        self.assertEqual(transition.hd_folder, "UPM-2026-08-01")
+        self.assertEqual(transition.tracklist_token, "20260801")
         self.assertEqual(transition.release_start, "2026-08-01")
         self.assertEqual(transition.release_end, "2026-08-31")
         self.assertEqual(
-            transition.partner_folder_name("NBC"),
-            "Universal Production Music August 2026 Part 2 - NBC",
+            transition.partner_folder_name("SourceAudio"),
+            "Universal Production Music August 2026 Part 2 - SourceAudio",
         )
         self.assertIn("--full-month-content", transition.pinned_cli_args())
 
-        same_month = ReleaseContext.for_date_range("2026-09-01", "2026-09-14")
+        transition_range = ReleaseContext.for_date_range("2026-09-01", "2026-09-11")
+        same_month = ReleaseContext.for_date_range("2026-09-12", "2026-09-25")
         crossing = ReleaseContext.for_date_range("2026-09-29", "2026-10-12")
+        crossing_year = ReleaseContext.for_date_range("2026-12-29", "2027-01-11")
+        self.assertEqual(transition_range.release_id, "UPM20260901")
+        self.assertEqual(transition_range.specials_root, "UPM-2026-09-01")
+        self.assertEqual(transition_range.hd_folder, "UPM-2026-09-01")
         self.assertEqual(
-            same_month.partner_folder_name("NBC"),
-            "Universal Production Music September 1–14 2026 Releases - NBC",
+            transition_range.us_tracklist_csv.name,
+            "UPM-US-20260901-Tracklist.csv",
+        )
+        self.assertEqual(same_month.release_id, "UPM20260912")
+        self.assertEqual(crossing.release_id, "UPM20260929")
+        self.assertEqual(crossing.specials_root, "UPM-2026-09-29")
+        self.assertEqual(
+            transition_range.partner_folder_name("SourceAudio"),
+            "Universal Production Music Sep 1–11 2026 Releases - SourceAudio",
         )
         self.assertEqual(
             crossing.partner_folder_name("Japan NTT DATA"),
-            "Universal Production Music September 29–October 12 2026 Releases - Japan NTT DATA",
+            "Universal Production Music Sep 29–Oct 12 2026 Releases - Japan NTT DATA",
+        )
+        self.assertEqual(
+            crossing_year.partner_folder_name("SynchTank"),
+            "Universal Production Music Dec 29 2026–Jan 11 2027 Releases - SynchTank",
+        )
+        self.assertEqual(
+            transition_range.client_delivery_label,
+            "Sep 1–11 2026 Releases",
+        )
+        self.assertEqual(transition_range.month_display_folder, "September 1–11 2026")
+        self.assertEqual(transition_range.delivery_display_folder, "Sep 1–11 2026")
+        self.assertEqual(
+            transition_range.partner_metadata["synchtank"].name,
+            "UPM Sep 1–11 2026 Metadata.csv",
+        )
+        self.assertEqual(
+            transition_range.album_list_docx.name,
+            "Universal Production Music - Sep 1–11 2026 Album List.docx",
         )
         self.assertEqual(
             crossing.pinned_cli_args(),
             ["--start-date", "2026-09-29", "--end-date", "2026-10-12"],
         )
+        self.assertEqual(
+            transition_range.pinned_cli_args(),
+            ["--start-date", "2026-09-01", "--end-date", "2026-09-11"],
+        )
 
         with self.assertRaisesRegex(ValueError, "exactly 14"):
             ReleaseContext.for_date_range("2026-09-01", "2026-09-15")
 
-    def test_soundmouse_audio_uses_all_three_territories(self) -> None:
-        ctx = ReleaseContext(2026, 6, 1, previous_month=True)
-        jobs = _soundmouse_unisync_jobs(ctx)
-        self.assertEqual(
-            [job["territory"] for job in jobs],
-            ["United States", "Rest of World", "Japan"],
-        )
-        self.assertEqual(len({job["client_path"] for job in jobs}), 1)
-        self.assertTrue(jobs[0]["client_path"].endswith("2026-06-01_to_2026-06-30/MEDIA"))
-        self.assertEqual(jobs[1]["fallback_territory"], "Japan")
+    def test_soundmouse_audio_prioritizes_australia_then_needed_territories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tracklist = self._csv(
+                Path(tmp),
+                "soundmouse.csv",
+                ["Filename", "Territory List"],
+                [
+                    {"Filename": "all.wav", "Territory List": "US UK DE SE OZ"},
+                    {"Filename": "oz.wav", "Territory List": "OZ"},
+                    {"Filename": "us.wav", "Territory List": "US"},
+                    {"Filename": "se.wav", "Territory List": "SE"},
+                ],
+            )
+            territories = _soundmouse_unisync_territories(tracklist)
+            self.assertEqual(territories, ["Australia", "United States", "Sweden"])
+
+            ctx = ReleaseContext(2026, 6, 1, previous_month=True)
+            jobs = _soundmouse_unisync_jobs(
+                ctx, tracklist, territories=territories
+            )
+            self.assertEqual(
+                [job["territory"] for job in jobs], territories
+            )
+            self.assertEqual(len({job["client_path"] for job in jobs}), 1)
+            self.assertTrue(
+                jobs[0]["client_path"].endswith(
+                    "2026-06-01_to_2026-06-30/MEDIA"
+                )
+            )
+            self.assertEqual(jobs[0]["fallback_territory"], "United States")
+            self.assertEqual(jobs[1]["fallback_territory"], "Sweden")
+            self.assertTrue(all(job["zero_progress_retries"] == 0 for job in jobs))
+            # A derived correction CSV is not replaced by a full-card refresh.
+            self.assertNotIn("domo_card_config", jobs[-1])
 
     def test_soundmouse_rows_are_partitioned_by_us_tracklist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -278,7 +341,10 @@ class SoundMouseTests(unittest.TestCase):
                 self.assertEqual(args[0], ["osascript"])
                 self.assertIn(str(xlsx_path), kwargs["input"])
                 self.assertIn("UPM_NATIVE_SAVE_MARKER", kwargs["input"])
-                self.assertIn("save active workbook", kwargs["input"])
+                self.assertIn("open POSIX file", kwargs["input"])
+                self.assertIn("set targetWorkbook to active workbook", kwargs["input"])
+                self.assertIn("name of targetWorkbook", kwargs["input"])
+                self.assertIn("save targetWorkbook", kwargs["input"])
                 with ZipFile(xlsx_path) as package:
                     members = {
                         name: package.read(name) for name in package.namelist()

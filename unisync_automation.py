@@ -50,6 +50,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from config import (
     ReleaseContext,
@@ -94,6 +95,7 @@ _SCREEN_PERM_HINT = (
 )
 
 UNISYNC_APP        = "UniSync"
+UNISYNC_AZURE_CLIENT_ID = "94dedee5-1c3e-4c82-a59a-beb41ee51d80"
 JOB_TIMEOUT        = 21600  # seconds per job (6 hours).  Big catalogs
                             # — especially WAV jobs with thousands of
                             # tracks — can legitimately run for several
@@ -340,6 +342,7 @@ def run_all_unisync_jobs(
     dry_run: bool,
     logger: logging.Logger,
     overwrite: bool = False,
+    allow_domo_refresh: bool = True,
 ) -> dict[str, str]:
     """
     Drive UniSync through all six export jobs sequentially.
@@ -395,6 +398,47 @@ def run_all_unisync_jobs(
         return {job["name"]: STATUS_FAILED for job in ctx.unisync_jobs}
 
     results: dict[str, str] = {}
+    refreshed_cards: set[str] = set()
+    # A job may deliberately route its unresolved rows through a later
+    # territory job (SoundMouse Rest of World -> Japan).  Keep the first
+    # failure provisional until that explicitly configured fallback runs.
+    pending_fallbacks: dict[str, list[str]] = {}
+
+    def _refresh_source(job: dict) -> bool:
+        card_key = job.get("domo_card_key")
+        card_config = job.get("domo_card_config")
+        if not allow_domo_refresh:
+            logger.error(
+                "  Automatic Domo source refresh is disabled for this run."
+            )
+            return False
+        if not card_key and not card_config:
+            logger.error(
+                f"  No Domo card mapping is configured for '{job['name']}'."
+            )
+            return False
+        refresh_key = card_key or f"card:{card_config.get('card_id', '')}"
+        if refresh_key in refreshed_cards:
+            logger.error(
+                f"  Domo card '{refresh_key}' was already refreshed during this "
+                "Step 5 run; refusing to loop the same ETL indefinitely."
+            )
+            return False
+        # The browser page would cover UniSync, but the current pass has
+        # already settled. Close only UniSync's completed SSO tabs before the
+        # private Domo browser is opened, then force a clean UniSync relaunch.
+        _close_unisync_auth_tabs(logger)
+        from domo_exports import (
+            refresh_card_config_source_and_export,
+            refresh_card_source_and_export,
+        )
+
+        refreshed_cards.add(refresh_key)
+        if card_config:
+            return refresh_card_config_source_and_export(
+                ctx, card_config, logger
+            )
+        return refresh_card_source_and_export(ctx, card_key, logger)
 
     for i, job in enumerate(ctx.unisync_jobs):
         logger.info(f"\n{'─' * 52}")
@@ -403,11 +447,52 @@ def run_all_unisync_jobs(
         logger.info(f"  Client: {job['client_path']}")
         logger.info(f"  CSV:    {job['csv']}")
 
-        status = _run_single_job(job, dry_run, logger, overwrite=overwrite)
+        status: str | None = None
+        try:
+            status = _run_single_job(
+                job,
+                dry_run,
+                logger,
+                overwrite=overwrite,
+                source_refresh=_refresh_source,
+            )
+        finally:
+            # A manifest-complete skipped job never launched UniSync and could
+            # not have created an SSO tab. Avoid two unnecessary AppleScript
+            # browser probes on the common restart path.
+            if not dry_run and status != STATUS_SKIPPED:
+                _close_unisync_auth_tabs(logger)
         secure_private_file(Path(UNISYNC_XML_PATH))
         results[job["name"]] = status
 
+        fallback_sources = pending_fallbacks.pop(job.get("territory", ""), [])
+        if fallback_sources and status != STATUS_FAILED:
+            for source_name in fallback_sources:
+                results[source_name] = STATUS_OK
+            logger.info(
+                f"  ✓ {job.get('territory')} fallback resolved "
+                f"{len(fallback_sources)} preceding territory job(s)."
+            )
+
         if status == STATUS_FAILED:
+            fallback = job.get("fallback_territory")
+            remaining_jobs = ctx.unisync_jobs[i + 1:]
+            if fallback and any(
+                candidate.get("territory") == fallback
+                for candidate in remaining_jobs
+            ):
+                # Carry the complete provisional chain forward. For example,
+                # Australia -> United States -> Sweden must allow a successful
+                # Sweden pass to resolve both preceding country attempts.
+                pending_fallbacks.setdefault(fallback, []).extend(
+                    [*fallback_sources, job["name"]]
+                )
+                logger.warning(
+                    f"  '{job['name']}' has unresolved files in "
+                    f"{job.get('territory')}; continuing to its configured "
+                    f"{fallback} fallback before declaring failure."
+                )
+                continue
             logger.error(
                 f"  Job '{job['name']}' FAILED — stopping.\n"
                 f"  Resolve the issue, then re-run with appropriate --skip flags."
@@ -436,6 +521,7 @@ def _run_single_job(
     dry_run: bool,
     logger: logging.Logger,
     overwrite: bool = False,
+    source_refresh: Callable[[dict], bool] | None = None,
 ) -> str:
     """
     Execute one UniSync export job end-to-end.
@@ -557,6 +643,10 @@ def _run_single_job(
         force_setup = False
         ui_failures = 0
         zero_progress_passes = 0
+        zero_progress_limit = int(
+            job.get("zero_progress_retries", UNATTENDED_ZERO_PROGRESS_RETRIES)
+        )
+        source_refresh_attempted = False
 
         while True:
             # In XML-setup mode a relaunch is cheap (~7s) and always yields a
@@ -644,18 +734,78 @@ def _run_single_job(
             _report_not_found(job, missing, ext, logger)
 
             if not SUPERVISED and (
-                zero_progress_passes < UNATTENDED_ZERO_PROGRESS_RETRIES
+                zero_progress_passes < zero_progress_limit
             ):
                 zero_progress_passes += 1
                 logger.warning(
                     f"  ↻ Zero-progress automatic retry "
-                    f"{zero_progress_passes}/{UNATTENDED_ZERO_PROGRESS_RETRIES} "
+                    f"{zero_progress_passes}/{zero_progress_limit} "
                     f"for the remaining {len(missing)} {ext} file(s)."
                 )
                 to_request = missing
                 csv_to_use = _request_csv(to_request, pass_no)
                 force_setup = True
                 continue
+
+            # Bounded retries against the same manifest have now proved that
+            # the source dataset is stale. Refresh the card's owning ETL,
+            # verify the newest Domo History row succeeded, replace this one
+            # export, then recalculate the exact reduced request. This happens
+            # at most once per job and once per card during the Step 5 run.
+            if (
+                not SUPERVISED
+                and source_refresh is not None
+                and not source_refresh_attempted
+            ):
+                source_refresh_attempted = True
+                logger.warning(
+                    f"  ↻ Repeated zero-progress for '{job['name']}'. "
+                    "Refreshing its source Domo ETL/card before retrying."
+                )
+                if source_refresh(job):
+                    refreshed = _expected_output_filenames(
+                        job["csv"], ext, logger
+                    )
+                    if not refreshed:
+                        logger.error(
+                            "  Refreshed Domo export contains no usable "
+                            "filenames; refusing to continue."
+                        )
+                    else:
+                        old_total = total
+                        expected = refreshed
+                        total = len(expected)
+                        present = _present_filenames(
+                            job["client_path"], expected
+                        )
+                        missing = expected - present
+                        logger.info(
+                            f"     Refreshed manifest: {old_total} → {total} "
+                            f"expected; destination has {len(present)}/{total}."
+                        )
+                        if not missing:
+                            logger.info(
+                                f"  ✓  Job complete after Domo refresh: "
+                                f"{job['name']} ({total}/{total} delivered)."
+                            )
+                            return STATUS_OK
+                        logger.info(
+                            f"     Retrying only {len(missing)} new/missing "
+                            "file(s) from the refreshed export."
+                        )
+                        to_request = missing
+                        csv_to_use = _request_csv(to_request, pass_no)
+                        prev_missing_count = len(missing)
+                        # The refreshed manifest gets one definitive request.
+                        # If that makes zero progress, another retry of the
+                        # same just-refreshed data cannot add information.
+                        zero_progress_passes = zero_progress_limit
+                        force_setup = True
+                        continue
+                logger.error(
+                    "  Automatic Domo source refresh did not complete; "
+                    "the UniSync job remains failed."
+                )
 
             # Supervised: pause so you can refresh / re-export the tracklist,
             # then press Enter.  We re-read it, diff against the destination, and
@@ -1210,6 +1360,80 @@ def _unisync_is_running() -> bool:
     return r.returncode == 0 and bool(r.stdout.strip())
 
 
+def _close_unisync_auth_tabs(logger: logging.Logger) -> int:
+    """Close completed UniSync Microsoft SSO tabs in Chromium browsers.
+
+    UniSync launches the system browser during token renewal but leaves the
+    final ``Working...`` page behind.  Match all three stable signals—the exact
+    title, Microsoft login host, and UniSync's public Azure client ID—so this
+    can never close unrelated Microsoft, Domo, Monday, or personal tabs.
+    Failure is logged but does not invalidate an otherwise-correct audio job.
+    """
+    app_names = ("Google Chrome", "Google Chrome for Testing")
+    closed_total = 0
+    for app_name in app_names:
+        script = f'''
+tell application "System Events"
+    set appIsRunning to exists process "{app_name}"
+end tell
+if appIsRunning then
+    tell application "{app_name}"
+        set closedCount to 0
+        repeat with browserWindow in windows
+            repeat with tabIndex from (count tabs of browserWindow) to 1 by -1
+                try
+                    set browserTab to tab tabIndex of browserWindow
+                    set tabTitle to title of browserTab
+                    set tabURL to URL of browserTab
+                    if tabTitle is "Working..." and tabURL contains "login.microsoftonline.com/" and tabURL contains "client_id={UNISYNC_AZURE_CLIENT_ID}" then
+                        close browserTab
+                        set closedCount to closedCount + 1
+                    end if
+                end try
+            end repeat
+        end repeat
+        return closedCount
+    end tell
+end if
+return 0
+'''
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            # An uninstalled alternate Chrome build is harmless; permission or
+            # scripting failures on a running browser are worth surfacing.
+            if _process_named_is_running(app_name):
+                logger.warning(
+                    f"  Could not close completed UniSync authentication tabs "
+                    f"in {app_name}: {result.stderr.strip()}"
+                )
+            continue
+        try:
+            closed_total += int(result.stdout.strip() or "0")
+        except ValueError:
+            logger.debug(
+                f"  Unexpected tab-cleanup response from {app_name}: "
+                f"{result.stdout.strip()!r}"
+            )
+    if closed_total:
+        logger.info(
+            f"  Closed {closed_total} completed UniSync authentication "
+            f"tab(s)."
+        )
+    return closed_total
+
+
+def _process_named_is_running(process_name: str) -> bool:
+    result = subprocess.run(
+        ["pgrep", "-x", process_name], capture_output=True, text=True
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def _quit_unisync(logger: logging.Logger, timeout: float = 20.0) -> None:
     """
     Quit UniSync gracefully and wait for the process to exit.  Between jobs
@@ -1608,11 +1832,11 @@ def _report_not_found(
     job: dict, missing: set[str], ext: str, logger: logging.Logger
 ) -> None:
     """
-    Report tracks UniSync did not deliver.  Now that the download bug is fixed,
-    files that never arrive are 'not found' in the UPM source — typically
-    de-activated or un-published since the export CSV was made.  We surface the
-    workAudioIds (matching UniSync's on-screen "Not found (N): …") so the user
-    knows to refresh the export and re-run if they should still exist.
+    Report tracks UniSync did not deliver.  Repeated zero-progress retries are
+    treated first as a stale Domo-source signal: refresh the source ETL/card,
+    export a new CSV, and only then retry the UniSync job.  We surface the
+    workAudioIds (matching UniSync's on-screen "Not found (N): …") so the
+    refreshed dataset can be checked precisely.
     """
     n = len(missing)
     ids = _filenames_to_workaudioids(job["csv"], ext, missing, logger)
@@ -1636,10 +1860,10 @@ def _report_not_found(
         shown = ", ".join(ids[:60]) + (f"  (+{len(ids) - 60} more)" if len(ids) > 60 else "")
         logger.warning(f"     workAudioIds: {shown}")
     logger.warning(
-        "     This usually means they were de-activated or un-published in UPM\n"
-        "     since the export was made.  Refresh the export CSV (Step 1 Domo)\n"
-        "     and re-run Step 5. The unattended job will fail with an exact\n"
-        "     missing-file report if bounded retries cannot deliver them."
+        "     Repeated zero-progress NOT FOUND results mean the source Domo\n"
+        "     card/ETL must be refreshed.  After bounded retries, unattended\n"
+        "     Step 5 will refresh the mapped ETL/card once, replace this export,\n"
+        "     and retry the recalculated manifest."
     )
 
 

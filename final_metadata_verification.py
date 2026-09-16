@@ -10,8 +10,8 @@ Audio source per partner:
     NTT Data, SourceAudio US/Ex-US) are checked against that sheet.
   • Partners WITHOUT a sheet (Discovery, ESPN) are checked against the original
     US tracklist.
-  • The post-copy STAGING trees (SME WAV 48K NBC, SME WAV ExUS) are checked for
-    BOTH media and covers — against the US / Ex-US tracklist respectively.
+  • The post-copy SME WAV ExUS STAGING tree is checked for both media and
+    covers against the Ex-US tracklist.
 
 Cover checks (where covers are expected):
   • Netmix      — covers live alongside the audio (WAV w COVERS layout).
@@ -22,8 +22,6 @@ Cover checks (where covers are expected):
   nested cover layouts both pass.
 
 Deliberate exclusions:
-  • NBC final package — built separately and its files are renamed afterward, so
-    they intentionally won't match the original metadata.
   • Cover art in 1-ORIGINAL/Covers and WAV w COVERS is verified earlier, in
     Step 9 (verification.py); it is NOT re-checked here.
 
@@ -157,8 +155,6 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
         Check("ESPN",            us, pd["espn_wav"]),
 
         # ---- Post-copy STAGING trees ----
-        # NBC staging is a plain WAV folder copy — media only, no covers.
-        Check("SME WAV 48K NBC", us,   pd["nbc_staging_media"]),
         # Ex-US staging gets covers distributed into each album folder (Step 10).
         Check("SME WAV ExUS",    exus, pd["exus_staging_media"],
               check_covers=True, cover_source=exus, cover_root=pd["exus_staging_media"],
@@ -383,8 +379,7 @@ def verify_final_packaging_metadata(
 ) -> bool:
     logger.info("  Final packaging verification (audio + covers vs track lists).")
     logger.info(
-        "  (NBC excluded — built separately & renamed.  1-ORIGINAL/Covers and "
-        "WAV w COVERS covers are checked in Step 9.)"
+        "  (1-ORIGINAL/Covers and WAV w COVERS covers are checked in Step 9.)"
     )
     _read_df.cache_clear()   # fresh reads each run; dedups within the run
 
@@ -530,7 +525,7 @@ def _run_cli(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         description=(
             "Step 15 — verify 3-FINAL PACKAGING (and SME staging) deliverables: "
-            "audio vs sheet/tracklist, plus covers where expected (NBC excluded)."
+            "audio vs sheet/tracklist, plus covers where expected."
         )
     )
     p.add_argument("--year",  type=int)

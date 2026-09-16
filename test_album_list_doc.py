@@ -21,7 +21,7 @@ class AlbumListDocumentTests(unittest.TestCase):
         changed = _replace_legacy_release_label(document, ctx)
 
         self.assertEqual(changed, 1)
-        self.assertEqual(document.paragraphs[0].text, "July 2026 (Full) Release")
+        self.assertEqual(document.paragraphs[0].text, "August 2026 (Part 1) Release")
         self.assertEqual(
             table.cell(0, 0).text,
             "An Album Named July 2026 Release",

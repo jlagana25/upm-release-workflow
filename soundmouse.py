@@ -24,6 +24,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from config import (
@@ -354,18 +355,20 @@ tell application "Microsoft Excel"
     set previousAlerts to display alerts
     set display alerts to false
     try
-        open workbook workbook file name {workbook_path}
+        open POSIX file {workbook_path}
         delay 2
-        if (name of active workbook) is not {workbook_name} then
+        set targetWorkbook to active workbook
+        if (name of targetWorkbook) is not {workbook_name} then
             error "Excel opened an unexpected workbook"
         end if
-        set originalHeader to value of range "A1" of active sheet
-        set value of range "A1" of active sheet to "UPM_NATIVE_SAVE_MARKER"
-        set value of range "A1" of active sheet to originalHeader
-        clear formats (used range of active sheet)
-        save active workbook
+        set targetSheet to worksheet 1 of targetWorkbook
+        set originalHeader to value of range "A1" of targetSheet
+        set value of range "A1" of targetSheet to "UPM_NATIVE_SAVE_MARKER"
+        set value of range "A1" of targetSheet to originalHeader
+        clear formats (used range of targetSheet)
+        save targetWorkbook
         delay 1
-        close active workbook saving no
+        close targetWorkbook saving no
         set display alerts to previousAlerts
     on error errorMessage number errorNumber
         try
@@ -649,7 +652,7 @@ def create_soundmouse_directories(
 
 def _territory_set(value: str) -> frozenset[str]:
     tokens = set(re.findall(r"[A-Z]+", value.upper()))
-    return frozenset(tokens & {"US", "UK", "DE", "SE", "OZ"})
+    return frozenset(tokens & {"US", "UK", "DE", "SE", "OZ", "NZ"})
 
 
 def metadata_codes_from_bucket(path: Path) -> list[str]:
@@ -688,6 +691,9 @@ def _domo_configs(
                 "page_id": SOUNDMOUSE_DOMO_PAGE_ID,
                 "description": "SoundMouse Tracklist",
                 "output_fn": lambda _ctx: ctx.soundmouse_tracklist_csv,
+                # DataFlow 4330 owns the cards, but its catalog input is
+                # produced by DataFlow 3691. Refresh the source first.
+                "upstream_dataflow_ids": ("3691",),
             },
             {
                 "key": "soundmouse_bucket",
@@ -939,29 +945,91 @@ def _write_soundmouse_request_csv(
         writer.writerows(rows)
 
 
+_UNISYNC_TERRITORIES: tuple[tuple[str, str], ...] = (
+    ("OZ", "Australia"),
+    ("US", "United States"),
+    ("UK", "United Kingdom"),
+    ("DE", "Germany"),
+    ("SE", "Sweden"),
+    ("NZ", "New Zealand"),
+)
+
+
+def _soundmouse_unisync_territories(tracklist_csv: Path) -> list[str]:
+    """Choose country passes that cover every SoundMouse territory list.
+
+    Australia is intentionally first and covers every row containing ``OZ``.
+    Remaining rows are covered greedily using their actual territory codes, so
+    a future SE-only or UK-only bucket adds that country instead of incorrectly
+    treating Rest of World or Japan as a SoundMouse territory.
+    """
+    fields, rows = _read_csv(tracklist_csv)
+    territory_col = _find_column(
+        fields, ("Territory List", "TerritoryList", "Territories", "Territory")
+    )
+    if not territory_col:
+        raise ValueError("SoundMouse tracklist needs a Territory List column")
+
+    all_codes = {code for code, _name in _UNISYNC_TERRITORIES}
+    row_territories: list[frozenset[str]] = []
+    for row_number, row in enumerate(rows, start=2):
+        raw = str(row.get(territory_col, "") or "").strip()
+        territories = (
+            frozenset(all_codes) if raw.upper() == "ALL" else _territory_set(raw)
+        )
+        if not territories:
+            raise ValueError(
+                f"SoundMouse row {row_number} has no recognized territory: {raw!r}"
+            )
+        row_territories.append(territories)
+
+    remaining = list(row_territories)
+    chosen_codes: list[str] = []
+    preference = [code for code, _name in _UNISYNC_TERRITORIES]
+    while remaining:
+        counts = {
+            code: sum(code in territories for territories in remaining)
+            for code in preference
+        }
+        best = max(preference, key=lambda code: (counts[code], -preference.index(code)))
+        if counts[best] == 0:
+            raise ValueError("SoundMouse territory lists could not be fully routed")
+        chosen_codes.append(best)
+        remaining = [territories for territories in remaining if best not in territories]
+
+    names = dict(_UNISYNC_TERRITORIES)
+    return [names[code] for code in chosen_codes]
+
+
 def _soundmouse_unisync_jobs(
     ctx: ReleaseContext,
-    us_request_csv: Path | None = None,
-    exus_request_csv: Path | None = None,
     all_request_csv: Path | None = None,
     destination_dir: Path | None = None,
-) -> list[dict[str, str]]:
-    """Build the additive territory jobs used by the SoundMouse delivery."""
+    territories: list[str] | None = None,
+) -> list[dict]:
+    """Build additive country jobs selected from ``Territory List``."""
+    request_csv = all_request_csv or ctx.soundmouse_tracklist_csv
+    selected = territories or _soundmouse_unisync_territories(Path(request_csv))
     jobs = [
         {
-            "name": f"SoundMouse {label} WAV ({ctx.soundmouse_activation_range})",
+            "name": f"SoundMouse {territory} WAV ({ctx.soundmouse_activation_range})",
             "territory": territory,
             "cache_path": str(UPM_CACHE_WAV),
             "client_path": str(destination_dir or (ctx.soundmouse_release_dir / "MEDIA")),
-            "csv": str(request_csv or all_request_csv or ctx.soundmouse_tracklist_csv),
+            # Every pass reads the authoritative full SoundMouse request. The
+            # shared destination manifest means later countries automatically
+            # request only rows not supplied by earlier countries.
+            "csv": str(request_csv),
         }
-        for label, territory, request_csv in (
-            ("US", "United States", us_request_csv),
-            ("Ex-US", "Rest of World", exus_request_csv),
-            ("Japan", "Japan", None),
-        )
+        for territory in selected
     ]
-    jobs[1]["fallback_territory"] = "Japan"
+    for current, following in zip(jobs, jobs[1:]):
+        current["fallback_territory"] = following["territory"]
+        current["zero_progress_retries"] = 0
+    if jobs:
+        jobs[-1]["zero_progress_retries"] = 0
+        if Path(request_csv) == Path(ctx.soundmouse_tracklist_csv):
+            jobs[-1]["domo_card_config"] = _domo_configs(ctx)[0]
     return jobs
 
 
@@ -974,17 +1042,11 @@ def run_soundmouse_unisync(
     destination_dir: Path | None = None,
     existing_media_roots: tuple[Path, ...] = (),
 ) -> bool:
-    """Run all three WAV territories into the workflow-period directory.
-
-    SoundMouse's selected metadata workbooks can reference US, Rest-of-World,
-    and Japan-only tracks.  A United States-only pass silently tops out at the
-    US delivery count, so all territories must contribute to the same MEDIA
-    folder.  UniSync's skip-existing behavior makes the later passes additive.
-    """
+    """Run the minimum country passes required by ``Territory List``."""
     if dry_run:
         logger.info(
-            "  [DRY RUN] Would route SoundMouse WAVs through US, "
-            f"Rest of World, then Japan fallback → "
+            "  [DRY RUN] Would route SoundMouse WAVs by Territory List, "
+            f"prioritizing Australia for OZ rows → "
             f"{destination_dir or (ctx.soundmouse_release_dir / 'MEDIA')}"
         )
         return True
@@ -1014,40 +1076,45 @@ def run_soundmouse_unisync(
                 logger.info(
                     f"  SoundMouse uploaded correction: {len(rows)} new audio row(s)."
                 )
-            fields, us_rows, exus_rows = _partition_soundmouse_rows(
-                request_csv, ctx.us_tracklist_csv
-            )
-            us_csv = request_dir / "SoundMouse-US.csv"
-            exus_csv = request_dir / "SoundMouse-ExUS.csv"
-            _write_soundmouse_request_csv(us_csv, fields, us_rows)
-            _write_soundmouse_request_csv(exus_csv, fields, exus_rows)
+            territories = _soundmouse_unisync_territories(request_csv)
             logger.info(
-                f"  SoundMouse territory routing: {len(us_rows)} US, "
-                f"{len(exus_rows)} Rest-of-World/Japan fallback row(s)."
+                "  SoundMouse Territory List routing: "
+                + " → ".join(territories)
             )
             jobs = _soundmouse_unisync_jobs(
                 ctx,
-                us_csv,
-                exus_csv,
                 request_csv,
                 destination_dir,
+                territories,
             )
         except (OSError, ValueError) as exc:
-            logger.warning(
-                f"  Could not partition SoundMouse requests ({exc}); "
-                "falling back to full-list territory passes."
-            )
-            jobs = _soundmouse_unisync_jobs(
-                ctx,
-                all_request_csv=request_csv,
-                destination_dir=destination_dir,
-            )
+            logger.error(f"  SoundMouse territory routing failed: {exc}")
+            return False
 
         class _Jobs:
-            unisync_jobs = jobs
+            """Expose SoundMouse jobs while retaining the release context.
+
+            Domo recovery needs the same date/path attributes as the original
+            ``ReleaseContext``.  Delegation keeps this lightweight adapter from
+            dropping those attributes when a UniSync job refreshes its card.
+            """
+
+            def __init__(self, release_ctx: ReleaseContext) -> None:
+                self.unisync_jobs = jobs
+                self._release_ctx = release_ctx
+
+            def __getattr__(self, name: str):
+                return getattr(self._release_ctx, name)
 
         results = run_all_unisync_jobs(
-            _Jobs(), dry_run=dry_run, logger=logger, overwrite=overwrite
+            _Jobs(ctx),
+            dry_run=dry_run,
+            logger=logger,
+            overwrite=overwrite,
+            # Country passes form an explicit fallback chain. If the final
+            # required country also stalls, the canonical tracklist job can
+            # safely refresh/re-export its owning Domo card once.
+            allow_domo_refresh=True,
         )
     return bool(results) and not any(v == STATUS_FAILED for v in results.values())
 
@@ -1230,6 +1297,7 @@ def run_soundmouse_step(
     logger: logging.Logger,
     *,
     reuse_domo_seeds: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> bool:
     logger.info(f"  Tracklist: {ctx.soundmouse_tracklist_csv}")
     logger.info(f"  Release base: {SOUNDMOUSE_BASE}")
@@ -1360,6 +1428,8 @@ def run_soundmouse_step(
             existing_media_roots=(root / "MEDIA",) if correction_package else (),
         ):
             return False
+        if progress_callback:
+            progress_callback("16 SoundMouse media")
         cover_destination = (
             correction_root
             if correction_package and has_delta
@@ -1382,6 +1452,8 @@ def run_soundmouse_step(
             if correction_package and has_delta and cover_additions else (),
         ):
             return False
+        if progress_callback:
+            progress_callback("16 SoundMouse covers")
         try:
             metadata_paths = install_soundmouse_metadata(
                 source_workbooks,
@@ -1403,6 +1475,8 @@ def run_soundmouse_step(
         except (OSError, ValueError) as exc:
             logger.error(f"  ✗ Could not install SoundMouse metadata: {exc}")
             return False
+        if progress_callback:
+            progress_callback("16 SoundMouse metadata")
 
     prepared_audio = set().union(
         _disk_file_keys(root / "MEDIA"),

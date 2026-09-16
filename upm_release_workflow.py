@@ -8,11 +8,12 @@ Usage:
     python upm_release_workflow.py --year 2026 --month 5 --part 1
     python upm_release_workflow.py --year 2026 --month 5 --part 2 --dry-run
     python upm_release_workflow.py --year 2026 --month 5 --part 1 \\
-        --skip-domo --skip-unisync --skip-soundminer
+        --skip-domo --skip-unisync --skip-sourceaudio
 
 Optional flags:
     --dry-run                     Print what would happen; no writes or copies
     --overwrite                   Replace existing destination folders/files
+    --copy-workers N              Step 10 concurrent copies per destination
     --skip-domo                   Skip Step 1 (Domo exports)
     --skip-folder-setup           Skip Steps 2 & 3 (folder creation)
     --skip-album-list-doc         Skip Step 4 (DOCX/PDF album list)
@@ -21,12 +22,11 @@ Optional flags:
     --skip-verify                 Skip Step 9 (file verification)
     --skip-final-packaging        Skip Step 10 (copy originals to finals)
     --skip-sourceaudio            Skip Step 11 (SourceAudio AIFF build)
-    --skip-soundminer             Skip Step 12 (Soundminer NBC workflow)
-    --skip-nbc-mirror             Step 12: skip the embed+mirror, resume at 12.7
     --skip-non-maintrack-cleanup  Skip Step 13 (non-maintrack removal)
-    --skip-rename                 Skip Step 14 (NBC filename rename)
     --skip-final-metadata-check   Skip Step 15 (final metadata cross-check)
     --skip-soundmouse             Skip Step 16 (SoundMouse delivery)
+    --skip-bmat                   Skip Step 17 (BMAT custom-content delivery)
+    --skip-monday                 Skip Step 18 (Monday status synchronization)
     --start-at STEP / --only STEP Resume at / run only one step (see step list)
 """
 
@@ -109,15 +109,8 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
             or (
                 app_name == "Soundminer v5Pro"
                 and is_soundminer_machine()
-                and (
-                    _active("skip_sourceaudio")
-                    or (
-                        _active("skip_soundminer")
-                        and not bool(getattr(args, "skip_nbc_mirror", False))
-                    )
-                )
+                and _active("skip_sourceaudio")
             )
-            or (app_name == "ffmpeg" and _active("skip_soundminer"))
         )
         symbol = "✓" if found else ("✗" if required else "!")
         level_fn = logger.info if found else (logger.error if required else logger.warning)
@@ -151,11 +144,12 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
     # hard failure only when at least one of its consuming steps is active.
     _REQUIRED_IMPORTS = {
         "pandas":     ("pandas", "CSV/XLSX tracklists & metadata", ("skip_domo", "skip_covers", "skip_verify", "skip_final_metadata_check")),
-        "openpyxl":   ("openpyxl", "XLSX exports and ingest forms", ("skip_domo", "skip_final_packaging", "skip_soundmouse")),
+        "openpyxl":   ("openpyxl", "XLSX exports and ingest forms", ("skip_domo", "skip_final_packaging", "skip_soundmouse", "skip_bmat")),
         "docx":       ("python-docx", "DOCX album list/templates", ("skip_folder_setup", "skip_album_list_doc")),
         "requests":   ("requests", "cover-art download", ("skip_covers", "skip_soundmouse")),
         "numpy":      ("numpy", "UniSync screen matching", ("skip_unisync",)),
-        "playwright": ("playwright", "Domo browser automation", ("skip_domo", "skip_soundmouse")),
+        "playwright": ("playwright", "Domo and DAMS browser automation", ("skip_domo", "skip_soundmouse", "skip_bmat")),
+        "paramiko":   ("paramiko", "BMAT SFTP upload", ("skip_bmat",)),
     }
     missing_deps = []
     for import_name, (pip_name, why, skip_attrs) in _REQUIRED_IMPORTS.items():
@@ -184,8 +178,8 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
     try:
         secure_auth_permissions()
         private_auth = auth_status()
-        # Step 16 also performs Domo exports even when Step 1 was selected out.
-        if _active("skip_domo") or _active("skip_soundmouse"):
+        # Steps 16 and 17 own Domo exports even when Step 1 was selected out.
+        if _active("skip_domo") or _active("skip_soundmouse") or _active("skip_bmat"):
             domo_state = private_auth["domo"]
             if (
                 domo_state["state"] == "configured"
@@ -208,6 +202,34 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
                 else:
                     logger.error(message)
                     ok = False
+        if _active("skip_bmat"):
+            dams_state = private_auth["dams"]
+            sftp_state = private_auth["bmat_sftp"]
+            dams_ok = (
+                dams_state["state"] == "configured"
+                and dams_state["private_permissions"]
+            )
+            if dams_ok:
+                logger.info("  ✓  DAMS private UMG SSO session configured")
+            else:
+                message = (
+                    "  ✗  DAMS is not enrolled for this macOS user. Run outside "
+                    "the workflow: python3 auth_manager.py --setup dams"
+                )
+                (logger.warning if bool(getattr(args, "dry_run", False)) else logger.error)(message)
+                if not bool(getattr(args, "dry_run", False)):
+                    ok = False
+            if sftp_state["state"] == "configured":
+                logger.info("  ✓  BMAT SFTP credentials configured in this user's Keychain")
+            else:
+                message = (
+                    "  ✗  BMAT SFTP credentials are missing from this user's "
+                    "Keychain. Run outside the workflow: python3 auth_manager.py "
+                    "--enroll-bmat-keychain"
+                )
+                (logger.warning if bool(getattr(args, "dry_run", False)) else logger.error)(message)
+                if not bool(getattr(args, "dry_run", False)):
+                    ok = False
         if _active("skip_unisync"):
             unisync_state = private_auth["unisync"]
             if unisync_state["state"] == "configured" and unisync_state["private_permissions"]:
@@ -222,15 +244,26 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
                     "UniSync, then rerun the workflow."
                 )
                 ok = False
+        if _active("skip_monday"):
+            monday_state = private_auth["monday"]
+            if monday_state["state"] == "configured":
+                logger.info("  ✓  Monday API token configured in this user's Keychain")
+            else:
+                message = (
+                    "  ✗  Monday API token is not enrolled for this macOS user. "
+                    "Run: python3 auth_manager.py --enroll-monday-keychain"
+                )
+                if bool(getattr(args, "dry_run", False)):
+                    logger.warning(message)
+                else:
+                    logger.error(message)
+                    ok = False
     except OSError as exc:
         logger.error(f"  ✗  Could not secure per-user authentication state: {exc}")
         ok = False
 
     # -- HDF1 login-session agent --------------------------------------------
-    needs_soundminer = _active("skip_sourceaudio") or (
-        _active("skip_soundminer")
-        and not bool(getattr(args, "skip_nbc_mirror", False))
-    )
+    needs_soundminer = _active("skip_sourceaudio")
     use_agent = (
         needs_soundminer
         and not is_soundminer_machine()
@@ -341,14 +374,36 @@ class StepResults:
         return self._items.items()
 
 
+def _run_monday_checkpoint(ctx, args, results, logger, milestone: str) -> bool:
+    """Synchronize truthful partial progress without consulting old reports."""
+    if args.skip_monday:
+        return True
+    logger.info(f"  ↻ Monday live-progress checkpoint: {milestone}")
+    from monday_sync import run_monday_sync
+    ok = run_monday_sync(
+        ctx,
+        results,
+        dry_run=args.dry_run,
+        logger=logger,
+        batch_override=args.monday_batch,
+        include_history=False,
+    )
+    if not ok:
+        logger.warning(
+            "  ⚠ Monday live-progress checkpoint failed; the workflow will "
+            "continue and Step 18 will retry the final reconciliation."
+        )
+    return ok
+
+
 def _soundminer_handoff(
     ctx, args, logger, remote_cfg: dict,
     *,
-    step_no:     int            = 12,
+    step_no:     int            = 11,
     sm_cmd:      "str | None"   = None,
     dests:       "list | None"  = None,
-    output_exts: tuple          = ("wav",),
-    what:        str            = "the NBC embed + mirror",
+    output_exts: tuple          = ("aif", "aiff"),
+    what:        str            = "the SourceAudio scan + AIFF mirror",
 ) -> bool:
     """
     Soundminer hand-off: Soundminer runs on a separate, managed Mac that can't
@@ -356,11 +411,7 @@ def _soundminer_handoff(
     the operator to complete it and verify the expected output actually
     appeared before returning success.
 
-    Generic over both Soundminer-driven steps:
-      • Step 12 (NBC):         WAV output under nbc_wav_music
-      • Step 11 (SourceAudio): AIFF output under the two SourceAudio Music dirs
-
-    Defaults reproduce the NBC (Step 12) behaviour.  In --dry-run, just
+    This is the manual fallback for Step 11 SourceAudio. In --dry-run, just
     describe the hand-off and return True.
     """
     host = remote_cfg.get("host", "the Soundminer Mac")
@@ -371,16 +422,16 @@ def _soundminer_handoff(
         remote_cfg.get("repo_path", "<repo>/files"),
     )
     if dests is None:
-        dests = [ctx.partner_dirs["nbc_wav_music"]]
+        dests = [
+            ctx.partner_dirs["sourceaudio_music"],
+            ctx.partner_dirs["sourceaudio_exus_music"],
+        ]
     # Build the exact command for the operator to run on the Soundminer Mac.
     # pinned_cli_args() preserves a resolved Full/Part context regardless of
     # what date the hand-off command is eventually run.
     if sm_cmd is None:
         pinned_args = " ".join(ctx.pinned_cli_args())
-        sm_cmd = (
-            f"python3 soundminer.py --nbc "
-            f"{pinned_args}"
-        )
+        sm_cmd = f"python3 soundminer.py --sourceaudio {pinned_args}"
 
     logger.info("")
     logger.info(f"  ┌─ MANUAL STEP {step_no} — run on the Soundminer Mac ─────────────")
@@ -523,12 +574,12 @@ def _render_final_summary(
         ("Final packaging",        _status_label(results.status("10 Final packaging"))),
         ("SoundExchange forms",    _status_label(results.status("10 SoundExchange forms"))),
         ("SourceAudio",            _status_label(results.status("11 SourceAudio"))),
-        ("Soundminer",             _status_label(results.status("12 Soundminer"))),
-        ("NBC MP3 conversion",     _status_label(results.status("12 NBC WAV→MP3"))),
         ("Non-maintrack cleanup",  _status_label(results.status("13 Non-maintrack cleanup"))),
-        ("NBC filename rename",    _status_label(results.status("14 NBC rename"))),
         ("Final metadata check",   _status_label(results.status("15 Final metadata check"))),
         ("SoundMouse",             _status_label(results.status("16 SoundMouse"))),
+        ("BMAT",                   _status_label(results.status("17 BMAT"))),
+        ("Monday source preflight", _status_label(results.status("Monday source preflight"))),
+        ("Monday board",           _status_label(results.status("18 Monday sync"))),
         ("SoundMouse missing report", str(ctx.soundmouse_validation_report)),
         ("Log file",               str(log_path)),
         ("Structured report",      str(report_path)),
@@ -600,8 +651,8 @@ def run_workflow(args: argparse.Namespace) -> int:
         REMOTE_SOUNDMINER_ENABLED,
         SOUNDMINER_AGENT_ENABLED,
     )
-    if args.skip_soundminer:
-        _sm_mode = "skipped (--skip-soundminer)"
+    if args.skip_sourceaudio:
+        _sm_mode = "skipped (--skip-sourceaudio)"
     elif (
         SOUNDMINER_AGENT_ENABLED
         and not is_soundminer_machine()
@@ -613,10 +664,10 @@ def run_workflow(args: argparse.Namespace) -> int:
     elif is_soundminer_machine():
         _sm_mode = "inline (this is the Soundminer machine)"
     else:
-        _sm_mode = "hand-off (run Step 12 on the Soundminer machine)"
+        _sm_mode = "hand-off (run Step 11 on the Soundminer machine)"
     logger.info(
         f"\n  Machine:        {machine_role()}"
-        f"\n  Step 12 mode:   {_sm_mode}"
+        f"\n  Step 11 mode:   {_sm_mode}"
     )
     logger.info(
         f"\n  Flags:\n"
@@ -640,6 +691,30 @@ def run_workflow(args: argparse.Namespace) -> int:
         return 1
     results.set("preflight", STATUS_COMPLETED)
 
+    # The compact-batch Monday automation must exist before any release work
+    # begins. Its Domo control-card export, source-board load, Batch Master
+    # trigger, and destination verification all use the APIs/owned sessions.
+    if args.skip_monday:
+        results["Monday source preflight"] = _STEP_RESULT_SKIPPED
+    else:
+        log_section(logger, "Monday Source-Board Preflight")
+        from monday_sync import run_monday_source_preflight
+        monday_source_ok = run_monday_source_preflight(
+            ctx, dry_run=args.dry_run, logger=logger
+        )
+        results["Monday source preflight"] = (
+            _ok(args.dry_run) if monday_source_ok else _STEP_RESULT_FAILED
+        )
+        if not monday_source_ok:
+            logger.error(
+                "\n  ✗ Monday source-board preflight failed — halting before "
+                "the release workflow changed any delivery content."
+            )
+            _render_final_summary(
+                ctx, args, results, log_path, logger, run_started_at
+            )
+            return 1
+
     # ---- Execute steps (guarded) ----------------------------------------
     # Any unhandled exception in a step is converted into a clean, recorded
     # failure + final summary rather than a raw traceback, so the run stays
@@ -647,7 +722,7 @@ def run_workflow(args: argparse.Namespace) -> int:
     try:
             # NOTE ON ORDER: Folder Setup (Steps 2 & 3) executes BEFORE Domo
             # (Step 1), even though Domo is numbered first.  Three of the Domo
-            # cards (NBC, Japan, Tunesat metadata) write their CSVs INTO the
+            # cards (Japan and Tunesat metadata) write their CSVs INTO the
             # Specials release tree, so that tree — built from the baseline by
             # Step 2 — must exist first.  Building the baseline first means
             # Domo drops its CSVs into the correct, already-named folders
@@ -680,19 +755,26 @@ def run_workflow(args: argparse.Namespace) -> int:
             log_section(logger, "Step 1 — Domo Exports")
             if args.skip_domo:
                 log_step_skipped(logger, 1, "Domo Exports")
-                # Still validate that the files exist if we're skipping
-                from domo_exports import verify_exports_exist
-                checks = verify_exports_exist(ctx, logger)
-                missing = [k for k, v in checks.items() if not v]
-                if missing:
-                    domo_failed = True
-                    logger.error(
-                        f"  Some expected CSV files are missing: {missing}\n"
-                        f"  Final delivery steps will be blocked."
-                    )
-                    results["1 Domo exports"] = _STEP_RESULT_FAILED
-                else:
+                # Independent Steps 16–18 do not consume the standard Step 1
+                # export set.  An exact-only run must not report an unrelated
+                # Domo failure merely because a future release tree is absent.
+                verify_skipped_exports = getattr(args, "only", None) not in {"16", "17", "18"}
+                if not verify_skipped_exports:
                     results["1 Domo exports"] = _STEP_RESULT_SKIPPED
+                # Still validate that the files exist if we're skipping
+                if verify_skipped_exports:
+                    from domo_exports import verify_exports_exist
+                    checks = verify_exports_exist(ctx, logger)
+                    missing = [k for k, v in checks.items() if not v]
+                    if missing:
+                        domo_failed = True
+                        logger.error(
+                            f"  Some expected CSV files are missing: {missing}\n"
+                            f"  Final delivery steps will be blocked."
+                        )
+                        results["1 Domo exports"] = _STEP_RESULT_FAILED
+                    else:
+                        results["1 Domo exports"] = _STEP_RESULT_SKIPPED
             else:
                 log_step_start(logger, 1, "Domo Exports")
                 from domo_exports import run_domo_exports
@@ -741,7 +823,14 @@ def run_workflow(args: argparse.Namespace) -> int:
                 set_supervised(getattr(args, "unisync_supervised", False))
                 set_xml_setup(getattr(args, "unisync_xml_setup", True))
                 job_results = run_all_unisync_jobs(
-                    ctx, args.dry_run, logger, overwrite=args.overwrite
+                    ctx,
+                    args.dry_run,
+                    logger,
+                    overwrite=args.overwrite,
+                    # --skip-domo is an explicit promise not to open Domo.
+                    # Otherwise Step 5 may refresh one affected card's owning
+                    # ETL after bounded zero-progress retries.
+                    allow_domo_refresh=not args.skip_domo,
                 )
                 for job_name, status in job_results.items():
                     logger.info(f"  UniSync {job_name}: {status}")
@@ -894,7 +983,11 @@ def run_workflow(args: argparse.Namespace) -> int:
                 log_step_start(logger, 10, "Copy Originals to Finals")
                 from final_packaging import copy_originals_to_finals
                 ok10 = copy_originals_to_finals(
-                    ctx, args.dry_run, logger, overwrite=args.overwrite
+                    ctx,
+                    args.dry_run,
+                    logger,
+                    overwrite=args.overwrite,
+                    copy_workers=args.copy_workers,
                 )
                 log_step_end(logger, 10, "Copy Originals to Finals", ok10)
                 results["10 Final packaging"] = (
@@ -924,6 +1017,10 @@ def run_workflow(args: argparse.Namespace) -> int:
                 results["10 SoundExchange forms"] = (
                     _ok(args.dry_run) if ok_se else _STEP_RESULT_STUB
                 )
+
+            _run_monday_checkpoint(
+                ctx, args, results, logger, "Hard Drive preparation"
+            )
 
             # ---- Step 11: SourceAudio (Soundminer scan → AIFF mirror) -------------
             log_section(logger, "Step 11 — SourceAudio (AIFF) Mirror")
@@ -975,13 +1072,12 @@ def run_workflow(args: argparse.Namespace) -> int:
                 else:
                     # Pipeline Mac: Soundminer lives on a separate managed Mac
                     # that can't be driven over SSH.  Hand off to the operator
-                    # (REMOTE_SOUNDMINER_ENABLED only wires the NBC SSH path, so
-                    # SourceAudio always hands off from here).
+                    # SourceAudio uses the manual hand-off when the managed
+                    # login-session agent is unavailable.
                     if REMOTE_SOUNDMINER_ENABLED:
                         logger.info(
-                            "  REMOTE_SOUNDMINER_ENABLED is set, but the SSH path "
-                            "only covers the NBC step; SourceAudio uses the manual "
-                            "hand-off."
+                            "  REMOTE_SOUNDMINER_ENABLED is set; SourceAudio "
+                            "still uses the console-session hand-off."
                         )
                     pinned_args = " ".join(ctx.pinned_cli_args())
                     sa_cmd = (
@@ -1005,120 +1101,6 @@ def run_workflow(args: argparse.Namespace) -> int:
                 results["11 SourceAudio"] = (
                     _ok(args.dry_run) if ok_sa else _STEP_RESULT_STUB
                 )
-
-            # ---- Step 12: Soundminer NBC --------------------------------------------
-            #   Kept directly after SourceAudio (Step 11) so the operator stays
-            #   in Soundminer for both partner deliveries before moving on.
-            log_section(logger, "Step 12 — Soundminer NBC Workflow")
-            if finalize_blocked:
-                log_step_skipped(logger, 12, "Soundminer NBC")
-                results["12 Soundminer"] = f"blocked — {block_reason}"
-            elif args.skip_soundminer:
-                log_step_skipped(logger, 12, "Soundminer NBC")
-                results["12 Soundminer"] = _STEP_RESULT_SKIPPED
-            else:
-                log_step_start(logger, 12, "Soundminer NBC Embed + Mirror")
-                from config import (
-                    REMOTE_SOUNDMINER_ENABLED,
-                    REMOTE_SOUNDMINER,
-                    SOUNDMINER_AGENT_ENABLED,
-                    is_soundminer_machine,
-                )
-                if args.skip_nbc_mirror:
-                    # Mirror already done in a prior run — verify the WAV tree
-                    # is present and non-empty, then treat the mirror as
-                    # complete and fall through to the 12.7 conversion.
-                    wav_dest = ctx.partner_dirs["nbc_wav_music"]
-                    wav_count = (
-                        sum(1 for _ in wav_dest.rglob("*.wav"))
-                        + sum(1 for _ in wav_dest.rglob("*.WAV"))
-                    ) if wav_dest.exists() else 0
-                    if wav_count == 0:
-                        logger.error(
-                            "  ✗  --skip-nbc-mirror set, but no WAV files found "
-                            f"at:\n     {wav_dest}\n"
-                            "     Run the NBC Soundminer mirror first (drop "
-                            "--skip-nbc-mirror), or check the path."
-                        )
-                        ok_nbc = False
-                    else:
-                        logger.info(
-                            f"  ↩  Skipping NBC embed+mirror (12.1–12.6) — "
-                            f"{wav_count} WAV file(s) already present; resuming "
-                            "at the WAV→MP3 conversion."
-                        )
-                        ok_nbc = True
-                elif (
-                    SOUNDMINER_AGENT_ENABLED
-                    and not is_soundminer_machine()
-                    and not args.no_soundminer_agent
-                ):
-                    from soundminer_agent import run_via_agent
-                    ok_nbc = run_via_agent(
-                        ctx, "nbc", args.dry_run, logger,
-                        options={
-                            "capture_steps": args.capture_steps,
-                            "resume": args.soundminer_resume,
-                        },
-                    )
-                elif REMOTE_SOUNDMINER_ENABLED:
-                    # SSH-triggered remote execution (only viable on an unmanaged Mac
-                    # where GUI automation over SSH is permitted).
-                    from remote_runner import run_soundminer_remote
-                    ok_nbc = run_soundminer_remote(ctx, args.dry_run, logger)
-                elif is_soundminer_machine():
-                    # We ARE on the Soundminer Mac — drive the GUI directly, inline,
-                    # no hand-off pause.  This is the capturable console/GUI session,
-                    # so pyautogui works (unlike over SSH).
-                    logger.info(
-                        "  Running ON the Soundminer machine → executing Step 12 "
-                        "inline (no hand-off)."
-                    )
-                    from soundminer import run_soundminer_nbc_workflow
-                    ok_nbc = run_soundminer_nbc_workflow(
-                        ctx, args.dry_run, logger,
-                        unattended=(not args.soundminer_attended),
-                        resume=args.soundminer_resume,
-                    )
-                else:
-                    # Hand-off mode.  We're on the pipeline Mac; Soundminer runs on a
-                    # separate, managed Mac that cannot be driven over SSH (no screen
-                    # capture in the SSH context).  Pause here and have the operator
-                    # run Step 12 directly on that machine inside its Screen Sharing /
-                    # console session; the shared Pegasus volumes make the data
-                    # hand-off automatic.
-                    ok_nbc = _soundminer_handoff(
-                        ctx, args, logger, REMOTE_SOUNDMINER, step_no=12
-                    )
-                log_step_end(logger, 12, "Soundminer NBC Embed + Mirror", ok_nbc)
-                results["12 Soundminer"] = (
-                    _STEP_RESULT_SKIPPED if args.skip_nbc_mirror and ok_nbc
-                    else (_ok(args.dry_run) if ok_nbc else _STEP_RESULT_STUB)
-                )
-
-                # Step 12.7: WAV → MP3 conversion — only attempt if the mirror step
-                # actually produced output (skipping it on a failed/declined hand-off
-                # avoids converting an empty or partial WAV tree).
-                if ok_nbc and not args.dry_run:
-                    log_step_start(logger, 12, "NBC WAV → MP3 Conversion")
-                    from audio_conversion import convert_nbc_wav_to_mp3
-                    ok_nbc_conv = convert_nbc_wav_to_mp3(ctx, args.dry_run, args.overwrite, logger)
-                    log_step_end(logger, 12, "NBC WAV → MP3 Conversion", ok_nbc_conv)
-                    results["12 NBC WAV→MP3"] = (
-                        _ok(args.dry_run) if ok_nbc_conv else _STEP_RESULT_FAILED
-                    )
-                elif args.dry_run:
-                    log_step_start(logger, 12, "NBC WAV → MP3 Conversion")
-                    from audio_conversion import convert_nbc_wav_to_mp3
-                    ok_nbc_conv = convert_nbc_wav_to_mp3(ctx, args.dry_run, args.overwrite, logger)
-                    log_step_end(logger, 12, "NBC WAV → MP3 Conversion", ok_nbc_conv)
-                    results["12 NBC WAV→MP3"] = _ok(args.dry_run)
-                else:
-                    logger.warning(
-                        "  Skipping NBC WAV→MP3 conversion because the Soundminer "
-                        "mirror step did not complete successfully."
-                    )
-                    results["12 NBC WAV→MP3"] = _STEP_RESULT_SKIPPED
 
             # ---- Step 13: Non-MainTrack Cleanup -------------------------------------
             log_section(logger, "Step 13 — Non-MainTrack Cleanup")
@@ -1145,23 +1127,6 @@ def run_workflow(args: argparse.Namespace) -> int:
                     _ok(args.dry_run) if ok_cleanup else _STEP_RESULT_STUB
                 )
 
-            # ---- Step 14: Rename NBC Files ------------------------------------------
-            log_section(logger, "Step 14 — Rename NBC Music Files")
-            if finalize_blocked:
-                log_step_skipped(logger, 14, "NBC Filename Rename")
-                results["14 NBC rename"] = f"blocked — {block_reason}"
-            elif args.skip_rename:
-                log_step_skipped(logger, 14, "NBC Filename Rename")
-                results["14 NBC rename"] = _STEP_RESULT_SKIPPED
-            else:
-                log_step_start(logger, 14, "NBC Filename Rename")
-                from cleanup import rename_nbc_music_files
-                ok13 = rename_nbc_music_files(ctx, args.dry_run, logger)
-                log_step_end(logger, 14, "NBC Filename Rename", ok13)
-                results["14 NBC rename"] = (
-                    _ok(args.dry_run) if ok13 else _STEP_RESULT_STUB
-                )
-
             # ---- Step 15: Final Packaging metadata ⇄ media cross-check -------------
             log_section(logger, "Step 15 — Final Metadata Cross-Check")
             if finalize_blocked:
@@ -1181,6 +1146,10 @@ def run_workflow(args: argparse.Namespace) -> int:
                     _ok(args.dry_run) if ok15 else _STEP_RESULT_STUB
                 )
 
+            _run_monday_checkpoint(
+                ctx, args, results, logger, "Digital Fulfillment preparation"
+            )
+
             # ---- Step 16: SoundMouse delivery --------------------------------------
             # SoundMouse is an independent delivery and is intentionally not
             # gated by the Step 9 Specials/HD verification result.
@@ -1191,12 +1160,60 @@ def run_workflow(args: argparse.Namespace) -> int:
             else:
                 log_step_start(logger, 16, "SoundMouse Delivery")
                 from soundmouse import run_soundmouse_step
+
+                def _soundmouse_progress(result_key: str) -> None:
+                    results[result_key] = _ok(args.dry_run)
+                    label = result_key.removeprefix("16 SoundMouse ").title()
+                    _run_monday_checkpoint(
+                        ctx, args, results, logger, f"SoundMouse {label}"
+                    )
+
                 ok16 = run_soundmouse_step(
-                    ctx, args.dry_run, args.overwrite, logger
+                    ctx,
+                    args.dry_run,
+                    args.overwrite,
+                    logger,
+                    progress_callback=_soundmouse_progress,
                 )
                 log_step_end(logger, 16, "SoundMouse Delivery", ok16)
                 results["16 SoundMouse"] = (
                     _ok(args.dry_run) if ok16 else _STEP_RESULT_FAILED
+                )
+
+            # ---- Step 17: BMAT custom-content delivery ----------------------------
+            # BMAT owns its date-scoped Domo exports and is intentionally
+            # independent of the Step 9 Specials/HD verification gate.
+            log_section(logger, "Step 17 — BMAT Custom-Content Delivery")
+            if args.skip_bmat:
+                log_step_skipped(logger, 17, "BMAT Custom-Content Delivery")
+                results["17 BMAT"] = _STEP_RESULT_SKIPPED
+            else:
+                log_step_start(logger, 17, "BMAT Custom-Content Delivery")
+                from bmat_delivery import run_bmat_step
+                ok17 = run_bmat_step(ctx, args.dry_run, logger)
+                log_step_end(logger, 17, "BMAT Custom-Content Delivery", ok17)
+                results["17 BMAT"] = (
+                    _ok(args.dry_run) if ok17 else _STEP_RESULT_FAILED
+                )
+
+            # ---- Step 18: Monday delivery-status synchronization -----------------
+            log_section(logger, "Step 18 — Monday Status Synchronization")
+            if args.skip_monday:
+                log_step_skipped(logger, 18, "Monday Status Synchronization")
+                results["18 Monday sync"] = _STEP_RESULT_SKIPPED
+            else:
+                log_step_start(logger, 18, "Monday Status Synchronization")
+                from monday_sync import run_monday_sync
+                ok18 = run_monday_sync(
+                    ctx,
+                    results,
+                    dry_run=args.dry_run,
+                    logger=logger,
+                    batch_override=args.monday_batch,
+                )
+                log_step_end(logger, 18, "Monday Status Synchronization", ok18)
+                results["18 Monday sync"] = (
+                    _ok(args.dry_run) if ok18 else _STEP_RESULT_FAILED
                 )
     except KeyboardInterrupt:
         logger.error("\n  ✗ Interrupted by user (Ctrl-C). Halting.")
@@ -1227,9 +1244,9 @@ def run_workflow(args: argparse.Namespace) -> int:
 
 # Ordered pipeline units.  Each entry: (token, numeric position, attribute that
 # skips the WHOLE unit).  Combined groups are represented by their lead number
-# (folder setup = steps 2 & 3 → "2"; covers = steps 6–8 → "6").  Step 12 is
-# special: it has two entry points — "12" (full embed + mirror + convert) and
-# "12.7" (convert only, mirror already done) — resolved in _apply_step_selectors.
+# (folder setup = steps 2 & 3 → "2"; covers = steps 6–8 → "6"). Retired NBC
+# steps 12 and 14 intentionally remain unused so historical reports keep their
+# original numbering.
 _STEP_UNITS = [
     # token,  position, skip-flag attr,                human name
     ("1",    1.0,  "skip_domo",                  "Domo exports"),
@@ -1240,12 +1257,11 @@ _STEP_UNITS = [
     ("9",    9.0,  "skip_verify",                "Verification (gate)"),
     ("10",   10.0, "skip_final_packaging",       "Final packaging (+ SoundExchange forms)"),
     ("11",   11.0, "skip_sourceaudio",           "SourceAudio (AIFF mirror)"),
-    ("12",   12.0, "skip_soundminer",            "Soundminer NBC"),
-    ("12.7", 12.7, None,                         "NBC WAV->MP3 (within step 12)"),
     ("13",   13.0, "skip_non_maintrack_cleanup", "Non-maintrack cleanup"),
-    ("14",   14.0, "skip_rename",                "NBC rename"),
     ("15",   15.0, "skip_final_metadata_check",  "Final metadata cross-check"),
     ("16",   16.0, "skip_soundmouse",            "SoundMouse delivery"),
+    ("17",   17.0, "skip_bmat",                  "BMAT custom-content delivery"),
+    ("18",   18.0, "skip_monday",                "Monday status synchronization"),
 ]
 _STEP_TOKENS = [u[0] for u in _STEP_UNITS]
 
@@ -1266,9 +1282,8 @@ def format_step_list() -> str:
 _ALL_SKIP_ATTRS = [
     "skip_domo", "skip_folder_setup", "skip_album_list_doc", "skip_unisync",
     "skip_covers", "skip_verify", "skip_final_packaging", "skip_soundexchange",
-    "skip_sourceaudio", "skip_soundminer", "skip_nbc_mirror",
-    "skip_non_maintrack_cleanup", "skip_rename", "skip_final_metadata_check",
-    "skip_soundmouse",
+    "skip_sourceaudio", "skip_non_maintrack_cleanup", "skip_final_metadata_check",
+    "skip_soundmouse", "skip_bmat", "skip_monday",
 ]
 
 
@@ -1276,9 +1291,7 @@ def _apply_step_selectors(args, logger) -> None:
     """Expand --start-at / --only into the concrete --skip-* flags.
 
     The pipeline is linear, so 'start at K' = skip every unit before K, and
-    'only K' = skip every unit except K.  Step 12's two entry points (12 = full
-    embed+mirror+convert; 12.7 = convert only, mirror already done) map to
-    skip_soundminer vs skip_nbc_mirror.  Raises ValueError on an unknown token.
+    'only K' = skip every unit except K. Raises ValueError on an unknown token.
     """
     token = args.start_at or args.only
     if token is None:
@@ -1294,33 +1307,22 @@ def _apply_step_selectors(args, logger) -> None:
 
     if args.start_at:
         for _tok, pos, attr, _name in _STEP_UNITS:
-            if attr is None or attr == "skip_soundminer":
-                continue                      # 12 boundary handled below
+            if attr is None:
+                continue
             if pos < kv:
                 _set(attr)
-        if kv > 12.7:
-            _set("skip_soundminer")           # start after step 12 entirely
-        elif kv == 12.7:
-            _set("skip_nbc_mirror")           # start at the convert; mirror done
         logger.info(f"  --start-at {token}: resuming at step {token}; "
                     "earlier steps skipped.")
     else:  # --only
         for attr in _ALL_SKIP_ATTRS:
             _set(attr, True)
-        if token == "12":
-            _set("skip_soundminer", False)
-            _set("skip_nbc_mirror", False)
-        elif token == "12.7":
-            _set("skip_soundminer", False)    # let the step 12 block run …
-            _set("skip_nbc_mirror", True)     # … but only the convert part
-        else:
-            attr = next(a for (t, _, a, _) in _STEP_UNITS if t == token)
-            if attr:
-                _set(attr, False)
-            if token == "10":
-                # SoundExchange is a Step 10 sub-phase with its own skip flag
-                # but no token of its own — un-skip it so `--only 10` runs it.
-                _set("skip_soundexchange", False)
+        attr = next(a for (t, _, a, _) in _STEP_UNITS if t == token)
+        if attr:
+            _set(attr, False)
+        if token == "10":
+            # SoundExchange is a Step 10 sub-phase with its own skip flag
+            # but no token of its own — un-skip it so `--only 10` runs it.
+            _set("skip_soundexchange", False)
         logger.info(f"  --only {token}: running step {token} only; all other "
                     "steps skipped.")
 
@@ -1330,6 +1332,19 @@ def _apply_step_selectors(args, logger) -> None:
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
+    def positive_copy_workers(value: str) -> int:
+        try:
+            workers = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "copy workers must be an integer"
+            ) from exc
+        if workers < 1:
+            raise argparse.ArgumentTypeError(
+                "copy workers must be at least 1"
+            )
+        return workers
+
     p = argparse.ArgumentParser(
         prog="upm_release_workflow",
         description="UPM Twice-Monthly Release Workflow",
@@ -1372,6 +1387,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace existing destination folders/files",
     )
+    p.add_argument(
+        "--copy-workers",
+        type=positive_copy_workers,
+        default=4,
+        metavar="N",
+        help=(
+            "Step 10 concurrent file copies within each destination "
+            "(default: 4; use 1 for legacy serial behavior)."
+        ),
+    )
 
     # Skip flags
     skips = p.add_argument_group("skip flags")
@@ -1388,18 +1413,18 @@ def build_parser() -> argparse.ArgumentParser:
              "both.")
     skips.add_argument("--skip-sourceaudio",            action="store_true")
     skips.add_argument("--skip-non-maintrack-cleanup",  action="store_true")
-    skips.add_argument("--skip-soundminer",             action="store_true")
-    skips.add_argument("--skip-nbc-mirror",             action="store_true",
-        help="Step 12: the NBC Soundminer embed+mirror (12.1–12.6) is already "
-             "done; skip it and resume at the WAV→MP3 conversion (12.7). "
-             "Verifies the NBC WAV tree is non-empty first.")
-    skips.add_argument("--skip-rename",                 action="store_true")
     skips.add_argument("--skip-final-metadata-check",   action="store_true",
         help="Skip Step 15 (cross-check each 3-FINAL PACKAGING partner's "
              "metadata sheet against its media folder).")
     skips.add_argument("--skip-soundmouse", action="store_true",
         help="Skip Step 16 (SoundMouse Domo exports, folders, WAVs, covers, "
              "and bucket-selected metadata sheets).")
+    skips.add_argument("--skip-bmat", action="store_true",
+        help="Skip Step 17 (date-scoped custom-release Domo exports, DAMS "
+             "audio download, validation, ledger, and SFTP upload).")
+    skips.add_argument("--skip-monday", action="store_true",
+        help="Skip Step 18 (read the matching Monday batch and synchronize "
+             "package/main-item Status values).")
     skips.add_argument("--rebuild-wav-covers",          action="store_true",
         help="Run the WAV w COVERS audio build (the Step 5 tail) even when "
              "--skip-unisync is set — e.g. the audio is already fetched but the "
@@ -1411,8 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
     sel_mx = sel.add_mutually_exclusive_group()
     sel_mx.add_argument("--start-at", metavar="STEP", default=None,
         help="Resume the pipeline AT this step, skipping everything before it. "
-             f"Valid: {', '.join(_STEP_TOKENS)}.  E.g. --start-at 12.7 runs only "
-             "the NBC WAV→MP3 conversion and the rename.")
+             f"Valid: {', '.join(_STEP_TOKENS)}.")
     sel_mx.add_argument("--only", metavar="STEP", default=None,
         help="Run ONLY this step (skip everything else). "
              f"Valid: {', '.join(_STEP_TOKENS)}.  E.g. --only 9 runs just "
@@ -1429,7 +1453,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--soundminer-attended",
         action="store_true",
-        help="Steps 11 & 12: run the Soundminer SourceAudio and NBC workflows "
+        help="Step 11: run the Soundminer SourceAudio workflow "
              "ATTENDED — pause for you to press Enter after each scan/import/"
              "embed and to confirm the Mirror Settings dialog before OK. The "
              "DEFAULT is fully unattended (no Enter prompts): scan/import/embed "
@@ -1470,6 +1494,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Step 5: save per-step UniSync UI screenshots to "
              "_logs/unisync_debug_steps/ for diagnosing path-entry issues.",
+    )
+    p.add_argument(
+        "--monday-batch",
+        metavar="BATCH",
+        help="Override the Monday batch. Legacy month/part runs accept YYYYMM "
+             "(SoundMouse adds -1 or -2); exact-date runs use UPMYYYYMMDD "
+             "for Content, Hard Drive, and SoundMouse.",
     )
     p.add_argument(
         "--unisync-supervised",

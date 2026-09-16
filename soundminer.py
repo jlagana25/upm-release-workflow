@@ -276,19 +276,23 @@ def _normalise_audio_identity(value: str) -> str:
     stem = name[:-len(suffix)] if suffix in {".wav", ".aif", ".aiff", ".mp3"} else name
     if stem.casefold().endswith(".m"):
         stem = stem[:-2]
-    return stem.casefold()
+    # APFS may expose filenames in decomposed form even though Soundminer and
+    # the metadata CSV present composed Unicode. Canonicalize both sides before
+    # manifest comparison so accents do not become false substitutions.
+    return unicodedata.normalize("NFC", stem).casefold()
 
 
 def _soundminer_filename_component(value: str) -> str:
     # Soundminer preserves spaces inside field values; the underscore visible
     # in NBC names is the literal separator in <Source:1>_<TrackTitle:2>.
-    value = re.sub(r"\s+", " ", str(value).strip())
-    # v5Pro preserves ordinary punctuation and Unicode, which macOS stores in
-    # decomposed form, but removes the Windows/filesystem-illegal character
-    # set when "Strip illegal characters" is enabled. This transform was
-    # checked against all 5,065 names in the August recovery mirror.
-    value = unicodedata.normalize("NFD", value)
-    value = re.sub(r'[<>:"/\\|?*]', "", value)
+    value = str(value).strip()
+    # v5Pro 5.0v560 writes composed Unicode even when the source CSV contains
+    # decomposed accents, preserves repeated internal spaces, and removes '&'
+    # along with the Windows/filesystem-illegal set when "Strip illegal
+    # characters" is enabled. These rules were verified against every one of
+    # the 95 apparent substitutions in the August 2026 NBC recovery mirror.
+    value = unicodedata.normalize("NFC", value)
+    value = re.sub(r'[&<>:"/\\|?*]', "", value)
     return value.strip(" ._")
 
 
@@ -1177,6 +1181,17 @@ def _scan_sounds_into_database(
     follows (the folder to scan), auto-dismisses the post-scan Unmatched
     Fields / Check-for-Dupes dialogs, then waits for the scan to settle.
     """
+    # A small Ex-US scan can finish entirely while the initial dialog watcher
+    # is still active. Preserve the empty-database screen so the populated
+    # record grid itself can serve as the positive start/completion signal.
+    # Without this baseline, a fast completed scan looks static to the later
+    # idle watcher and is incorrectly rejected as "never started."
+    try:
+        before_scan = _screen_fingerprint()
+    except Exception as exc:
+        logger.debug(f"        (pre-scan fingerprint unavailable: {exc})")
+        before_scan = None
+
     logger.info('  11b Database → "Scan Sounds into Database"…')
     _menu_click("Database", "Scan Sounds into Database", logger)
     time.sleep(DIALOG_OPEN_WAIT)
@@ -1191,13 +1206,33 @@ def _scan_sounds_into_database(
     # path does; auto-dismiss them (best-effort).
     scan_start_observed = _watch_and_dismiss_import_dialogs(logger)
 
+    if not scan_start_observed and before_scan is not None:
+        try:
+            import numpy as np
+
+            after_scan = _screen_fingerprint()
+            scan_result_diff = float(np.mean(np.abs(after_scan - before_scan)))
+            if scan_result_diff > SCREEN_IDLE_DIFF:
+                scan_start_observed = True
+                logger.info(
+                    "        Scan result grid changed while dialogs were being "
+                    "watched — accepting that as positive scan activity."
+                )
+        except Exception as exc:
+            logger.debug(f"        (post-scan fingerprint unavailable: {exc})")
+
+    def _scan_poll_guard() -> bool:
+        dismissed = _dismiss_import_dialogs_once(logger)
+        _raise_if_soundminer_log_window(logger, phase="scan")
+        return dismissed
+
     _wait_with_manual_handshake(
         phase_label  = "scan",
         soft_minutes = 2,
         hard_timeout = IMPORT_TIMEOUT,
         unattended   = unattended,
         logger       = logger,
-        on_poll      = lambda: _dismiss_import_dialogs_once(logger),
+        on_poll      = _scan_poll_guard,
         initial_activity = scan_start_observed,
     )
     logger.info("        ✓ Scan into database complete.")
@@ -1688,15 +1723,27 @@ def _select_all_and_embed(
     time.sleep(POST_MENU_WAIT)
     _save_step_screenshot("12_5c_after_embed_click", logger)
 
+    def _embed_poll_guard() -> bool:
+        _raise_if_soundminer_log_window(logger, phase="embed")
+        # Keep the idle timer open while the red progress bar is present even
+        # when its percentage motion is too small for a screen fingerprint.
+        # Completion still requires the bar to disappear and the UI to settle.
+        return _embed_progress_visible(logger)
+
     _wait_with_manual_handshake(
         phase_label  = "embed",
         soft_minutes = 5,
         hard_timeout = EMBED_TIMEOUT,
         unattended   = unattended,
         logger       = logger,
-        on_poll      = lambda: _raise_if_soundminer_log_window(
-            logger, phase="embed"
-        ),
+        on_poll      = _embed_poll_guard,
+        # The progress sheet occupies only the middle of the display. Its
+        # moving percentage/bar is diluted below the whole-screen threshold,
+        # which previously reported "no activity" while embedding was visibly
+        # around 53%. Watch the modal region at a lower threshold instead;
+        # its disappearance is then followed by the normal idle-stability gate.
+        fingerprint_region = (0.32, 0.30, 0.68, 0.66),
+        activity_threshold = 0.10,
     )
 
     _raise_if_soundminer_log_window(logger, phase="embed")
@@ -2849,7 +2896,9 @@ def _set_clipboard(text: str, logger: logging.Logger) -> bool:
 # Manual handshake for operations we can't programmatically detect
 # ---------------------------------------------------------------------------
 
-def _screen_fingerprint():
+def _screen_fingerprint(
+    region: "Optional[tuple[float, float, float, float]]" = None,
+):
     """
     Small grayscale snapshot of the whole screen, for change-detection.
 
@@ -2859,8 +2908,54 @@ def _screen_fingerprint():
     """
     import numpy as np
     import pyautogui
-    img = pyautogui.screenshot().convert("L").resize((80, 45))
+    img = pyautogui.screenshot().convert("L")
+    if region is not None:
+        left, top, right, bottom = region
+        width, height = img.size
+        img = img.crop((
+            int(width * left),
+            int(height * top),
+            int(width * right),
+            int(height * bottom),
+        ))
+    img = img.resize((80, 45))
     return np.asarray(img, dtype="int16")
+
+
+def _has_red_progress_pixels(rgb) -> bool:
+    """Recognize Soundminer's red modal progress bar in an RGB array."""
+    import numpy as np
+
+    pixels = np.asarray(rgb, dtype="int16")
+    if pixels.ndim != 3 or pixels.shape[2] < 3:
+        return False
+    red, green, blue = pixels[..., 0], pixels[..., 1], pixels[..., 2]
+    mask = (
+        (red >= 125)
+        & ((red - green) >= 30)
+        & ((red - blue) >= 20)
+    )
+    return int(np.count_nonzero(mask)) >= 20
+
+
+def _embed_progress_visible(logger: logging.Logger) -> bool:
+    """Return whether the central Soundminer embed progress bar is visible."""
+    try:
+        import numpy as np
+        import pyautogui
+
+        image = pyautogui.screenshot().convert("RGB")
+        width, height = image.size
+        center = image.crop((
+            int(width * 0.30),
+            int(height * 0.28),
+            int(width * 0.70),
+            int(height * 0.68),
+        )).resize((160, 90))
+        return _has_red_progress_pixels(np.asarray(center))
+    except Exception as exc:
+        logger.debug(f"        (embed progress-bar probe failed: {exc})")
+        return False
 
 
 def _ioreg_reports_locked(output: str) -> bool:
@@ -2972,6 +3067,8 @@ def _wait_for_screen_idle(
     on_poll:              "Optional[Callable[[], bool]]" = None,
     initial_activity:     bool = False,
     minimum_runtime:      int = 0,
+    fingerprint_region:   "Optional[tuple[float, float, float, float]]" = None,
+    activity_threshold:   float = SCREEN_IDLE_DIFF,
 ) -> None:
     """
     Block until the Soundminer UI stops changing — the automated stand-in for
@@ -3045,10 +3142,10 @@ def _wait_for_screen_idle(
                 logger.debug(f"        (dialog dismiss on_poll failed: {exc})")
 
         try:
-            fp = _screen_fingerprint()
+            fp = _screen_fingerprint(region=fingerprint_region)
             if last_fp is not None:
                 diff = float(np.mean(np.abs(fp - last_fp)))
-                if diff > SCREEN_IDLE_DIFF:
+                if diff > activity_threshold:
                     last_change  = now
                     saw_activity = True
             last_fp = fp
@@ -3146,6 +3243,8 @@ def _wait_with_manual_handshake(
     on_poll:      "Optional[Callable[[], bool]]" = None,
     initial_activity: bool = False,
     minimum_runtime: int = 0,
+    fingerprint_region: "Optional[tuple[float, float, float, float]]" = None,
+    activity_threshold: float = SCREEN_IDLE_DIFF,
 ) -> None:
     """
     Block for a phase whose completion we can't poll (scan, import, embed).
@@ -3178,6 +3277,8 @@ def _wait_with_manual_handshake(
             on_poll              = on_poll,
             initial_activity     = initial_activity,
             minimum_runtime      = minimum_runtime,
+            fingerprint_region   = fingerprint_region,
+            activity_threshold   = activity_threshold,
         )
         return
     else:

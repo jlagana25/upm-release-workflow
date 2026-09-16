@@ -20,9 +20,8 @@ setting up a new machine, work through Part 2 top to bottom.
   active GUI session for the Soundminer and UniSync steps.)
 - Examples use **May 2026, Part 1** (`--year 2026 --month 5 --part 1`). Swap in your real release.
 - `{specials}` = `/Volumes/Pegasus32 R8 - 1/_Specials/UPM/UPM-2026-05-P1`
-- `{nbc}` = `{specials}/3-FINAL PACKAGING/Universal Production Music May 2026 Part 1 - NBC`
 - The workflow can be launched from **either machine**. On HDF1, Soundminer runs
-  inline. On HDF2, Steps 11–12 are submitted to the HDF1 Aqua LaunchAgent and
+  inline. On HDF2, Step 11 is submitted to the HDF1 Aqua LaunchAgent and
   monitored through HDF1's local queue over an SSH JSON/status channel—no Screen Sharing, Enter prompt,
   or Soundminer installation on HDF2. Detection is automatic by hostname.
 - **Golden rule:** run with `--dry-run` first wherever it is supported, inspect, then run for real.
@@ -33,9 +32,15 @@ setting up a new machine, work through Part 2 top to bottom.
 > "no such file" errors that look like bugs but aren't.
 
 > **Authentication check:** `python3 auth_manager.py --status` must report the
-> current macOS user's Domo and UniSync state as configured/private. New users
-> run `--setup domo` and `--setup unisync`; credentials are entered only into
-> Microsoft/UniSync, never into this workflow. See `AUTHENTICATION.md`.
+> current macOS user's Domo SSO, optional Domo API, UniSync, and Monday state as
+> configured/private. Enroll a Domo API client with
+> `python3 auth_manager.py --enroll-domo-api-keychain`; invalid credentials must
+> fail before either Keychain item changes.
+> New users run `--setup domo`, `--setup unisync`, and
+> `--enroll-monday-keychain`. Domo/UniSync credentials are entered only into
+> Microsoft/UniSync, while the Monday token is collected once through a hidden
+> prompt, validated, and verified after Keychain storage. See
+> `AUTHENTICATION.md`.
 
 > **SoundMouse workbook requirement:** Step 16 exports metadata as CSV and
 > converts it to XLSX, then requires native Microsoft Excel to apply Clear
@@ -63,23 +68,21 @@ setting up a new machine, work through Part 2 top to bottom.
 | Run a normal release, Part 2 | `python3 upm_release_workflow.py --year 2026 --month 5 --part 2` |
 | August transition Part 2 (all August content) | `python3 upm_release_workflow.py --year 2026 --month 8 --part 2 --full-month-content` |
 | August transition Part 1 refresh (July full-month content) | `python3 upm_release_workflow.py --previous-month` (while run date is August 2026; targets the existing August 2026 Part 1 client folders) |
-| Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-14` |
+| Initial rolling transition | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-11` |
+| Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-12 --end-date 2026-09-25` |
 | Previous month (full month), auto from today | `python3 upm_release_workflow.py --previous-month` |
 | Previous month relative to a given month | `python3 upm_release_workflow.py --previous-month --year 2026 --month 6` |
 
-For the NBC metadata export, confirm the saved CSV contains only real audio
-filenames; a Domo `GRAND TOTAL` footer must be removed automatically.
 | Preview the whole run incl. non-maintrack deletions | add `--dry-run` |
 | Re-do a step that already produced output | add `--overwrite` |
 | Resume after a failure, skipping finished steps | add the matching `--skip-*` flags |
 
 ## What runs, and in what order
 
-Preflight → 2/3 Folder setup → 1 Domo exports → 4 Album list DOCX/PDF →
+Preflight → Monday source-board API load/verification → 2/3 Folder setup → 1 Domo exports → 4 Album list DOCX/PDF →
 5 UniSync → 6–8 Covers → 9 Verification → 10 Final packaging (+ SoundExchange forms) →
-11 SourceAudio AIFF → 12 Soundminer → 12.7 NBC WAV→MP3 →
-13 Non-maintrack cleanup → 14 NBC rename → 15 Final metadata cross-check →
-16 SoundMouse delivery →
+11 SourceAudio AIFF → 13 Non-maintrack cleanup → 15 Final metadata cross-check →
+16 SoundMouse delivery → 17 BMAT custom-content delivery → 18 Monday status synchronization →
 Final summary.
 
 Steps 10–15 are gated behind the Step 9 verification: if verification fails the
@@ -105,8 +108,8 @@ missing-report path, the log-file path, and the overall status).
    ```
    - On **USMPSMDHDF2**, preflight first verifies the HDF1 agent heartbeat and
      runs a non-destructive HDF1 GUI/crop/permission probe. The run then submits
-     and monitors both Soundminer jobs automatically.
-   - On **USMPSMDHDF1**, Step 12 runs inline automatically — no pause — and the
+     and monitors the SourceAudio Soundminer job automatically.
+   - On **USMPSMDHDF1**, Step 11 runs inline automatically — no pause — and the
      full pipeline completes in one pass.
    - Step 13 **deletes** the non-maintracks in a normal run. Use `--dry-run`
      to preview the deletions without removing anything — that's the only
@@ -163,14 +166,13 @@ do not error), `--soundminer-resume`, `--no-soundminer-agent` (recovery only)
 
 Per-step skips: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
 `--skip-unisync`, `--skip-covers`, `--skip-verify`, `--skip-final-packaging`,
-`--skip-soundexchange`, `--skip-sourceaudio`, `--skip-soundminer`,
-`--skip-nbc-mirror`, `--skip-non-maintrack-cleanup`, `--skip-rename`,
-`--skip-final-metadata-check`, `--skip-soundmouse`.
+`--skip-soundexchange`, `--skip-sourceaudio`, `--skip-non-maintrack-cleanup`,
+`--skip-final-metadata-check`, `--skip-soundmouse`, `--skip-bmat`, `--skip-monday`.
 
 Step selectors (mutually exclusive): `--start-at STEP` resumes at a step and runs
 to the end; `--only STEP` runs just that step. Valid STEP tokens:
-`1, 2, 4, 5, 6, 9, 10, 11, 12, 12.7, 13, 14, 15, 16` (e.g. `--only 15` runs only the
-final metadata cross-check; `--start-at 12.7` resumes at NBC WAV→MP3).
+`1, 2, 4, 5, 6, 9, 10, 11, 13, 15, 16, 17, 18` (e.g. `--only 15` runs only the
+final metadata cross-check).
 
 ---
 
@@ -262,6 +264,9 @@ workflow run must not wait for manual account/password entry.
 
   # Refresh both SourceAudio delivery metadata files:
   python3 domo_exports.py --test --previous-month --only sourceaudio_metadata,sourceaudio_exus_metadata
+
+  # Target one August bridge card while retaining Aug 1–31 + Part 2 naming:
+  python3 domo_exports.py --test --year 2026 --month 8 --part 2 --full-month-content --only japan_metadata
 
   # All cards:
   python3 domo_exports.py --test --year 2026 --month 5 --part 1
@@ -383,6 +388,21 @@ Validates Step 5 (UniSync UI automation) for **one** job before running all. Uni
 - **Expected output:**
   - Dry-run lists each UniSync job (territory, cache path, client path, CSV).
   - Real run drives the UniSync UI; per-job progress and completion logged.
+  - If a reduced retry repeatedly makes zero progress, Step 5 identifies the
+    mapped source Domo card as stale. It runs configured upstream sources before
+    the directly owning ETL (Japan 4312 → 4278; SoundMouse 3691 → 4330), waits
+    for a new `SUCCESSFUL` History row at every link, replaces only that card
+    export, and retries only the refreshed new/missing manifest. It attempts
+    this at most once per card and fails closed on ambiguous lineage, ETL
+    failure, timeout, or a second stall.
+  - After every completed or failed job, exact-match cleanup closes only
+    Microsoft `Working...` tabs carrying UniSync's Azure client ID.
+  - If UniSync opens a `DAMS SSO` browser tab and its menu never becomes
+    usable, complete the normal retained-session renewal in the newest tab:
+    `UMG Employee` → saved UMG work account → saved-password autofill →
+    `Sign in`. Wait for UniSync to receive the callback, then close only the
+    UniSync-created `DAMS SSO` and Microsoft `Working...` tabs. Do not recrop
+    the UniSync menu while the browser login is covering or blocking the app.
 - **Inspect:**
   - For the first job's territory, confirm files landed in its `client_path` (printed in the log).
   - Spot-check a handful of downloaded files exist and are non-zero.
@@ -489,26 +509,37 @@ Validates Step 10 (copy originals into the final delivery package structure).
 - **Command:**
   ```bash
   python3 final_packaging.py --test --year 2026 --month 5 --part 1 --dry-run
-  python3 final_packaging.py --test --year 2026 --month 5 --part 1
+  python3 final_packaging.py --test --year 2026 --month 5 --part 1 --copy-workers 4
   ```
   (`--only "Tunesat"` / `--only "Japan"` to re-run a single partner's copy op.)
 - **Expected output:**
   - Dry-run lists each copy operation (source → destination).
-  - Real run logs copies into `3-FINAL PACKAGING/…`.
+  - Real run logs `copy workers: 4` and copies into `3-FINAL PACKAGING/…`.
+  - Destinations run one at a time; up to four files within the active
+    destination copy concurrently on HDF2.
 - **Inspect:**
   - `ls "{specials}/3-FINAL PACKAGING/"` — partner delivery folders populated.
   - Spot-check file counts in a partner folder against the source.
+  - No hidden `*.upm-copy-*` temporary siblings remain after completion.
 - **Rollback/cleanup:**
   - Delete the partner folders under `3-FINAL PACKAGING/` that were created for the test.
   - `--overwrite` re-copies; otherwise existing files are skipped.
+  - `--copy-workers 1` restores the former serial copy path for diagnosis.
+
+- **Offline concurrency regression:**
+  ```bash
+  python3 -m unittest test_delivery_refresh.py
+  ```
+  The synthetic test verifies complete content, atomic publication, clean
+  restart/skip behavior, temporary-file cleanup, and rejection of zero workers.
 
 ---
 
 ## 10. SourceAudio AIFF mirror test (Step 11)
 
-Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio deliveries. Direct testing runs on USMPSMDHDF1, but a normal HDF2 orchestrator run submits the work to HDF1's login-session agent and monitors it without a machine switch. In a full pass Step 11 runs right before the NBC step (12).
+Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio deliveries. Direct testing runs on USMPSMDHDF1, but a normal HDF2 orchestrator run submits the work to HDF1's login-session agent and monitors it without a machine switch.
 
-**Prerequisites on USMPSMDHDF1:** same as the NBC Soundminer test (Accessibility + Screen Recording, reference crops, current code verified by byte size), plus the two source trees must exist:
+**Prerequisites on USMPSMDHDF1:** Accessibility + Screen Recording, reference crops, current code verified by byte size, plus the two source trees must exist:
 - `{specials}/1-ORIGINAL/Music/WAV w COVERS/MEDIA/` (US source)
 - `{specials}/2-STAGING/SME WAV ExUS/MEDIA/` (Ex-US source)
 
@@ -522,7 +553,7 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
   python3 soundminer.py --sourceaudio --attended --year 2026 --month 5 --part 1
 
   # Normal run: the SourceAudio profile is applied automatically before each
-  # mirror, overriding any incompatible settings persisted by Step 12:
+  # mirror, overriding any incompatible persisted settings:
   python3 soundminer.py --sourceaudio --year 2026 --month 5 --part 1
 
   # Resume only phases whose checkpoint and destination manifest still agree:
@@ -535,10 +566,14 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
   1. `WAV w COVERS/MEDIA` → `…Release - SourceAudio/Music`
   2. `2-STAGING/SME WAV ExUS/MEDIA` → `…Release - SourceAudio Ex-US/Music`
 
-  The mirror uses the SourceAudio settings (AIFF, Build Using Library then Volume, `<Filename:1>`). Soundminer persists one global set of mirror settings, so Step 11 explicitly overwrites all controls before every pass. Step 12 likewise applies its NBC/Broadcast Wave profile before mirroring. Step 11 also rejects WAV files already present in either SourceAudio destination and stops immediately if a mirror begins producing WAV instead of AIFF.
+  The mirror uses the SourceAudio settings (AIFF, Build Using Library then Volume, `<Filename:1>`). Soundminer persists one global set of mirror settings, so Step 11 explicitly overwrites all controls before every pass. Step 11 also rejects WAV files already present in either SourceAudio destination and stops immediately if a mirror begins producing WAV instead of AIFF.
 - **Expected output:**
   - Header `─── Step 11 — Soundminer SourceAudio (AIFF) workflow ───`.
   - Per pair: records cleared → scan → mirror dialog → SourceAudio settings applied and checkboxes verified → OK → destination picker → mirror runs to completion.
+  - A small scan that completes before the idle watcher begins logs that the
+    result grid changed and proceeds to the exact mirror-manifest gate; it must
+    not fail merely because no later animation was visible.
+  - A visible Soundminer Log Window still stops the scan immediately.
   - `✓` on full success; any hard failure returns non-zero and names the failing pair.
 - **Inspect:**
   - `find "{specials}/3-FINAL PACKAGING/Universal Production Music * Release - SourceAudio/Music" -name "*.aif*" | wc -l` — AIFF count matches the US (WAV w COVERS) track count.
@@ -550,7 +585,11 @@ Validates Step 11 (Soundminer scan → **AIFF** mirror) for the two SourceAudio 
 
 ---
 
-## 11. Soundminer test (runs on USMPSMDHDF1)
+## Historical NBC Soundminer reference (retired)
+
+> NBCUniversal is retired. The material below is retained only to explain
+> historical recovery helpers and is not an orchestrator step or supported
+> release command. Steps 12, 12.7, and 14 are not valid selector tokens.
 
 Validates Step 12 (database switch → delete → import → embed → mirror). The UI process must execute in HDF1's login/Aqua session. Normally the persistent HDF1 LaunchAgent provides that session while HDF2 submits and monitors the job; direct commands remain useful for diagnostics.
 
@@ -625,7 +664,10 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     bar is accepted as proof that the visible modal UI is still present.
   - `12.5` explicitly focuses the central record grid before ⌘A, then embeds
     via the Database menu. This prevents a post-restart Search Database focus
-    from consuming Select All; the unattended monitor waits for completion.
+    from consuming Select All; the unattended monitor watches the central
+    progress-sheet region at a sensitive threshold until the sheet disappears
+    and the UI settles. Whole-screen motion is too diluted to detect reliable
+    percentage changes in this modal.
   - A visible **Soundminer Log Window** during import or embed is a hard failure:
     the workflow stops, leaves the log open, and saves a diagnostic screenshot.
   - `12.6` mirror dialog → settings verified → OK clicked using the dialog's
@@ -642,8 +684,9 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
     exactly matches all expected filenames: missing files move into the
     established `WAV/MEDIA/...` tree and the duplicate wrapper is retained in
     a sibling `_mirror_quarantine_*` folder for recovery/audit. Expected NBC
-    filenames preserve punctuation and decomposed Unicode exactly as
-    Soundminer does; only its filename-illegal set (`<>:\"/\\|?*`) is removed.
+    filename comparisons normalize composed/decomposed Unicode identically,
+    preserve repeated metadata spaces, and model v5Pro's removal of ampersands
+    plus its filename-illegal set (`&<>:\"/\\|?*`).
     If refreshed metadata changes punctuation/accents, an old output is moved
     to `_filename_updates_wav_quarantine_*` only when its folded identity maps to
     one distinct expected name and that exact refreshed file already exists.
@@ -658,7 +701,7 @@ Validates Step 12 (database switch → delete → import → embed → mirror). 
 
 ---
 
-## 12. WAV-to-MP3 conversion test (runs on USMPSMDHDF2)
+## Historical NBC WAV-to-MP3 reference (retired)
 
 Validates Step 12.7 (flatten the mirrored MEDIA tree if needed, then encode 320k MP3s). Requires `ffmpeg` on the pipeline machine (`which ffmpeg`).
 
@@ -684,7 +727,7 @@ Validates Step 12.7 (flatten the mirrored MEDIA tree if needed, then encode 320k
 
 ---
 
-## 13. Final rename test
+## Historical NBC rename reference (retired)
 
 Validates Step 14 (strip characters outside `[A-Za-z0-9_ ]` from filenames under NBC Music). Runs on the pipeline machine off the shared volume.
 
@@ -783,14 +826,21 @@ workbooks selected by the bucket.
   - Delivery: `2026-06-01_to_2026-06-30/{MEDIA,Covers,Metadata}` (inclusive range).
     This directory is derived from the workflow period; raw `ActivationRange`
     values in Domo do not split or rename the delivery.
-  - UniSync routes rows present in the canonical US tracklist to United States,
-    sends the remaining rows to Rest of World, and uses Japan only as a
-    fallback. All passes share the same `MEDIA` directory.
+  - UniSync derives its country passes from `Territory List`. Australia must be
+    first whenever any row contains `OZ`; only countries needed by remaining
+    uncovered rows are added. Each pass shares the same `MEDIA` directory and
+    requests only the still-missing manifest. If the final required country
+    makes zero progress, confirm the workflow refreshes SoundMouse's upstream
+    catalog DataFlow 3691 before card-owning DataFlow 4330, re-exports the
+    tracklist, and retries only the recalculated missing manifest.
   - Metadata contains only the `SoundMouseMetadata NN - … .xlsx` files named
     by the SoundMouse bucket card. Each card is downloaded as CSV first and
     converted to a clean XLSX; no Domo workbook formatting is carried forward.
     Native Excel then applies Clear Formats and saves each installed workbook;
-    Step 16 fails if Excel was not the final writer or changed a metadata value.
+    Step 16 opens with Excel's standard POSIX-file command, validates the
+    resulting workbook name, and then keeps that bound workbook object so an
+    unrelated workbook becoming active cannot redirect the save. It fails if
+    Excel was not the final writer or changed a metadata value.
   - The final SoundMouse validation unions every `Filename` and album-artwork
     filename across those selected workbooks and confirms they exist under
     `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in
@@ -807,35 +857,232 @@ workbooks selected by the bucket.
 
 ---
 
-## 17. Full end-to-end test
+## 17. BMAT custom-content delivery test (Step 17)
+
+BMAT follows the same resolved release-date window as the rest of the workflow,
+but owns its two Domo exports and is independent of the Step 9 finalization gate.
+
+- **Offline logic test:** `python3 -m unittest test_bmat_delivery.py`
+- **Preview:** `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-11 --only 17 --dry-run`
+- Confirm the releases card is date-filtered while the submission-inventory card
+  retains its saved full-inventory filter. Accepted and `ingestion_pending`
+  catalogues in `_Specials/BMAT/_WORKFLOW/delivery_ledger.json` must be excluded.
+- A `prepared` or `failed` batch for the same workflow and catalogue selection is
+  resumed. DAMS is navigation/download-only: the step may open Albums and Audio
+  pages but must never alter album information.
+- The downloaded ZIP must contain each manifest WAV exactly once and no extra
+  WAVs. Local package validation precedes SFTP; remote sizes are verified and
+  lower-case `delivery.complete` is uploaded last.
+
+---
+
+## 18. Monday synchronization test (Step 18)
+
+Validates batch selection and status planning without changing the board, then
+applies the same validated plan through the Monday API.
+
+The source board's replacement automation keys off `Batch Master`, not the
+retired `Release Part` column. It must create one row
+in each of Content Updates, Hard Drive Updates, and SoundMouse Updates with the
+same compact start-date batch (`UPMYYYYMMDD`). No Part suffix is added.
+The August 2026 Part 2 transition therefore uses `UPM20260801` for all three
+packages while retaining its client-facing Part 2 name. Historical legacy
+month/part records remain readable, including the older Part 2 SoundMouse-only
+shape.
+Confirm that the same context derives mounted-volume roots as
+`UPM-2026-08-01` (and rolling periods such as `UPM-2026-09-01`); the compact
+Monday batch value must not leak into the filesystem folder spelling.
+For rolling runs, confirm Final Packaging partner folders abbreviate month
+names while retaining the full inclusive range, for example
+`Universal Production Music Sep 1–11 2026 Releases - SynchTank` and
+`Universal Production Music Sep 29–Oct 12 2026 Releases - SynchTank`. Confirm
+the same abbreviated range appears in partner-facing metadata filenames,
+album lists, package labels, and any delivery-message subject while internal
+batch IDs and audit date values remain unchanged.
+
+The Domo Audio Batch card is the combined control inventory for Monday. Its
+rows are the union of albums routed to UPM-US, UPM-ExUS, or SoundMouse, with
+the `Catalog` field recording the applicable routes. Do not use this combined
+card as a substitute for the separate partner tracklists used by the delivery
+steps. Name each imported source-board group `UPPM Audio Batch YYMMDD` (for
+example `UPPM Audio Batch 260801`) but map its Batch column to the full compact
+workflow ID (`UPM20260801`).
+
+Before a live workflow, refresh/export the date-filtered Domo Audio Batch card,
+load the batch into `UPPM Audio Batch Releases`, and verify through the Monday
+API that the automation created exactly one Content Updates, Hard Drive Updates,
+and SoundMouse Updates item—with all required subitems—for the compact batch.
+Use the Monday API for source-board loading, verification, and repair rather
+than browser UI automation.
+
+- **Offline logic test:**
+  ```bash
+  python3 -m unittest test_monday_sync.py
+  ```
+- **Preview before every live update:**
+  ```bash
+  python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-14 --only 18 --dry-run
+  ```
+- Confirm the log maps Content/HD/SoundMouse to `UPM20260901`,
+  lists every proposed old/new status, and performs no mutation.
+- A real full run advances successfully prepared package subitems to
+  `Clear to Send`. It derives each main-item status from its subitems and never
+  downgrades `Complete`, `Done`, `Not Needed`, or `API Client - Not Needed`.
+  After mutation it re-reads both batches and fails if any requested status is
+  not confirmed.
+- Confirm live checkpoints run after Step 10 (Hard Drive), after Step 15
+  (Digital Fulfillment), and after each successful SoundMouse media, cover, and
+  metadata phase. A checkpoint must not reuse results from an older report;
+  Step 18 remains the final reconciliation and recovery entry point.
+- Missing/duplicate batch rows, renamed required subitems, changed status-label
+  IDs, or API errors fail Step 18 before unsafe writes. Correct the board/schema
+  and rerun with `--only 18`; recovery reads the newest non-skipped outcomes
+  from non-dry-run structured reports, with newer failures overriding older
+  successes. Use `--monday-batch YYYYMM` for an intentional legacy override or
+  `--monday-batch UPMYYYYMMDD` for an exact-date override.
+
+---
+
+## 19. SynchTank S3 delivery test
+
+The SynchTank endpoint is standalone while the broader post-packaging delivery
+layer is developed. It uploads the contents of the final SynchTank package
+directly to the bucket root and creates `delivery.complete` last.
+
+- **Offline logic test:**
+  ```bash
+  python3 -m unittest test_synchtank_delivery.py
+  ```
+- **Enroll credentials once, using hidden prompts:**
+  ```bash
+  python3 auth_manager.py --enroll-synchtank-keychain
+  ```
+- **Preview the exact local package without contacting AWS:**
+  ```bash
+  python3 synchtank_delivery.py --start-date 2026-09-12 --end-date 2026-09-25 --dry-run
+  ```
+- Before a live run, confirm Step 15 passed for this exact batch and the remote
+  inbox is ready. A live run fails on unexpected root objects, uploads or
+  resumes package keys by exact byte size, verifies the complete manifest, and
+  writes the empty marker last. The release-local receipt and partner delivery
+  state are written only after that final verification.
+
+---
+
+## 20. TuneSat SFTP delivery test
+
+The standalone TuneSat endpoint uploads the complete final package, preserving
+`Music/` and `Metadata/` directly beneath `/AudioFiles`.
+
+- **Offline logic test:**
+  ```bash
+  python3 -m unittest test_tunesat_delivery.py
+  ```
+- **Enroll credentials once, using hidden prompts:**
+  ```bash
+  python3 auth_manager.py --enroll-tunesat-keychain
+  ```
+- **Preview without connecting:**
+  ```bash
+  python3 tunesat_delivery.py --start-date 2026-09-12 --end-date 2026-09-25 --dry-run
+  ```
+- A live run requires completed Step 10 and Step 15 results for the exact batch,
+  rejects unexpected remote files, resumes exact size-matched files, uploads
+  through `.part` temporary siblings and atomic renames, verifies the final
+  manifest, writes a private receipt, and marks TuneSat uploaded. TuneSat does
+  not receive a completion marker.
+
+---
+
+## 21. SoundMouse Uploader delivery test
+
+This standalone endpoint submits the complete Step 16 release directory through
+the installed Soundmouse Uploader. The target must be workspace `UPPM`, module
+`Music`; any other selection blocks the upload.
+
+- **Offline logic test:**
+  ```bash
+  python3 -m unittest test_soundmouse_uploader_delivery.py
+  ```
+- **Preview without opening the app:**
+  ```bash
+  python3 soundmouse_uploader_delivery.py --start-date 2026-09-12 --end-date 2026-09-25 --dry-run
+  ```
+- Before a live run, confirm Step 16 completed for the exact batch and the app
+  has a retained sign-in. The live run refuses an existing active queue,
+  explicitly selects and re-reads `UPPM` and `Music` in both the main window
+  and Add panel, submits the complete release directory, and requires the newly
+  inserted queue file URLs to match every local `MEDIA`, `Covers`, and
+  `Metadata` file exactly. Every row must reach completed status before the
+  receipt is written and SoundMouse is marked uploaded.
+
+---
+
+## 22. Post-packaging delivery runner (offline first)
+
+The unified runner plans selected endpoints without opening a browser, app,
+connector, Keychain item, or network connection:
+
+```bash
+python3 post_packaging_delivery.py --start-date 2026-09-12 --end-date 2026-09-25 --endpoints espn,soundexchange,qwire,scripps
+python3 -m unittest test_post_packaging_delivery.py
+```
+
+- Confirm dry-run creates no release-local checkpoint, receipt, draft, message,
+  portal submission, or remote upload.
+- ESPN requires the exact top-level folder, a matching completed transfer in My
+  Transfers, and visibility beneath `from_killer_tracks/`.
+- SoundExchange processes MGB before Z Tunes, requires zero pre-existing
+  pending rows, exact workbook-to-screen ISRC/count parity, and writes a
+  private invalid-entry audit before refusing Submit Recordings.
+- Qwire preserves the original CSV when it is already below the connector
+  limit, otherwise makes verified ZIP/split attachments. Every part stays
+  below 500,000 records and 3 MiB, and reconstructs the original rows exactly.
+- Scripps prepares one CSV or one verified single-CSV ZIP only.
+- The Outlook bridge must prepare exactly one attachment, create the draft
+  through the connected Outlook Email app, and verify the Drafts copy before
+  recording it. The connector has no Send action: native Outlook may send only
+  after exact-release authorization, and the bridge must then reverify the
+  resulting message and attachment in Sent Items before marking delivery.
+  Graph reports attachment size with provider overhead, not raw local bytes;
+  verify the local SHA-256 before drafting and require one exact-name,
+  non-inline attachment that `fetch_attachment` successfully materializes.
+  Compare connector-returned text after CRLF and trailing-space normalization
+  only, because Outlook adds trailing spaces to stored plain-text lines.
+- Live execution is unavailable without both `--execute` and the exact
+  `--confirm-live-release` value. The first live ESPN and SoundExchange runs
+  remain supervised pilots during a real workflow; do not run them against a
+  synthetic batch.
+- Successful uploads remain `uploaded`. Promote them to `delivered` only after
+  downstream acknowledgement, using `--acknowledge-delivered` with the same
+  exact release confirmation. Email and SoundExchange submissions become
+  `delivered` only after Sent Items or Upload History verification.
+
+---
+
+## 23. Full end-to-end test
 
 The real thing: all steps in order, through the orchestrator. Do a complete **dry-run first**, then the real run.
 
-- **Command (dry-run, no Soundminer pause):**
+- **Command (dry-run):**
   ```bash
-  python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --dry-run --skip-soundminer
+  python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --dry-run
   ```
-- **Command (real run — pauses at the Soundminer hand-off):**
+- **Command (real run):**
   ```bash
   python3 upm_release_workflow.py --year 2026 --month 5 --part 1
   ```
-  When it reaches Step 12, it prints the hand-off banner. Then, on **USMPSMDHDF1** (Screen Sharing Terminal):
-  ```bash
-  cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
-  python3 soundminer.py --test --year 2026 --month 5 --part 1 --capture-steps
-  ```
-  Back on **USMPSMDHDF2**, press ENTER; the pipeline verifies the WAV output, runs 12.7 conversion, then Steps 13 (non-maintrack cleanup), 14 (rename), and 15 (final metadata cross-check), then the summary.
+  HDF2 submits and monitors the Step 11 SourceAudio job through the HDF1
+  login-session agent, then continues with Steps 13 and 15.
   - Step 13 deletes the non-maintracks in a normal run; `--dry-run` previews them only.
 - **Command (real run, inline — launched ON USMPSMDHDF1):**
   ```bash
   cd "$HOME/Documents/Scripts/Python/UPM Release WorkFlow Automation/files"
   python3 upm_release_workflow.py --year 2026 --month 5 --part 1
   ```
-  Run from the Soundminer machine, Step 12 runs **inline with no pause** — the
-  whole pipeline (1–16) completes in one pass. Confirm the run header shows
-  `Machine: USMPSMDHDF1 (Soundminer machine)` and `Step 12 mode: inline`. Same
-  Soundminer prerequisites as Test 11 apply (Accessibility + Screen Recording,
-  crops, CSV, staged WAVs, current code).
+  Run from the Soundminer machine, Step 11 runs **inline with no pause**.
+  Confirm the run header shows `Machine: USMPSMDHDF1 (Soundminer machine)` and
+  `Step 11 mode: inline`.
 - **Command (previous-month full-month run):**
   ```bash
   python3 upm_release_workflow.py --previous-month --dry-run     # preview
@@ -845,15 +1092,13 @@ The real thing: all steps in order, through the orchestrator. Do a complete **dr
   full-month range, folders use explicit `UPM-2026-05-FULL` and
   `May 2026 Full` naming, and
   Domo uses its "Previous Month" preset. Inspect the same deliverables as below,
-  under the full-month folders (e.g. `UPM-2026-05-FULL`,
-  `… May 2026 Full Release - NBC`).
+  under the full-month folders (e.g. `UPM-2026-05-FULL`).
 - **Expected output:**
   - Each step logs start → end with a status; no `✗ FAILED` lines.
-  - Final summary shows the full field list, every requested step `✓ completed` (Soundminer/MP3/rename `✓` after the hand-off or inline run), `Overall status: ✓ completed`, exit code `0`.
+  - Final summary shows the full field list, every requested step `✓ completed`, `Overall status: ✓ completed`, exit code `0`.
 - **Inspect (the deliverables):**
   - `{specials}/1-ORIGINAL/Metadata/` — all six Domo CSVs.
   - `{specials}/3-FINAL PACKAGING/` — all partner delivery folders populated.
-  - `{nbc}/Music/WAV/MEDIA/` and `{nbc}/Music/MP3/MEDIA/` — equal file counts, clean (no `_Specials/` scaffold).
   - Album list PDF present and correct.
   - Missing report empty (or only expected gaps).
   - The single run log file (path in the summary) captures the whole session.

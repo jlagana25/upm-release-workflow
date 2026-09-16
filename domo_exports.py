@@ -19,7 +19,6 @@ Card map:
     exus_tracklist   1389146023    → …/UPM-ExUS-{token}-Tracklist.csv
     album_list       1741693601    → …/UPM-US-{token}-AlbumList.csv
     japan_metadata   242186821     → specials_dir/…/NTT Data Metadata.csv
-    nbc_metadata     233748559     → specials_dir/…/NBCUniversal Metadata Export.csv
     tunesat_metadata 1826988754    → specials_dir/…/Tunesat/Metadata/UPM {month} Metadata.csv
     sourceaudio_metadata      816828701  → …/SourceAudio/Metadata/UPM {delivery} Metadata.csv
     sourceaudio_exus_metadata 1909039415 → …/SourceAudio Ex-US/Metadata/UPM Ex-US {delivery} Metadata.csv
@@ -28,9 +27,10 @@ Card map:
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -101,6 +101,12 @@ SILENT_LOGIN_TIMEOUT = 180_000
 DOMO_VERIFY_TIMEOUT = 45_000
 NAV_TIMEOUT       = 30_000
 DOWNLOAD_TIMEOUT  = 90_000
+DATAFLOW_REFRESH_TIMEOUT_SECONDS = 30 * 60
+DATAFLOW_REFRESH_POLL_SECONDS = 10
+DATAFLOW_LINEAGE_TIMEOUT = 120_000
+_DATAFLOW_FINAL_STATUSES = {
+    "SUCCESSFUL", "FAILED", "CANCELED", "CANCELLED", "REJECTED"
+}
 
 
 def _safe_url_for_log(url: str) -> str:
@@ -256,16 +262,9 @@ CARD_CONFIGS: list[dict] = [
         "card_id":     DOMO_CARDS["japan_metadata"],
         "description": "Japan Metadata",
         "output_fn":   lambda ctx: ctx.japan_metadata_csv,
-    },
-    {
-        "key":         "nbc_metadata",
-        "card_id":     DOMO_CARDS["nbc_metadata"],
-        "description": "NBC Metadata",
-        "output_fn":   lambda ctx: ctx.nbc_metadata_csv,
-        # This card can append a Domo summary row whose Filename is
-        # "GRAND TOTAL".  Soundminer treats that value as an audio filename
-        # and reports a scan failure, so strip summary rows during conversion.
-        "drop_summary_rows": True,
+        # DataFlow 4278 directly owns the Japan card, but it consumes the
+        # catalog produced by 4312. Refresh the true source first.
+        "upstream_dataflow_ids": ("4312",),
     },
     {
         # Step 13 (non-maintrack cleanup) compares the MP3 files in the
@@ -300,6 +299,9 @@ CARD_CONFIGS: list[dict] = [
         "card_id":     DOMO_CARDS["scripps_metadata"],
         "description": "Scripps Metadata",
         "output_fn":   lambda ctx: ctx.partner_metadata["scripps"],
+        # This card appends a GRAND TOTAL summary footer. It is an aggregate
+        # row, not delivery metadata.
+        "drop_summary_rows": True,
     },
     {
         "key":         "qwire_metadata",
@@ -366,6 +368,8 @@ def run_domo_exports(
     dry_run: bool,
     logger: logging.Logger,
     only_keys: Optional[list[str]] = None,
+    *,
+    card_configs: Optional[list[dict]] = None,
 ) -> dict[str, str]:
     """Export Domo cards. Returns dict of key → 'ok'|'skipped'|'failed'.
 
@@ -373,11 +377,12 @@ def run_domo_exports(
     keys, e.g. ["exus_tracklist"]) to export just those — used by
     remediation to refresh a single tracklist that's still missing tracks.
     """
-    cards = CARD_CONFIGS
+    available_cards = CARD_CONFIGS if card_configs is None else list(card_configs)
+    cards = available_cards
     if only_keys:
         wanted = set(only_keys)
-        cards = [c for c in CARD_CONFIGS if c["key"] in wanted]
-        unknown = wanted - {c["key"] for c in CARD_CONFIGS}
+        cards = [c for c in available_cards if c["key"] in wanted]
+        unknown = wanted - {c["key"] for c in available_cards}
         if unknown:
             logger.warning(f"  Ignoring unknown Domo card key(s): {sorted(unknown)}")
         if not cards:
@@ -444,6 +449,344 @@ def run_domo_exports(
         pass
 
     return results
+
+
+def _latest_dataflow_history_entry(body_text: str) -> tuple[str | None, str | None]:
+    """Return ``(status, signature)`` for Domo's newest DataFlow history row.
+
+    Domo's legacy DataFlow details page renders the history table through
+    Angular and does not expose a dependable row test-id.  The visible table
+    text is stable, ordered newest-first, and includes the header below.  The
+    compact signature lets callers prove that clicking Run created a *new*
+    entry instead of mistaking the preceding successful run for success.
+    """
+    marker = "Version\tStart Time\tEnd Time\tDuration\tData Input\tData Output\tStarted by\tStatus"
+    if marker not in body_text:
+        return None, None
+    history = body_text.split(marker, 1)[1]
+    match = re.search(
+        r"\n(RUNNING|SUCCESSFUL|FAILED|CANCELED|CANCELLED|REJECTED)\n",
+        history,
+    )
+    if not match:
+        return None, None
+    signature = " ".join(history[:match.end()].split())
+    return match.group(1), signature
+
+
+def _card_config_for_key(card_key: str) -> dict:
+    matches = [card for card in CARD_CONFIGS if card["key"] == card_key]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Domo card key {card_key!r} resolved to {len(matches)} cards; "
+            "expected exactly one."
+        )
+    return matches[0]
+
+
+def _resolve_card_dataflow_id(page, card: dict, logger: logging.Logger) -> str:
+    """Follow Card → DataSet → Edit ETL and return the owning DataFlow ID."""
+    page_id = card.get("page_id", DOMO_PAGE_ID)
+    card_url = (
+        f"https://{DOMO_INSTANCE}/page/{page_id}/kpis/details/"
+        f"{card['card_id']}"
+    )
+    logger.info(
+        f"     Resolving Domo lineage for {card['description']} "
+        f"(card {card['card_id']})…"
+    )
+    page.goto(card_url, wait_until="domcontentloaded", timeout=LOGIN_TIMEOUT)
+    source_links = page.locator(
+        'a[href^="/redirect-to-datasource-details/"]'
+    )
+    source_links.first.wait_for(state="visible", timeout=DOMO_VERIFY_TIMEOUT)
+    count = source_links.count()
+    if count != 1:
+        raise RuntimeError(
+            f"Card {card['card_id']} exposes {count} DataSet lineage links; "
+            "refusing to guess which source to refresh."
+        )
+    source_href = source_links.first.get_attribute("href")
+    if not source_href:
+        raise RuntimeError(
+            f"Card {card['card_id']} DataSet lineage link has no target."
+        )
+    source_url = urljoin(f"https://{DOMO_INSTANCE}/", source_href)
+    edit_etl = None
+    for attempt in range(1, 3):
+        page.goto(
+            source_url,
+            wait_until="domcontentloaded",
+            timeout=LOGIN_TIMEOUT,
+        )
+        candidate = page.locator("button", has_text="EDIT ETL").first
+        try:
+            candidate.wait_for(
+                state="visible", timeout=DATAFLOW_LINEAGE_TIMEOUT
+            )
+            edit_etl = candidate
+            break
+        except PlaywrightTimeoutError:
+            if attempt >= 2:
+                raise
+            logger.warning(
+                "     Domo DataSet details did not expose EDIT ETL in time; "
+                "reloading the verified lineage target once."
+            )
+    if edit_etl is None:
+        raise RuntimeError("Domo DataSet did not expose an Edit ETL control.")
+    if edit_etl.evaluate("element => element.tagName") != "BUTTON":
+        raise RuntimeError("Domo's visible Edit ETL control is not a button.")
+    edit_etl.click()
+    page.wait_for_url(
+        re.compile(r"/datacenter/dataflows/\d+/graph(?:$|[?#])"),
+        timeout=LOGIN_TIMEOUT,
+        wait_until="domcontentloaded",
+    )
+    match = re.search(r"/datacenter/dataflows/(\d+)/graph", page.url)
+    if not match:
+        raise RuntimeError("Domo opened an ETL editor without a DataFlow ID.")
+    dataflow_id = match.group(1)
+    logger.info(f"     Resolved owning DataFlow: {dataflow_id}.")
+    return dataflow_id
+
+
+def _wait_for_dataflow_completion(
+    page,
+    dataflow_id: str,
+    logger: logging.Logger,
+    *,
+    previous_signature: str | None = None,
+    join_running: bool = False,
+    timeout_seconds: int = DATAFLOW_REFRESH_TIMEOUT_SECONDS,
+    poll_seconds: int = DATAFLOW_REFRESH_POLL_SECONDS,
+) -> bool:
+    """Poll the newest History row until the requested execution is final."""
+    details_url = (
+        f"https://{DOMO_INSTANCE}/datacenter/dataflows/{dataflow_id}/"
+        "details#history"
+    )
+    deadline = time.monotonic() + timeout_seconds
+    started = join_running
+    last_status: str | None = None
+    while time.monotonic() < deadline:
+        page.goto(details_url, wait_until="domcontentloaded", timeout=LOGIN_TIMEOUT)
+        page.wait_for_timeout(3_000)
+        body_text = page.locator("body").inner_text(timeout=DOMO_VERIFY_TIMEOUT)
+        status, signature = _latest_dataflow_history_entry(body_text)
+        if not started and signature and signature != previous_signature:
+            started = True
+        if started and status != last_status:
+            logger.info(f"     DataFlow {dataflow_id} status: {status or 'UNKNOWN'}")
+            last_status = status
+        if started and status == "SUCCESSFUL":
+            return True
+        if started and status in _DATAFLOW_FINAL_STATUSES - {"SUCCESSFUL"}:
+            logger.error(
+                f"     Domo DataFlow {dataflow_id} finished with {status}."
+            )
+            return False
+        page.wait_for_timeout(max(1, poll_seconds) * 1_000)
+    logger.error(
+        f"     Timed out after {timeout_seconds}s waiting for Domo DataFlow "
+        f"{dataflow_id}."
+    )
+    return False
+
+
+def _run_and_wait_for_dataflow(
+    page,
+    dataflow_id: str,
+    logger: logging.Logger,
+    *,
+    timeout_seconds: int = DATAFLOW_REFRESH_TIMEOUT_SECONDS,
+) -> bool:
+    """Use Domo's three-dot menu to run or join the owning DataFlow."""
+    details_url = (
+        f"https://{DOMO_INSTANCE}/datacenter/dataflows/{dataflow_id}/"
+        "details#history"
+    )
+    page.goto(details_url, wait_until="domcontentloaded", timeout=LOGIN_TIMEOUT)
+    menu = page.locator("#df-details-wrench-menu")
+    menu.wait_for(state="visible", timeout=DOMO_VERIFY_TIMEOUT)
+    page.wait_for_timeout(2_000)
+    body_text = page.locator("body").inner_text(timeout=DOMO_VERIFY_TIMEOUT)
+    status, previous_signature = _latest_dataflow_history_entry(body_text)
+    if status == "RUNNING":
+        logger.info(
+            f"     DataFlow {dataflow_id} is already running; joining that run."
+        )
+        return _wait_for_dataflow_completion(
+            page,
+            dataflow_id,
+            logger,
+            join_running=True,
+            timeout_seconds=timeout_seconds,
+        )
+
+    logger.info("     Opening DataFlow actions (three-dot menu) → Run…")
+    # Clicking the surrounding button can leave Domo's transient Angular
+    # popover closed.  The visible three-dot span is the actual popover anchor.
+    menu.locator(".icon-dots-vertical").click()
+    # Angular replaces the popover node during its opening animation. Waiting
+    # for the first node to become visible is insufficient because that node
+    # can immediately detach; let the animation settle, then reacquire only
+    # the live visible overlay.
+    page.wait_for_timeout(1_000)
+    popover = page.locator("div[db-popover][class*='wrench']:visible")
+    popover.wait_for(state="visible", timeout=DOMO_VERIFY_TIMEOUT)
+    click_result = page.evaluate(
+        """() => {
+            const controls = Array.from(
+                document.querySelectorAll(
+                    'div[db-popover] button[ng-click="run(df)"]'
+                )
+            ).filter((element) => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && !element.disabled;
+            });
+            if (controls.length !== 1) {
+                return {clicked: false, count: controls.length};
+            }
+            controls[0].click();
+            return {clicked: true, count: 1};
+        }"""
+    )
+    if not click_result.get("clicked"):
+        raise RuntimeError(
+            "Domo's open three-dot menu did not expose exactly one visible, "
+            f"enabled Run control (found {click_result.get('count', 0)})."
+        )
+    return _wait_for_dataflow_completion(
+        page,
+        dataflow_id,
+        logger,
+        previous_signature=previous_signature,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def refresh_card_source_and_export(
+    ctx: ReleaseContext,
+    card_key: str,
+    logger: logging.Logger,
+    *,
+    timeout_seconds: int = DATAFLOW_REFRESH_TIMEOUT_SECONDS,
+) -> bool:
+    """Refresh one card's owning ETL, verify success, then export that card.
+
+    This is the unattended recovery path used only after bounded UniSync
+    reduced retries make zero progress.  It reuses the current macOS user's
+    private Domo browser profile and never obtains or logs a developer token.
+    Every lineage hop must resolve unambiguously and the newest History row
+    must finish SUCCESSFUL before the existing export is replaced.
+    """
+    card = _card_config_for_key(card_key)
+    return refresh_card_config_source_and_export(
+        ctx, card, logger, timeout_seconds=timeout_seconds
+    )
+
+
+def refresh_card_config_source_and_export(
+    ctx: ReleaseContext,
+    card: dict,
+    logger: logging.Logger,
+    *,
+    timeout_seconds: int = DATAFLOW_REFRESH_TIMEOUT_SECONDS,
+) -> bool:
+    """Refresh and re-export an explicit card configuration.
+
+    Step 16 owns its SoundMouse card configurations rather than registering
+    them in the standard Step 1 card list.  Accepting the same small config
+    shape lets its Japan fallback use the fail-closed ETL recovery path too.
+    """
+    _require_playwright()
+    logger.warning(
+        f"  ↻ Refreshing the source Domo ETL for {card['description']} before "
+        "another UniSync attempt."
+    )
+    TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
+    with sync_playwright() as playwright:
+        with private_creation_umask():
+            browser_context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(DOMO_PROFILE_DIR),
+                headless=False,
+                downloads_path=str(TEMP_DOWNLOAD_DIR),
+                accept_downloads=True,
+            )
+        page = (
+            browser_context.pages[0]
+            if browser_context.pages
+            else browser_context.new_page()
+        )
+        try:
+            _authenticate(page, logger)
+            if not _refresh_card_dataflow_chain(
+                page, card, logger, timeout_seconds=timeout_seconds
+            ):
+                return False
+            page.wait_for_timeout(5_000)
+            output_path = card["output_fn"](ctx)
+            logger.info(
+                f"     DataFlow refresh succeeded; exporting "
+                f"{card['description']} again."
+            )
+            _export_card(page, card, output_path, ctx, logger)
+            _reconcile_sourceaudio_export(card, ctx, logger)
+            logger.info(f"     ✓ Refreshed export saved: {output_path}")
+            return True
+        except PlaywrightTimeoutError as exc:
+            logger.error(
+                f"     Timed out refreshing {card['description']}: {exc}"
+            )
+            return False
+        except Exception as exc:
+            logger.error(
+                f"     Failed to refresh {card['description']} source: {exc}"
+            )
+            return False
+        finally:
+            browser_context.close()
+            secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
+
+
+def _refresh_card_dataflow_chain(
+    page,
+    card: dict,
+    logger: logging.Logger,
+    *,
+    timeout_seconds: int = DATAFLOW_REFRESH_TIMEOUT_SECONDS,
+) -> bool:
+    """Run configured upstream sources before the card's owning DataFlow."""
+    owning_dataflow_id = _resolve_card_dataflow_id(page, card, logger)
+    configured = card.get("upstream_dataflow_ids", ())
+    upstream_ids = [
+        str(value).strip() for value in configured if str(value).strip()
+    ]
+
+    seen: set[str] = set()
+    chain: list[str] = []
+    for dataflow_id in [*upstream_ids, owning_dataflow_id]:
+        if dataflow_id not in seen:
+            seen.add(dataflow_id)
+            chain.append(dataflow_id)
+
+    logger.info("     Domo refresh chain: " + " → ".join(chain))
+    for dataflow_id in chain:
+        if not _run_and_wait_for_dataflow(
+            page, dataflow_id, logger, timeout_seconds=timeout_seconds
+        ):
+            logger.error(
+                f"     DataFlow refresh chain stopped at {dataflow_id}; "
+                "the card export was not replaced."
+            )
+            return False
+    return True
 
 
 def _reconcile_sourceaudio_export(
@@ -631,12 +974,13 @@ def _export_card(
         page_id=card.get("page_id", DOMO_PAGE_ID),
     )
 
-    # 2. Set the date range.  In previous-month mode use Domo's built-in
-    #    "Previous Month" preset; otherwise set the explicit Between range.
-    if getattr(ctx, "previous_month", False):
-        _apply_previous_month_preset(page, logger)
-    else:
-        _apply_between_date_range(page, ctx.release_start, ctx.release_end, logger)
+    # 2. Set the date range.  Inventory/control cards such as BMAT keep their
+    #    saved card filter and explicitly opt out of workflow date filtering.
+    if not card.get("skip_timeframe"):
+        if getattr(ctx, "previous_month", False):
+            _apply_previous_month_preset(page, logger)
+        else:
+            _apply_between_date_range(page, ctx.release_start, ctx.release_end, logger)
 
     # 3. Confirm we're still on the card (picker close should not navigate)
     if "kpis/details" not in page.url:
@@ -684,9 +1028,13 @@ def _navigate_to_card(
     card_id: str,
     logger: logging.Logger,
     *,
-    page_id: str = DOMO_PAGE_ID,
+    page_id: str | None = DOMO_PAGE_ID,
 ) -> None:
-    url = f"https://{DOMO_INSTANCE}/page/{page_id}/kpis/details/{card_id}"
+    url = (
+        f"https://{DOMO_INSTANCE}/page/{page_id}/kpis/details/{card_id}"
+        if page_id
+        else f"https://{DOMO_INSTANCE}/kpis/details/{card_id}"
+    )
     logger.info(f"     Navigating to card {card_id}…")
     page.evaluate(f"window.location.replace('{url}')")
     try:
@@ -1237,6 +1585,14 @@ if __name__ == "__main__":
     p.add_argument("--year",    type=int)
     p.add_argument("--month",   type=int)
     p.add_argument("--part",    type=int, choices=[1, 2])
+    p.add_argument(
+        "--full-month-content",
+        action="store_true",
+        help=(
+            "August 2026 bridge mode: keep the Part 2 client label while "
+            "exporting the full calendar month."
+        ),
+    )
     p.add_argument(
         "--previous-month", action="store_true",
         help="Full-month run for the previous month "

@@ -22,13 +22,22 @@ class RetiredPartnerFolderTests(unittest.TestCase):
         )
         retained.mkdir(parents=True)
         retired.mkdir(parents=True)
+        nbc = (
+            source
+            / "3-FINAL PACKAGING"
+            / "Universal Production Music MMMM YYYY Release - NBC"
+        )
+        nbc.mkdir(parents=True)
         (retained / "keep.txt").write_text("keep", encoding="utf-8")
         (retired / "retired.txt").write_text("retired", encoding="utf-8")
+        (nbc / "retired.txt").write_text("retired", encoding="utf-8")
         return source
 
     def test_retired_name_matching_is_case_and_punctuation_insensitive(self):
         self.assertTrue(config.is_retired_partner_name("MTV-Viacom"))
         self.assertTrue(config.is_retired_partner_name("release - mtv viacom"))
+        self.assertTrue(config.is_retired_partner_name("NBCUniversal"))
+        self.assertTrue(config.is_retired_partner_name("Release - NBC"))
         self.assertFalse(config.is_retired_partner_name("Current Partner"))
 
     def test_fresh_baseline_copy_excludes_retired_partner(self):
@@ -50,6 +59,7 @@ class RetiredPartnerFolderTests(unittest.TestCase):
                 ).exists()
             )
             self.assertFalse(any(destination.rglob("*MTV*")))
+            self.assertFalse(any(destination.rglob("*NBC*")))
 
     def test_additive_baseline_merge_excludes_retired_partner(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -72,23 +82,24 @@ class RetiredPartnerFolderTests(unittest.TestCase):
                 ).exists()
             )
             self.assertFalse(any(destination.rglob("*MTV*")))
+            self.assertFalse(any(destination.rglob("*NBC*")))
 
     def test_part_and_range_delivery_folder_names_are_normalized(self):
         cases = [
             (
                 config.ReleaseContext(2026, 8, 1),
-                "Universal Production Music August 2026 Part 1 - NBC",
+                "Universal Production Music August 2026 Part 1 - ESPN",
             ),
             (
                 config.ReleaseContext.for_date_range("2026-09-29", "2026-10-12"),
-                "Universal Production Music September 29–October 12 2026 Releases - NBC",
+                "Universal Production Music Sep 29–Oct 12 2026 Releases - ESPN",
             ),
         ]
         for ctx, expected in cases:
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
-                (root / f"Universal Production Music {ctx.month_display_folder} Release - NBC").mkdir()
-                (root / f"UPM Japan NTT DATA {ctx.month_display_folder} Release").mkdir()
+                (root / f"Universal Production Music {ctx.delivery_display_folder} Release - ESPN").mkdir()
+                (root / f"UPM Japan NTT DATA {ctx.delivery_display_folder} Release").mkdir()
                 folder_setup._normalize_delivery_folder_names(root, ctx, False, self.logger)
                 self.assertTrue((root / expected).is_dir())
                 self.assertTrue(

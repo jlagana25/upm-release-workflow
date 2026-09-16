@@ -29,8 +29,14 @@ Behaviour:
     This gives us per-file idempotency — re-running the step skips
     files that already exist at the destination, matching the rest of
     the pipeline's ``--overwrite`` semantics.
+  * Uses a bounded worker pool within one destination (four workers by
+    default).  Partner destinations remain sequential so HDF2 does not
+    launch every SMB fan-out at once.  Each file is copied to a hidden
+    sibling and atomically renamed into place, so an interrupted transfer
+    is never mistaken for a completed destination file on restart.
   * ``--dry-run``      : log every planned copy, write nothing.
   * ``--overwrite``    : re-copy files that already exist at the dest.
+  * ``--copy-workers`` : tune per-destination concurrency; 1 is serial.
   * Per-destination failure is logged and the run continues to the next
     destination — one bad partner folder shouldn't block the others.
   * Logs progress every ``PROGRESS_EVERY`` files inside each op, and a
@@ -40,11 +46,13 @@ Behaviour:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import logging
 import os
 import shutil
 import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -76,6 +84,17 @@ TUNESAT_EXUS_LABELS: frozenset[str] = frozenset({
 })
 
 PROGRESS_EVERY = 100  # log a progress line every N files (per op)
+DEFAULT_COPY_WORKERS = 4
+
+
+def _positive_copy_workers(value: str) -> int:
+    try:
+        workers = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("copy workers must be an integer") from exc
+    if workers < 1:
+        raise argparse.ArgumentTypeError("copy workers must be at least 1")
+    return workers
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +156,7 @@ def _copy_tree_files(
     logger: logging.Logger,
     label_filter: Optional[frozenset[str]] = None,
     filename_filter: Optional[frozenset[str]] = None,
+    copy_workers: int = DEFAULT_COPY_WORKERS,
 ) -> tuple[int, int, int]:
     """
     Recursively copy every file under ``src`` into the mirror location
@@ -145,16 +165,24 @@ def _copy_tree_files(
     Per-file idempotency: a file is skipped when ``dst/<rel>`` already
     exists, unless ``overwrite`` is True.
 
+    Copies within this one destination use ``copy_workers`` threads.  A
+    successful transfer is published with an atomic rename only after the
+    complete temporary sibling has been written.
+
     ``label_filter`` (used for the Ex-US MP3 → Tunesat copy) restricts
     the walk to immediate-children directories of ``src`` whose name is
     in the set.  Files sitting directly at ``src`` (no label parent)
     are skipped when a filter is active.
     """
+    if copy_workers < 1:
+        raise ValueError("copy_workers must be at least 1")
+
     copied = skipped = errors = 0
 
     if not src.exists():
         return (0, 0, 0)
 
+    tasks: list[tuple[Path, Path]] = []
     src_str = str(src)
     for root, dirs, files in os.walk(src):
         rel = os.path.relpath(root, src_str)
@@ -193,18 +221,39 @@ def _copy_tree_files(
             ):
                 continue
 
-            src_file = Path(root) / fn
-            dst_file = dst_dir / fn
+            tasks.append((Path(root) / fn, dst_dir / fn))
 
+    def _copy_one(task: tuple[Path, Path]) -> tuple[str, Path, Exception | None]:
+        src_file, dst_file = task
+        temporary = dst_file.with_name(
+            f".{dst_file.name}.upm-copy-{os.getpid()}-{threading.get_ident()}"
+        )
+        try:
+            if dst_file.exists() and not overwrite:
+                return ("skipped", src_file, None)
+            if not dry_run:
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, temporary)
+                os.replace(temporary, dst_file)
+            return ("copied", src_file, None)
+        except Exception as exc:
             try:
-                if dst_file.exists() and not overwrite:
-                    skipped += 1
-                else:
-                    if not dry_run:
-                        dst_dir.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src_file, dst_file)
-                    copied += 1
-            except Exception as exc:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return ("error", src_file, exc)
+
+    # Keep partner destinations sequential, but overlap SMB metadata and file
+    # I/O within the current destination.  This avoids 13 competing fan-outs
+    # while hiding much of the per-file network latency seen from HDF2.
+    with ThreadPoolExecutor(max_workers=copy_workers) as executor:
+        outcomes = executor.map(_copy_one, tasks)
+        for outcome, src_file, exc in outcomes:
+            if outcome == "copied":
+                copied += 1
+            elif outcome == "skipped":
+                skipped += 1
+            else:
                 errors += 1
                 logger.error(
                     f"      ✗  copy {src_file.name}: "
@@ -227,6 +276,7 @@ def _run_op(
     dry_run: bool,
     overwrite: bool,
     logger: logging.Logger,
+    copy_workers: int = DEFAULT_COPY_WORKERS,
 ) -> CopyResult:
     """Run one CopyOp and return its CopyResult."""
     logger.info(f"\n  • {op.name}")
@@ -250,6 +300,7 @@ def _run_op(
 
     if dry_run:
         logger.info("      [DRY RUN] no files will be written")
+    logger.info(f"      copy workers: {copy_workers}")
 
     copied, skipped, errors = _copy_tree_files(
         op.src, op.dst,
@@ -258,6 +309,7 @@ def _run_op(
         logger=logger,
         label_filter=op.label_filter,
         filename_filter=op.filename_filter,
+        copy_workers=copy_workers,
     )
 
     res = CopyResult(
@@ -301,9 +353,6 @@ def _build_ops(ctx: ReleaseContext) -> list[CopyOp]:
 
         # ---- Covers (1 destination — paired with WAV/SynchTank) ----
         CopyOp("Covers → SynchTank",      covers,     pd["synchtank_covers"], partner_key="synchtank"),
-
-        # ---- WAV → NBC staging (plain WAV folder copy, no covers) ----
-        CopyOp("WAV → NBC staging",          wav_src,    pd["nbc_staging_media"], partner_key="nbc"),
 
         # ---- WAV w COVERS → Netmix (covers ride along) ----
         CopyOp("WAV w COVERS → Netmix",      wavcov_src, pd["netmix_music"], partner_key="netmix"),
@@ -529,6 +578,7 @@ def copy_originals_to_finals(
     dry_run: bool,
     logger: logging.Logger,
     overwrite: bool = False,
+    copy_workers: int = DEFAULT_COPY_WORKERS,
 ) -> bool:
     """
     Execute every Step 10 copy operation.
@@ -538,6 +588,9 @@ def copy_originals_to_finals(
     any op produced an error — the orchestrator can then decide whether
     to stop or continue.
     """
+    if copy_workers < 1:
+        raise ValueError("copy_workers must be at least 1")
+
     ops = _build_ops(ctx)
     from delivery_state import (
         partner_is_delivered,
@@ -591,6 +644,7 @@ def copy_originals_to_finals(
     logger.info(f"    Specials root: {ctx.specials_dir}")
     logger.info(f"    HD final root: {ctx.hd_final_dir}")
     logger.info(f"    Month folder:  {ctx.month_display_folder}")
+    logger.info(f"    Copy workers:  {copy_workers} per destination")
     if overwrite:
         logger.info("    --overwrite is ON — existing destination files will be re-copied")
     if dry_run:
@@ -598,7 +652,13 @@ def copy_originals_to_finals(
 
     results: list[CopyResult] = []
     for op in ops:
-        res = _run_op(op, dry_run=dry_run, overwrite=overwrite, logger=logger)
+        res = _run_op(
+            op,
+            dry_run=dry_run,
+            overwrite=overwrite,
+            logger=logger,
+            copy_workers=copy_workers,
+        )
         results.append(res)
 
     corrections_ok = all(
@@ -613,8 +673,8 @@ def copy_originals_to_finals(
     # ---- Ex-US staging covers -----------------------------------------------
     # The "Ex-US WAV → ExUS staging" copy carries no cover art (unlike the
     # WAV w COVERS sources), so drop each album's cover from the flat
-    # 1-ORIGINAL/Covers folder into its matching album folder — mirroring the
-    # NBC staging layout.  Only runs when the staging audio actually landed, so
+    # 1-ORIGINAL/Covers folder into its matching album folder. Only runs when
+    # the staging audio actually landed, so
     # we never create cover-only folders.
     covers_ok = True
     exus_res = next(
@@ -700,6 +760,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Re-copy files that already exist at the destination "
                         "(default behaviour is skip-if-present, matching the "
                         "rest of the pipeline).")
+    p.add_argument(
+        "--copy-workers",
+        type=_positive_copy_workers,
+        default=DEFAULT_COPY_WORKERS,
+        metavar="N",
+        help="Concurrent file copies within one destination (default: 4).",
+    )
     p.add_argument("--skip-final-packaging", action="store_true",
                    help="Convenience no-op for parity with the orchestrator's "
                         "--skip-final-packaging flag.")
@@ -744,7 +811,13 @@ def _run_cli(argv: list[str] | None = None) -> int:
         for op in matches:
             logger.info(f"  - {op.name}")
         results = [
-            _run_op(op, dry_run=args.dry_run, overwrite=args.overwrite, logger=logger)
+            _run_op(
+                op,
+                dry_run=args.dry_run,
+                overwrite=args.overwrite,
+                logger=logger,
+                copy_workers=args.copy_workers,
+            )
             for op in matches
         ]
         overall_ok = all(r.ok for r in results)
@@ -754,7 +827,11 @@ def _run_cli(argv: list[str] | None = None) -> int:
         return 0 if overall_ok else 1
 
     ok = copy_originals_to_finals(
-        ctx, args.dry_run, logger, overwrite=args.overwrite
+        ctx,
+        args.dry_run,
+        logger,
+        overwrite=args.overwrite,
+        copy_workers=args.copy_workers,
     )
     return 0 if ok else 1
 

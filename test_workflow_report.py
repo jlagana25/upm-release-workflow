@@ -38,7 +38,8 @@ class WorkflowReportTests(unittest.TestCase):
             self.assertEqual(payload["release"]["id"], "UPM-2026-07-P1")
             self.assertEqual(payload["steps"]["preflight"]["status"], "completed")
             self.assertEqual(payload["diagnostics"][0]["level"], "warning")
-            self.assertIn("nbc_wav", payload["output_counts"])
+            self.assertIn("sourceaudio_us_aiff", payload["output_counts"])
+            self.assertNotIn("nbc_wav", payload["output_counts"])
 
 
 if __name__ == "__main__":

@@ -141,13 +141,12 @@ def _is_domo_csv_skeleton(dst: Path) -> bool:
     """
     True if `dst` exists but contains ONLY .csv files (no other file types).
 
-    Step 1 (Domo exports) writes the NBC / Japan / Tunesat metadata CSVs to
+    Step 1 (Domo exports) writes the Japan / Tunesat metadata CSVs to
     paths *inside* the Specials tree, creating their parent folders via
     ``mkdir(parents=True)``.  So by the time Step 2 runs, a partial
     ``UPM-YYYY-MM-P1/`` skeleton already exists — but it holds only those CSVs,
     not the baseline content.  Treating that as "destination already exists"
-    would wrongly block the baseline copy and leave the release tree (e.g. the
-    NBC release folder) missing.
+    would wrongly block the baseline copy and leave the release tree incomplete.
 
     A real prior baseline copy always contains non-CSV files (templates,
     docs, folder structure markers), so "only CSVs present" cleanly
@@ -539,11 +538,12 @@ def _normalize_delivery_folder_names(
     """Remove the baseline's legacy singular ``Release`` where appropriate.
 
     The baseline names contain ``MMMM YYYY Release``. After placeholder
-    substitution, Part deliveries must end at ``Part N`` and rolling ranges
-    must say ``Releases``. Full-month legacy runs retain singular ``Release``.
+    substitution, Part deliveries must end at ``Part N`` and rolling Final
+    Packaging folders use the abbreviated release end date. Full-month legacy
+    runs retain singular ``Release``.
     """
-    old = f"{ctx.month_display_folder} Release"
-    new = ctx.client_delivery_label
+    old = f"{ctx.delivery_display_folder} Release"
+    new = ctx.final_packaging_delivery_label
     if not root.exists():
         return
     japan_names = {
@@ -591,7 +591,8 @@ def create_specials_folder(
     Copy the UPM Specials Baseline into:
         /Volumes/Pegasus32 R8 - 1/_Specials/UPM/{specials_root}
 
-    Then replace MMMM YYYY throughout the new tree with ctx.month_display_folder.
+    Then replace MMMM YYYY throughout the new tree with the partner-facing
+    delivery display range.
     """
     logger.info(f"  Source: {BASELINE_SPECIALS}")
     logger.info(f"  Target: {ctx.specials_dir}")
@@ -604,7 +605,7 @@ def create_specials_folder(
         return False
 
     _apply_placeholder_replacements(
-        ctx.specials_dir, ctx.month_display_folder, dry_run, logger
+        ctx.specials_dir, ctx.delivery_display_folder, dry_run, logger
     )
     _normalize_delivery_folder_names(ctx.specials_dir, ctx, dry_run, logger)
 
@@ -643,7 +644,7 @@ def create_hd_folders(
     )
     if ok_staging:
         _apply_placeholder_replacements(
-            ctx.hd_staging_dir, ctx.month_display_folder, dry_run, logger
+            ctx.hd_staging_dir, ctx.delivery_display_folder, dry_run, logger
         )
         _normalize_delivery_folder_names(ctx.hd_staging_dir, ctx, dry_run, logger)
     else:
@@ -657,7 +658,7 @@ def create_hd_folders(
     )
     if ok_final:
         _apply_placeholder_replacements(
-            ctx.hd_final_dir, ctx.month_display_folder, dry_run, logger
+            ctx.hd_final_dir, ctx.delivery_display_folder, dry_run, logger
         )
         _normalize_delivery_folder_names(ctx.hd_final_dir, ctx, dry_run, logger)
     else:

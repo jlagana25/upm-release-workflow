@@ -11,12 +11,26 @@ the hard-won invariants that are easy to break.
 
 A modular Python automation for Universal Production Music's **14-day rolling
 release workflow** on macOS. One orchestrator (`upm_release_workflow.py`) runs
-**16 ordered steps** from Domo metadata exports through final partner packaging
-and the independent SoundMouse delivery.
+the workflow units numbered through Step 18 from Domo metadata exports through final partner packaging,
+the independent SoundMouse and BMAT deliveries, and Monday status synchronization.
+Steps 12 and 14 are intentionally retired with NBCUniversal and are not active
+units or valid selector tokens.
 
 - The August 2026 transition retains **Part 1 / Part 2** client labels.
 - Normal ongoing deliveries use exact inclusive 14-day date ranges and may
   cross month boundaries.
+- The one-time rolling transition covers September 1–11, 2026; the next range
+  starts September 12 and resumes the normal 14-day cadence.
+- August Part 2 and exact-date runs use compact start-date IDs
+  (`UPMYYYYMMDD`); August keeps its established client-facing Part 2 label.
+- Compact batch IDs do not control mounted-volume folder spelling. Specials and
+  Hard Drive Updates roots retain `UPM-YYYY-MM-DD` for date-based runs.
+- Rolling Final Packaging partner folders abbreviate month names while keeping
+  the full inclusive range, e.g.
+  `Universal Production Music Sep 29–Oct 12 2026 Releases - SynchTank`;
+  use that same abbreviated range in partner-facing delivery filenames,
+  package labels, album lists, and message subjects. Internal IDs and audit
+  date values retain their canonical forms.
 - Everything is date-driven from `--start-date/--end-date`, legacy
   `--year/--month/--part`, or `--previous-month`;
   **no month/year is ever hardcoded**. Naming tokens and destination paths are all
@@ -34,17 +48,36 @@ This repo automates **physical macOS machines with attached storage and GUI
 apps**. A cloud sandbox (Codex) has none of that. **Do not try to run the
 pipeline here — it will fail, and that failure means nothing about your code.**
 
+### Authorized local scheduled execution
+
+The `upm-overnight-workflow` Codex heartbeat is explicitly authorized to run
+the live orchestrator on **USMPSMDHDF2** when it has the machine's real login
+session, both Pegasus volumes, authenticated application sessions, and private
+workflow state. This authorization includes the normal in-scope effects of
+`python3 upm_release_workflow.py` for the exact date range pinned by the
+heartbeat: mounted-volume writes, Step 13 cleanup, partner uploads, and Monday
+status updates. It also authorizes persistent approval for that exact script
+entry point so scheduled runs do not pause for repeated confirmation.
+
+Before a live run, verify the host and required volumes, inspect the newest
+structured reports and release state, and use the safest valid initial or
+resume command. Preserve all correctness gates and fail closed. This standing
+authorization does not permit fabricated media, bypassing a failed gate,
+exposing credentials, inventing a different batch, or using unrelated commands.
+It does not apply in a cloud/headless sandbox or on a machine without the real
+GUI login session and mounted delivery storage.
+
 Specifically, these **cannot run in the sandbox** and must not be used as a
 validation signal:
 
-- **GUI automation** — Steps 5 and 16 (UniSync) and Steps 11–12 (Soundminer) drive
+- **GUI automation** — Steps 5 and 16 (UniSync) and Step 11 (Soundminer) drive
   desktop apps via `pyautogui` + `opencv` screen-matching. They need a real macOS
   GUI session, the apps installed, and per-machine reference screenshots. None
   exist here.
 - **Mounted storage** — every real input/output path is on two Thunderbolt
   volumes, `/Volumes/Pegasus32 R8 - 1` (Specials) and `/Volumes/Pegasus32 R8 - 2`
   (Hard Drive Updates). They are not present in the sandbox.
-- **Domo exports** — Steps 1 and 16 drive an authenticated Domo browser session via
+- **Domo exports** — Steps 1, 16, and 17 drive an authenticated Domo browser session via
   Playwright. Needs credentials and interactive login.
 - **SoundMouse CSV→XLSX normalization** — Step 16 exports metadata cards as CSV,
   builds clean XLSX workbooks with an OOXML shared-string table, then requires
@@ -122,7 +155,7 @@ with the three tools above.
 
 ---
 
-## 5. The 16 steps (and where things live)
+## 5. The 18 steps (and where things live)
 
 | Step | Name | Module | Runs in sandbox? |
 |------|------|--------|------------------|
@@ -134,11 +167,13 @@ with the three tools above.
 | 9 | Verification (**gate** for 10–15) | `verification.py`, `remediation.py` | Logic testable |
 | 10 | Final packaging **+ SoundExchange ingest forms** | `final_packaging.py`, `split_se_ingest_forms.py` | Logic testable |
 | 11 | SourceAudio AIFF mirror | `soundminer.py` | No (GUI) |
-| 12 | Soundminer NBC (12.7 = NBC WAV→MP3) | `soundminer.py`, `audio_conversion.py` | Convert logic testable; mirror = GUI |
+| 12 | **Retired — NBCUniversal** | — | Not an active workflow unit |
 | 13 | Non-main-track cleanup | `cleanup.py` | Logic testable |
-| 14 | Rename NBC files | `cleanup.py` | Logic testable |
+| 14 | **Retired — NBCUniversal** | — | Not an active workflow unit |
 | 15 | Final metadata cross-check | `final_metadata_verification.py` | Logic testable |
 | 16 | SoundMouse delivery | `soundmouse.py` | Data/filesystem logic testable; Domo + UniSync cannot run |
+| 17 | BMAT custom-content delivery | `bmat_delivery.py` | Selection/package logic testable; Domo, DAMS, and SFTP need real services |
+| 18 | Monday status synchronization | `monday_sync.py` | Planning testable; live API needs per-user token/network |
 
 Steps **10–15 are gated behind Step 9 and Step 1**: if verification or a Domo
 export fails on a real run, they're skipped. When Step 9
@@ -147,7 +182,7 @@ so it does not block finalization; a failed Step 1 still does.
 
 Step **16 is independent of the Step 9 gate**. It exports the SoundMouse
 tracklist and bucket, builds one directory from the resolved workflow start and
-end dates, runs additive US/Rest-of-World/Japan WAV UniSync jobs into `MEDIA`,
+end dates, runs additive country-specific WAV UniSync jobs into `MEDIA`,
 downloads flat covers, and exports only metadata cards selected by bucket
 codes 01–10. Those metadata cards are downloaded as CSV and converted into
 clean XLSX workbooks, so Domo formatting is never carried forward. Raw Domo
@@ -156,10 +191,16 @@ unions the audio and cover filenames across every selected metadata workbook,
 checks them against `MEDIA` and `Covers`, writes an auditable missing-items CSV,
 and fails Step 16 when a referenced file is absent.
 
-SoundMouse territory routing uses the canonical US tracklist as its partition:
-matching rows go to United States, remaining rows go to Rest of World, and Japan
-is a final fallback. Do not revert to sending the complete CSV to every
-territory; that creates false not-found warnings and multi-minute stalls.
+SoundMouse territory routing is controlled by its own tracklist's
+`Territory List`, not by membership in the US/Ex-US/Japan delivery catalogs.
+Australia is the first pass for every row containing `OZ`; a greedy cover adds
+only the other country passes required for rows Australia cannot supply. The
+passes share one destination and form a fallback chain, so each later country
+requests only the unresolved manifest. If the final required country has zero
+progress, Step 16 refreshes its tracklist's owning Domo ETL/card once and
+retries the recalculated manifest. Do not restore Rest-of-World/Japan routing
+for SoundMouse: those are separate catalog partitions, not its delivery
+territories.
 
 **SoundExchange note:** `split_se_ingest_forms.py` runs automatically as the
 **second phase of Step 10** via `run_soundexchange_split(ctx, dry_run, logger)`.
@@ -176,6 +217,18 @@ helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 `delivery_state.py` (release-local pending/uploaded/delivered partner status),
 `workflow_report.py` (structured JSON run report), `sourceaudio_delta.py`
 (post-delivery SourceAudio metadata/audio reconciliation),
+`monday_sync.py` (exact-batch Monday Status planning and API writes),
+`bmat_delivery.py` (date-scoped custom releases, DAMS downloads, ledger, SFTP),
+`synchtank_delivery.py` (standalone direct-root S3 upload with final trigger),
+`tunesat_delivery.py` (standalone complete-package SFTP delivery),
+`soundmouse_uploader_delivery.py` (standalone native-app SoundMouse upload),
+`post_packaging_delivery.py` (unified guarded endpoint runner),
+`delivery_common.py` (manifest/checkpoint/receipt safety primitives),
+`espn_delivery.py` (Media Shuttle folder delivery),
+`soundexchange_delivery.py` (two-registrant portal submission),
+`email_deliveries.py` (Qwire/Scripps Outlook handoff preparation),
+`outlook_connector_bridge.py` and `skills/outlook-delivery-bridge/SKILL.md`
+(Codex Outlook app handoff, send boundary, and Sent Items verification),
 `prune.py` (removes files from prior months the current tracklist no longer
 references — the counterpart to verification).
 
@@ -210,12 +263,11 @@ folders use explicit `Part 1`, `Part 2`, or `Full` labels and always describe
 the release/content month, even when processing happens in the next month.
 
 - **Selectors** (mutually exclusive): `--start-at <token>`, `--only <token>`.
-  Tokens come from `_STEP_UNITS` (e.g. `1,2,4,5,6,9,10,11,12,12.7,13,14,15,16`).
+  Tokens come from `_STEP_UNITS` (`1,2,4,5,6,9,10,11,13,15,16,17,18`).
 - **Per-step skips**: `--skip-domo`, `--skip-folder-setup`, `--skip-album-list-doc`,
   `--skip-unisync`, `--skip-covers`, `--skip-verify`, `--skip-final-packaging`,
-  `--skip-soundexchange`, `--skip-sourceaudio`, `--skip-soundminer`,
-  `--skip-nbc-mirror`, `--skip-non-maintrack-cleanup`, `--skip-rename`,
-  `--skip-final-metadata-check`, `--skip-soundmouse`.
+  `--skip-soundexchange`, `--skip-sourceaudio`, `--skip-non-maintrack-cleanup`,
+  `--skip-final-metadata-check`, `--skip-soundmouse`, `--skip-bmat`, `--skip-monday`.
 - **Step 13 deletes by default on real runs**: non-main-track cleanup passes
   `actually_delete = not args.dry_run`, so `--dry-run` is the preview/safety
   guard. `--delete-non-maintracks` is deprecated and ignored; it remains only
@@ -225,9 +277,8 @@ the release/content month, even when processing happens in the next month.
   SSH-spawned GUI process (macOS TCC blocks that capture context).
   `--soundminer-attended` re-adds
   optional supervision pauses. Because Soundminer persists one global Mirror
-  Settings state, Step 11 explicitly applies the SourceAudio AIFF profile and
-  Step 12 explicitly applies the NBC Broadcast Wave profile before every
-  mirror; neither flow may trust the previously persisted state.
+  Settings state, Step 11 explicitly applies the SourceAudio AIFF profile
+  before every mirror and may not trust the previously persisted state.
 
 When adding a step: update `_STEP_UNITS`, add the block in the orchestrator, set a
 `results[...]` status in every branch (run/skip/blocked), add a summary row in
@@ -270,6 +321,13 @@ inline or are submitted to HDF1's login-session agent.
   sub-folder). Label matching in `final_packaging.py` and index/keeper logic in
   `cleanup.py` compare on the **whitespace-stripped** name. An exact match silently
   drops a whole album. Keep the `.strip()` comparisons.
+- **Step 10 concurrency is bounded and HDF2-local.** File copies use four
+  workers by default within the active destination, while partner destinations
+  remain sequential. `--copy-workers 1` restores serial behavior. Do not turn
+  this into whole-operation fan-out or HDF1 delegation: the Pegasus paths are
+  SMB mounts on HDF2 and unbounded concurrent destinations can overwhelm them.
+  Preserve the hidden temporary-sibling copy plus atomic rename so interrupted
+  transfers cannot leave partial files that an idempotent restart would skip.
 - **The Tunesat keep-list spans two deliveries.** `cleanup.py`'s auto-fill for
   missing keepers searches **both** `1-ORIGINAL/Music/MP3/MEDIA` (US) **and**
   `1-ORIGINAL/Music/Ex-US (MP3)/MEDIA` (Ex-US), because the Tunesat folder holds
@@ -286,8 +344,17 @@ inline or are submitted to HDF1's login-session agent.
   Login Keychain items and fail rather than pausing for MFA. Credential values
   must never enter argv, logs, URLs, screenshots, reports, or repository files.
   UniSync reuses its own current-user Keychain session.
-- **MTV-Viacom is retired.** The shared Specials baseline may still contain its
-  historical folder, so both fresh `copytree` and additive baseline merges must
+- **Recover an expired UniSync browser session through its normal SSO route.**
+  If launching UniSync opens a Chrome `DAMS SSO` tab and the app remains on a
+  login screen, do not diagnose the covered UniSync menu as a shifted crop.
+  In the newest UniSync-created tab, click `UMG Employee`, select the saved UMG
+  work account on Microsoft's `Pick an account` page, use the browser's saved
+  password autofill, and click `Sign in`. Wait until UniSync receives the
+  callback and can open its CSV picker. Never read, copy, log, or expose the
+  password. Close only the UniSync-created `DAMS SSO` and Microsoft
+  `Working...` tabs after the callback; preserve all pre-existing browser tabs.
+- **MTV-Viacom and NBCUniversal are retired.** The shared Specials baseline may
+  still contain their historical folders, so both fresh `copytree` and additive baseline merges must
   filter names through `config.is_retired_partner_name()`. Do not delete old
   release folders as part of setup.
 - **Every `--skip-*` flag** must appear in `_ALL_SKIP_ATTRS` (enforced by
@@ -321,6 +388,17 @@ inline or are submitted to HDF1's login-session agent.
   tracklists before Step 10. Never assume a populated folder was delivered.
   Standalone Tunesat cleanup can use `--archive-extras` when recovery is safer
   than permanent deletion.
+- **Repeated UniSync zero-progress refreshes Domo once.** When a reduced retry
+  repeatedly returns every requested track as NOT FOUND, Step 5 treats the
+  mapped source Domo card/ETL as stale. It first runs configured upstream
+  source DataFlows (Japan 4312; SoundMouse 3691), then follows Card → DataSet →
+  Edit ETL to run the directly owning transform (Japan 4278; SoundMouse 4330).
+  Every run must produce a newest `SUCCESSFUL` History row before replacing
+  only that card export and retrying the recalculated missing set.
+  Lineage must resolve exactly once, and each card may refresh only once per
+  Step 5 run. A failed/ambiguous refresh or second stall fails closed. Explicit
+  `--skip-domo` disables this recovery. After each UniSync job, close only
+  Microsoft `Working...` tabs matching UniSync's exact Azure client ID.
 - **Delivery metadata must replace baseline templates.** Step 1 has dedicated
   SourceAudio US and SourceAudio Ex-US cards in addition to the other partner
   metadata cards. A failed export blocks Steps 10–15, and `--skip-domo` must not
@@ -328,15 +406,31 @@ inline or are submitted to HDF1's login-session agent.
 - **Soundminer must fail closed.** Never restore count-only mirror success,
   generic OK/Yes clicking, or a no-activity timeout that proceeds anyway.
   Metadata/source and destination filename manifests are correctness gates.
+  A small scan can finish during the initial dialog watcher; the record-grid
+  change from the pre-scan empty database is a valid positive activity signal,
+  but the scan poll must still stop on a Soundminer Log Window. Embed activity
+  is measured in the central progress-sheet region with its lower dedicated
+  threshold; whole-screen averaging can miss a visibly advancing percentage.
 - **SoundMouse XLSX must fail closed.** CSV conversion is only an intermediate
   stage. Every installed full or correction workbook must finish with native
   Excel Clear Formats + Save, retain identical metadata values, contain shared
   strings with no inline/empty-string cells, and identify Microsoft Macintosh
   Excel as the final writer. A structurally valid Python-only XLSX is not upload
-  compatible.
+  compatible. Open through Excel's standard POSIX-file command, bind the
+  resulting active workbook once, verify its exact filename, and drive that
+  bound object for Clear Formats, save, and close. Excel's `open workbook`
+  command can silently leave an unrelated workbook active.
   An incremental refresh may proceed only when the destination is a strict
   subset of the expected manifest (missing only); unexpected, duplicate, or
   wrong-format outputs still fail before GUI mutation.
+- **Soundmouse Uploader must target UPPM/Music.** The post-Step-16 native-app
+  delivery always explicitly selects and re-verifies workspace `UPPM` and
+  module `Music` before submitting the complete SoundMouse release directory.
+  Require the newest real Step 16 result to be completed, refuse an existing
+  active queue, compare every newly inserted queue file URL with the exact
+  local `MEDIA`/`Covers`/`Metadata` manifest, and require every row to reach the
+  app's completed state. Do not trust a generic completion dialog or count,
+  read credentials, or accept a different workspace/module.
 - **Agent requests are atomic JSON.** HDF2 sends control JSON over SSH into
   HDF1's local `pending/`; HDF1 claims by rename, updates heartbeats/status,
   and archives the request. SSH never owns or drives the GUI. Keep
@@ -351,10 +445,6 @@ inline or are submitted to HDF1's login-session agent.
   checks for a locked console or missing Soundminer window. Do not remove those
   guards: a locked Mac yields wallpaper-only captures that can otherwise look
   like progress when a dynamic wallpaper is enabled.
-  Recovery requests may forward the explicit NBC phase skips
-  (`skip_delete_records`, `skip_import`, `skip_embed`, `skip_mirror`) only after
-  the corresponding state has been directly validated; do not use them to
-  bypass a failed or unknown phase.
   The `sourceaudio_us_only` option is reserved for an isolated demo/recovery
   request that also pins a separate `specials_dir_override`; normal Step 11
   must continue to process both US and Ex-US pairs. Override requests use the
@@ -367,6 +457,108 @@ inline or are submitted to HDF1's login-session agent.
   `0700`, files/screenshots are `0600`; `security_scan.py` and the pre-commit
   hook reject identities, auth databases, and literal secrets. Keep
   `AUTHENTICATION.md` synchronized with auth behavior.
+  Domo API clients use a separate workflow-owned Keychain ID/secret pair.
+  Enrollment validates the pair through HTTP Basic authentication against the
+  OAuth token endpoint before storage, requests only the minimal `data` scope,
+  verifies both stored values exactly, and restores the prior pair after any
+  partial write. API credentials and short-lived tokens must never enter argv,
+  URLs, environment variables, logs, reports, screenshots, or repository files.
+- **BMAT is date-scoped and ledger-gated.** Step 17 uses the resolved workflow
+  range for the custom-releases Domo card and keeps the submission card as a
+  full inventory. Accepted and ingestion-pending catalogues in the local
+  Pegasus ledger are excluded. Retryable prepared/failed batches are resumed,
+  not duplicated. DAMS automation may only navigate and download from album
+  Audio pages. Exact manifests are validated before SFTP; remote sizes are
+  checked and `delivery.complete` is always the final upload. The first-seen
+  host key is persisted privately and later changes fail closed.
+- **SynchTank S3 is a direct-root triggered inbox.** Upload the contents of the
+  final SynchTank package directly to the configured bucket root, never under a
+  batch prefix. Reject unexpected remote objects, verify every expected key by
+  exact byte size, and upload the empty lower-case `delivery.complete` object
+  only as the final mutation. AWS access-key values live only in the current
+  user's Keychain and memory; never place either value in repository data,
+  argv, environment variables, logs, or reports.
+- **TuneSat SFTP receives the complete partner package.** Preserve the final
+  package's `Music/` and `Metadata/` directories directly beneath
+  `/AudioFiles`; do not add a batch prefix or completion marker. Pin the
+  first-seen host key, reject later changes and unexpected remote files, use
+  `.part` temporary siblings plus atomic renames, and verify exact remote byte
+  sizes before marking the partner uploaded. TuneSat credentials live only in
+  the current user's Keychain and memory.
+  Routine authentication and connection requests from the configured
+  SynchTank and TuneSat endpoints are pre-authorized for an otherwise
+  authorized delivery. This does not authorize accepting a changed pinned
+  host key, a changed destination, broader permissions, or unrelated system
+  requests; those remain fail-closed boundaries.
+- **Post-packaging delivery is exact-batch authorized.** The unified runner is
+  non-mutating unless live execution is explicitly selected and the supplied
+  confirmation equals `ctx.release_id`. It skips partners already marked
+  delivered, preserves content-addressed restart checkpoints, and does not
+  treat a prepared Outlook connector handoff as a sent message. ESPN remains
+  uploaded until downstream acknowledgement; Qwire/Scripps require an exact
+  Sent Items match, and SoundExchange requires both registrants in Upload
+  History before those endpoints become delivered. A send/submit intent whose
+  result cannot yet be verified is uncertain state and must never be retried as
+  a fresh submission.
+- **The Outlook Email app cannot send.** It creates and reads drafts and Sent
+  Items, so Qwire/Scripps use a repository skill plus
+  `outlook_connector_bridge.py`. Require one attachment below 3 MiB, verify the
+  connector-created draft, record an exact-release send intent, use native
+  Outlook only for that one authorized send, and verify the exact Sent Items
+  result through the connector before writing the receipt. Never equate a
+  prepared handoff or draft with delivery, and never resend an uncertain send.
+  Outlook/Graph may add trailing spaces to every stored plain-text line and its
+  attachment `size_bytes` includes provider overhead. Normalize CRLF and strip
+  line-ending spaces for body comparison; do not collapse other whitespace.
+  Hash the local attachment before drafting, then require one exact-name,
+  non-inline file attachment and successful connector materialization rather
+  than comparing Graph's reported size to the raw local byte count.
+- **Monday writes are exact-batch and fail closed.** Step 18 stores each
+  operator's personal API token only in that macOS user's Login Keychain. It
+  collects the token once through a hidden Python TTY prompt, validates it
+  before changing Keychain, stores it through Security.framework (not a
+  `security` subprocess), and verifies the stored value exactly without ever
+  putting the secret in argv, the environment, logs, or files. It
+  validates the board/group/column schema and stable status-label IDs before
+  writing. The active source-board automation keys off `Batch Master` and uses
+  the compact `UPMYYYYMMDD` Batch value; `Catalog` and `Release Date` replace
+  the retired Part input for newly imported rows. Compact runs—including the
+  August 2026 Part 2 bridge—require exactly one item in each of Content Updates,
+  Hard Drive Updates, and SoundMouse Updates under that same batch, with no Part
+  suffix. For historical legacy month/part records, Part 1 requires
+  exactly one Content Updates and Hard Drive Updates item for `YYYYMM` plus one
+  SoundMouse item for `YYYYMM -1`; Part 2 requires only the automation-created
+  SoundMouse item for `YYYYMM -2`. It never creates
+  labels, re-reads both batches to verify writes, and never downgrades final
+  subitem or main-item statuses. Prepared
+  packages become `Clear to Send`; explicit delivered state becomes `Complete`.
+  During a full run, live checkpoints advance Hard Drive after Step 10,
+  Digital Fulfillment after Step 15, and the three preparation subitems inside
+  SoundMouse as their Step 16 phases complete. These checkpoints must pass
+  `include_history=False`; otherwise an older successful report could advance
+  work that the current process has not finished. Step 18 remains the final
+  reconciliation and the history-aware `--only 18` recovery path.
+  An `--only 18` recovery may use the newest non-skipped gate result from private
+  non-dry-run reports; a newer failure must override an older success.
+  Use a dry-run before a live update and use `--monday-batch` only to resolve an
+  intentional legacy `YYYYMM` or exact-date `UPMYYYYMMDD` mismatch.
+  The Domo Audio Batch card (`1143680792`) is a combined Monday control
+  inventory: it contains the union of albums included in UPM-US, UPM-ExUS, or
+  SoundMouse and uses `Catalog` to describe that routing. It must never replace
+  the separate UPM-US, UPM-ExUS, or SoundMouse tracklists used to build and
+  validate the actual partner deliveries. Source-board import groups retain the
+  historical display pattern with a compact date suffix, e.g.
+  `UPPM Audio Batch 260801`, while every row's Batch value remains the canonical
+  `UPM20260801` workflow key.
+  Before starting the release workflow, refresh/export the date-filtered Domo
+  Audio Batch card, load it into the `UPPM Audio Batch Releases` source board,
+  and let the active `Batch Master` automation create the destination records.
+  Verify through the Monday API that exactly one Content Updates, Hard Drive
+  Updates, and SoundMouse Updates item exists for the compact batch and that
+  each has its required subitems. Treat this as a required preflight gate, not
+  a Step 18 repair. All Monday reads and authorized mutations—including source
+  batch loading and repair—must use the Monday API; do not drive the Monday
+  website UI when the API can perform the operation.
 - **Interrupted Step 2 copies are recoverable.** `_safe_copytree` archives a
   partially copied Specials destination on `KeyboardInterrupt`. If an older
   partial tree already exists with unresolved `MMMM YYYY` names, Step 2 treats
@@ -423,4 +615,4 @@ saved. When proposing commits, follow these rules:
 
 ---
 
-_Last updated when SoundMouse was added as independent Step 16._
+_Last updated when NBCUniversal Steps 12/14 were retired and Monday source-board loading became a required API preflight._

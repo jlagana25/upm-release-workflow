@@ -185,6 +185,53 @@ class DeliveryRefreshTests(unittest.TestCase):
             self.assertTrue((destination / "Label" / "Album" / "keep_100.mp3").exists())
             self.assertFalse((destination / "Label" / "Album" / "omit_200.mp3").exists())
 
+    def test_parallel_copy_is_complete_atomic_and_restartable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            destination = root / "destination"
+            for index in range(24):
+                path = source / f"Label{index % 3}" / "Album" / f"track{index}.wav"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"audio-{index}".encode())
+
+            first = _copy_tree_files(
+                source,
+                destination,
+                dry_run=False,
+                overwrite=False,
+                logger=logging.getLogger("delivery-refresh"),
+                copy_workers=4,
+            )
+            second = _copy_tree_files(
+                source,
+                destination,
+                dry_run=False,
+                overwrite=False,
+                logger=logging.getLogger("delivery-refresh"),
+                copy_workers=4,
+            )
+
+            self.assertEqual(first, (24, 0, 0))
+            self.assertEqual(second, (0, 24, 0))
+            self.assertEqual(
+                sorted(path.read_bytes() for path in destination.rglob("*.wav")),
+                sorted(path.read_bytes() for path in source.rglob("*.wav")),
+            )
+            self.assertEqual(list(destination.rglob("*.upm-copy-*")), [])
+
+    def test_copy_workers_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                _copy_tree_files(
+                    Path(tmp),
+                    Path(tmp) / "destination",
+                    dry_run=True,
+                    overwrite=False,
+                    logger=logging.getLogger("delivery-refresh"),
+                    copy_workers=0,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

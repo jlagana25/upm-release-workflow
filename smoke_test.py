@@ -32,6 +32,10 @@ MODULES = [
     "make_soundminer_crops", "prune", "unisync_automation", "unisync_prefs",
     "remote_runner", "soundminer_agent", "workflow_report", "auth_manager",
     "security_scan", "soundmouse", "sourceaudio_delta", "delivery_state",
+    "delivery_common", "espn_delivery", "soundexchange_delivery",
+    "email_deliveries", "outlook_connector_bridge", "post_packaging_delivery",
+    "monday_sync", "bmat_delivery", "synchtank_delivery", "tunesat_delivery",
+    "soundmouse_uploader_delivery",
     "upm_release_workflow", "ai_team_demo",
 ]
 

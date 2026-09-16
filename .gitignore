@@ -13,6 +13,7 @@ Icon?
 
 # Workflow run artifacts (regenerated every run; never source)
 _logs/
+outputs/
 *.log
 unisync_debug_steps/
 soundminer_debug/
