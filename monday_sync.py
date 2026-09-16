@@ -337,7 +337,6 @@ class MondayClient:
                 query SourceBoards($page: Int!) {
                   boards(limit: 500, page: $page, state: active) {
                     id name
-                    columns { id title type }
                   }
                 }
                 """,
@@ -355,7 +354,19 @@ class MondayClient:
                 f"Expected exactly one active Monday board named "
                 f"{MONDAY_SOURCE_BOARD_NAME!r}; found {len(matches)}"
             )
-        board = matches[0]
+        board_id = int(matches[0]["id"])
+        data = self._request(
+            """
+            query SourceBoardSchema($board: [ID!]!) {
+              boards(ids: $board) { id name columns { id title type } }
+            }
+            """,
+            {"board": [board_id]},
+        )
+        boards = data.get("boards") or []
+        if len(boards) != 1 or str(boards[0].get("name") or "") != MONDAY_SOURCE_BOARD_NAME:
+            raise MondayError("Monday source board disappeared during schema validation")
+        board = boards[0]
         by_title: dict[str, tuple[str, str]] = {}
         duplicates: set[str] = set()
         for column in board.get("columns") or []:
@@ -378,7 +389,7 @@ class MondayClient:
             if duplicate_required:
                 details.append("duplicate " + ", ".join(duplicate_required))
             raise MondayError("Monday source-board schema mismatch: " + "; ".join(details))
-        return SourceBoardSchema(int(board["id"]), by_title)
+        return SourceBoardSchema(board_id, by_title)
 
     @staticmethod
     def _source_values(

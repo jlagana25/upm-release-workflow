@@ -167,12 +167,16 @@ class MondaySyncTests(unittest.TestCase):
             {"boards": [{
                 "id": "5981022568",
                 "name": "UPPM Audio Batch Releases",
+            }]},
+            {"boards": [{
+                "id": "5981022568",
+                "name": "UPPM Audio Batch Releases",
                 "columns": columns,
             }]},
         ]) as request:
             schema = client.validate_source_schema()
         self.assertEqual(5981022568, schema.board_id)
-        self.assertEqual(2, request.call_count)
+        self.assertEqual(3, request.call_count)
 
     def test_transition_and_range_batch_derivation(self):
         transition = ReleaseContext(2026, 7, 1, previous_month=True)
