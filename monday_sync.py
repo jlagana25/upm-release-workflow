@@ -29,10 +29,23 @@ MONDAY_API_URL = "https://api.monday.com/v2"
 MONDAY_API_VERSION = "2026-07"
 MONDAY_BOARD_ID = 1242660947
 MONDAY_SUBITEM_BOARD_ID = 1242669161
+MONDAY_SOURCE_BOARD_ID = 5981022568
 MONDAY_SOURCE_BOARD_NAME = "UPPM Audio Batch Releases"
 MONDAY_AUDIO_BATCH_CARD_ID = "1143680792"
 MONDAY_AUTOMATION_TIMEOUT_SECONDS = 5 * 60
 MONDAY_AUTOMATION_POLL_SECONDS = 5
+
+SOURCE_COLUMN_SPECS = {
+    # Logical field: (stable Monday column ID, expected title, expected type)
+    "Batch": ("text", "Batch", "text"),
+    "Catalog": ("text_mm6sxbha", "Catalog", "text"),
+    "Release Date": ("date_mm6sxypv", "Release Date", "date"),
+    "LabelId": ("text4", "LabelID", "text"),
+    "Album Code": ("text7", "Album Code", "text"),
+    "Album Title": ("text6", "Album Title", "text"),
+    "Digital Fulfillment": ("status0", "Digital Fulfillment", "status"),
+    "Batch Master": ("status1", "Batch Master", "status"),
+}
 
 GROUP_CONTENT = "Content Updates"
 GROUP_SOUNDMOUSE = "SoundMouse Updates"
@@ -326,70 +339,39 @@ class MondayClient:
         self._validate_status_labels(child_columns["status"], REQUIRED_SUBITEM_LABELS)
 
     def validate_source_schema(self) -> SourceBoardSchema:
-        """Discover and validate the source board by its exact name."""
-        matches: list[Mapping[str, Any]] = []
-        # This account can see several thousand boards. Page through the full
-        # accessible inventory instead of assuming the source board appears in
-        # the first 1,000 results.
-        for page in range(1, 21):
-            data = self._request(
-                """
-                query SourceBoards($page: Int!) {
-                  boards(limit: 500, page: $page, state: active) {
-                    id name
-                  }
-                }
-                """,
-                {"page": page},
-            )
-            boards = data.get("boards") or []
-            matches.extend(
-                board for board in boards
-                if str(board.get("name") or "") == MONDAY_SOURCE_BOARD_NAME
-            )
-            if len(boards) < 500:
-                break
-        if len(matches) != 1:
-            raise MondayError(
-                f"Expected exactly one active Monday board named "
-                f"{MONDAY_SOURCE_BOARD_NAME!r}; found {len(matches)}"
-            )
-        board_id = int(matches[0]["id"])
+        """Validate the exact source board and its stable column IDs."""
         data = self._request(
             """
             query SourceBoardSchema($board: [ID!]!) {
               boards(ids: $board) { id name columns { id title type } }
             }
             """,
-            {"board": [board_id]},
+            {"board": [MONDAY_SOURCE_BOARD_ID]},
         )
         boards = data.get("boards") or []
         if len(boards) != 1 or str(boards[0].get("name") or "") != MONDAY_SOURCE_BOARD_NAME:
-            raise MondayError("Monday source board disappeared during schema validation")
+            raise MondayError("Monday source board ID/name validation failed")
         board = boards[0]
-        by_title: dict[str, tuple[str, str]] = {}
-        duplicates: set[str] = set()
-        for column in board.get("columns") or []:
-            title = str(column.get("title") or "").strip()
-            if title in by_title:
-                duplicates.add(title)
-            by_title[title] = (
-                str(column.get("id") or ""), str(column.get("type") or "")
-            )
-        required = {
-            "Batch", "Catalog", "Release Date", "LabelId", "Album Code",
-            "Album Title", "Digital Fulfillment", "Batch Master",
-        }
-        missing = sorted(required - set(by_title))
-        duplicate_required = sorted(required & duplicates)
-        if missing or duplicate_required:
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if duplicate_required:
-                details.append("duplicate " + ", ".join(duplicate_required))
-            raise MondayError("Monday source-board schema mismatch: " + "; ".join(details))
-        return SourceBoardSchema(board_id, by_title)
+        by_id = {str(column.get("id") or ""): column for column in board.get("columns") or []}
+        resolved: dict[str, tuple[str, str]] = {}
+        mismatches: list[str] = []
+        for logical, (column_id, title, column_type) in SOURCE_COLUMN_SPECS.items():
+            actual = by_id.get(column_id)
+            if not actual:
+                mismatches.append(f"missing {column_id} ({logical})")
+                continue
+            actual_title = str(actual.get("title") or "").strip()
+            actual_type = str(actual.get("type") or "")
+            if actual_title != title or actual_type != column_type:
+                mismatches.append(
+                    f"{column_id}: expected {title}/{column_type}, "
+                    f"found {actual_title}/{actual_type}"
+                )
+                continue
+            resolved[logical] = (column_id, column_type)
+        if mismatches:
+            raise MondayError("Monday source-board schema mismatch: " + "; ".join(mismatches))
+        return SourceBoardSchema(MONDAY_SOURCE_BOARD_ID, resolved)
 
     @staticmethod
     def _source_values(

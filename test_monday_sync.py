@@ -151,32 +151,30 @@ class MondaySyncTests(unittest.TestCase):
         self.assertNotIn("API-Version", headers[0])
         self.assertNotIn("API-Version", headers[1])
 
-    def test_source_board_discovery_pages_past_large_board_inventory(self):
+    def test_source_board_schema_uses_stable_ids_despite_duplicate_titles(self):
         columns = [
-            {"id": f"c{index}", "title": title, "type": "text"}
-            for index, title in enumerate((
-                "Batch", "Catalog", "Release Date", "LabelId", "Album Code",
-                "Album Title", "Digital Fulfillment", "Batch Master",
-            ))
+            {"id": "text", "title": "Batch", "type": "text"},
+            {"id": "text_mm6sxbha", "title": "Catalog", "type": "text"},
+            {"id": "dropdown_duplicate", "title": "Catalog", "type": "dropdown"},
+            {"id": "date_mm6sxypv", "title": "Release Date", "type": "date"},
+            {"id": "text4", "title": "LabelID", "type": "text"},
+            {"id": "text7", "title": "Album Code", "type": "text"},
+            {"id": "text6", "title": "Album Title", "type": "text"},
+            {"id": "status0", "title": "Digital Fulfillment", "type": "status"},
+            {"id": "status1", "title": "Batch Master", "type": "status"},
         ]
         client = MondayClient("sample-value")
-        full_page = [{"id": str(index), "name": f"Board {index}", "columns": []}
-                     for index in range(500)]
-        with patch.object(client, "_request", side_effect=[
-            {"boards": full_page},
-            {"boards": [{
-                "id": "5981022568",
-                "name": "UPPM Audio Batch Releases",
-            }]},
-            {"boards": [{
+        with patch.object(client, "_request", return_value={
+            "boards": [{
                 "id": "5981022568",
                 "name": "UPPM Audio Batch Releases",
                 "columns": columns,
-            }]},
-        ]) as request:
+            }],
+        }) as request:
             schema = client.validate_source_schema()
         self.assertEqual(5981022568, schema.board_id)
-        self.assertEqual(3, request.call_count)
+        self.assertEqual("text_mm6sxbha", schema.columns["Catalog"][0])
+        self.assertEqual(1, request.call_count)
 
     def test_transition_and_range_batch_derivation(self):
         transition = ReleaseContext(2026, 7, 1, previous_month=True)
