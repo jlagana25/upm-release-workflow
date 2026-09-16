@@ -328,11 +328,14 @@ class MondayClient:
     def validate_source_schema(self) -> SourceBoardSchema:
         """Discover and validate the source board by its exact name."""
         matches: list[Mapping[str, Any]] = []
-        for page in range(1, 11):
+        # This account can see several thousand boards. Page through the full
+        # accessible inventory instead of assuming the source board appears in
+        # the first 1,000 results.
+        for page in range(1, 21):
             data = self._request(
                 """
                 query SourceBoards($page: Int!) {
-                  boards(limit: 100, page: $page, state: active) {
+                  boards(limit: 500, page: $page, state: active) {
                     id name
                     columns { id title type }
                   }
@@ -345,7 +348,7 @@ class MondayClient:
                 board for board in boards
                 if str(board.get("name") or "") == MONDAY_SOURCE_BOARD_NAME
             )
-            if len(boards) < 100:
+            if len(boards) < 500:
                 break
         if len(matches) != 1:
             raise MondayError(

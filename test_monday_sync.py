@@ -151,6 +151,29 @@ class MondaySyncTests(unittest.TestCase):
         self.assertNotIn("API-Version", headers[0])
         self.assertNotIn("API-Version", headers[1])
 
+    def test_source_board_discovery_pages_past_large_board_inventory(self):
+        columns = [
+            {"id": f"c{index}", "title": title, "type": "text"}
+            for index, title in enumerate((
+                "Batch", "Catalog", "Release Date", "LabelId", "Album Code",
+                "Album Title", "Digital Fulfillment", "Batch Master",
+            ))
+        ]
+        client = MondayClient("sample-value")
+        full_page = [{"id": str(index), "name": f"Board {index}", "columns": []}
+                     for index in range(500)]
+        with patch.object(client, "_request", side_effect=[
+            {"boards": full_page},
+            {"boards": [{
+                "id": "5981022568",
+                "name": "UPPM Audio Batch Releases",
+                "columns": columns,
+            }]},
+        ]) as request:
+            schema = client.validate_source_schema()
+        self.assertEqual(5981022568, schema.board_id)
+        self.assertEqual(2, request.call_count)
+
     def test_transition_and_range_batch_derivation(self):
         transition = ReleaseContext(2026, 7, 1, previous_month=True)
         self.assertEqual(monday_batch_month(transition), "202608")
