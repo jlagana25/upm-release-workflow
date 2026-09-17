@@ -42,6 +42,23 @@ class SoundMouseUploaderDeliveryTests(unittest.TestCase):
         with self.assertRaises(sud.SoundMouseUploaderError):
             sud.collect_package(self.package)
 
+    def test_missing_reports_and_correction_audits_are_not_uploaded(self) -> None:
+        (self.package / "SoundMouse Missing Report.csv").write_text(
+            "Type,Filename\n", encoding="utf-8"
+        )
+        missing = self.package / "Missing"
+        missing.mkdir()
+        (missing / "SoundMouse Missing Audit.csv").write_text(
+            "Action,Filename\n", encoding="utf-8"
+        )
+
+        files = sud.collect_package(self.package)
+
+        self.assertEqual(
+            [item.relative for item in files],
+            ["Covers/cover.jpg", "MEDIA/track.wav", "Metadata/metadata.xlsx"],
+        )
+
     def test_queue_manifest_uses_full_file_urls(self) -> None:
         files = sud.collect_package(self.package)
         rows = tuple(

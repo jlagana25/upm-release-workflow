@@ -66,15 +66,25 @@ def collect_package(root: Path) -> tuple[PackageFile, ...]:
     if not root.is_dir():
         raise SoundMouseUploaderError(f"SoundMouse package is missing: {root}")
     files: list[PackageFile] = []
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise SoundMouseUploaderError(f"SoundMouse package contains a symlink: {path}")
-        if not path.is_file() or path.name in IGNORED_NAMES:
+    for top_level in ("Covers", "MEDIA", "Metadata"):
+        delivery_root = root / top_level
+        if not delivery_root.is_dir():
             continue
-        size = path.stat().st_size
-        if size <= 0:
-            raise SoundMouseUploaderError(f"SoundMouse package contains an empty file: {path}")
-        files.append(PackageFile(path.resolve(), path.relative_to(root).as_posix(), size))
+        for path in sorted(delivery_root.rglob("*")):
+            if path.is_symlink():
+                raise SoundMouseUploaderError(
+                    f"SoundMouse package contains a symlink: {path}"
+                )
+            if not path.is_file() or path.name in IGNORED_NAMES:
+                continue
+            size = path.stat().st_size
+            if size <= 0:
+                raise SoundMouseUploaderError(
+                    f"SoundMouse package contains an empty file: {path}"
+                )
+            files.append(
+                PackageFile(path.resolve(), path.relative_to(root).as_posix(), size)
+            )
     if not files:
         raise SoundMouseUploaderError(f"SoundMouse package contains no files: {root}")
     top_levels = {Path(item.relative).parts[0] for item in files}
