@@ -61,7 +61,11 @@ class QueueRow:
     original_filename: str
 
 
-def collect_package(root: Path) -> tuple[PackageFile, ...]:
+def collect_package(
+    root: Path,
+    *,
+    required_top_levels: frozenset[str] = frozenset({"MEDIA", "Covers", "Metadata"}),
+) -> tuple[PackageFile, ...]:
     root = Path(root)
     if not root.is_dir():
         raise SoundMouseUploaderError(f"SoundMouse package is missing: {root}")
@@ -88,7 +92,7 @@ def collect_package(root: Path) -> tuple[PackageFile, ...]:
     if not files:
         raise SoundMouseUploaderError(f"SoundMouse package contains no files: {root}")
     top_levels = {Path(item.relative).parts[0] for item in files}
-    missing = sorted({"MEDIA", "Covers", "Metadata"} - top_levels)
+    missing = sorted(required_top_levels - top_levels)
     if missing:
         raise SoundMouseUploaderError(
             "SoundMouse package is incomplete; missing nonempty: " + ", ".join(missing)
@@ -176,37 +180,45 @@ def validate_queue_rows(
 
 
 def _ui_script(package: Path) -> str:
-    parent = str(package.parent).replace("\\", "\\\\").replace('"', '\\"')
-    name = package.name.replace("\\", "\\\\").replace('"', '\\"')
+    package_path = str(package).replace("\\", "\\\\").replace('"', '\\"')
     return f'''
 tell application "{APP_PROCESS}" to activate
 tell application "System Events"
     tell process "{APP_PROCESS}"
         set frontmost to true
+        set mainWindow to missing value
         repeat 120 times
-            if exists window 1 then exit repeat
+            repeat with candidateWindow in windows
+                try
+                    if exists toolbar 1 of candidateWindow then
+                        set mainWindow to candidateWindow
+                        exit repeat
+                    end if
+                end try
+            end repeat
+            if mainWindow is not missing value then exit repeat
             delay 0.25
         end repeat
-        if not (exists window 1) then error "Uploader window did not open"
+        if mainWindow is missing value then error "Uploader main window did not open"
 
-        if exists sheet 1 of window 1 then
-            if exists button "Sign In" of sheet 1 of window 1 then
-                click button "Sign In" of sheet 1 of window 1
+        if exists sheet 1 of mainWindow then
+            if exists button "Sign In" of sheet 1 of mainWindow then
+                click button "Sign In" of sheet 1 of mainWindow
                 repeat 240 times
-                    if not (exists sheet 1 of window 1) then exit repeat
+                    if not (exists sheet 1 of mainWindow) then exit repeat
                     delay 0.25
                 end repeat
             end if
         end if
-        if exists sheet 1 of window 1 then error "Uploader sign-in did not complete"
+        if exists sheet 1 of mainWindow then error "Uploader sign-in did not complete"
 
-        set workspaceButton to first pop up button of toolbar 1 of window 1 whose description is "Workspace"
+        set workspaceButton to first pop up button of toolbar 1 of mainWindow whose description is "Workspace"
         click workspaceButton
         click menu item "{REQUIRED_WORKSPACE}" of menu 1 of workspaceButton
         delay 0.5
         if value of workspaceButton is not "{REQUIRED_WORKSPACE}" then error "Workspace is not UPPM"
 
-        set moduleButton to first pop up button of toolbar 1 of window 1 whose description is "Module"
+        set moduleButton to first pop up button of toolbar 1 of mainWindow whose description is "Module"
         click moduleButton
         click menu item "{REQUIRED_MODULE}" of menu 1 of moduleButton
         delay 0.5
@@ -214,25 +226,27 @@ tell application "System Events"
 
         click menu item "Add…" of menu "File" of menu bar 1
         repeat 120 times
-            if exists sheet 1 of window 1 then exit repeat
+            if exists sheet 1 of mainWindow then exit repeat
             delay 0.25
         end repeat
-        if not (exists sheet 1 of window 1) then error "Uploader Add panel did not open"
-        set uploadSheet to sheet 1 of window 1
-        set workspaceMatches to every pop up button of entire contents of uploadSheet whose value is "{REQUIRED_WORKSPACE}"
-        if (count of workspaceMatches) is not 1 then error "Add panel workspace is not uniquely UPPM"
-        set musicMatches to every radio button of entire contents of uploadSheet whose name is "{REQUIRED_MODULE}"
-        if (count of musicMatches) is not 1 then error "Add panel Music module control is missing"
-        if value of item 1 of musicMatches is not 1 then error "Add panel module is not Music"
+        if not (exists sheet 1 of mainWindow) then error "Uploader Add panel did not open"
+        set uploadSheet to sheet 1 of mainWindow
 
         keystroke "g" using {{command down, shift down}}
-        delay 0.5
-        keystroke "{parent}"
+        repeat 120 times
+            if exists sheet 1 of uploadSheet then exit repeat
+            delay 0.25
+        end repeat
+        if not (exists sheet 1 of uploadSheet) then error "Uploader Go to Folder panel did not open"
+        set goToSheet to sheet 1 of uploadSheet
+        set value of text field 1 of goToSheet to "{package_path}"
         key code 36
-        delay 1
-        keystroke "{name}"
-        delay 0.5
-        click button "Open" of uploadSheet
+        repeat 120 times
+            if not (exists sheet 1 of uploadSheet) then exit repeat
+            delay 0.25
+        end repeat
+        if exists sheet 1 of uploadSheet then error "Uploader did not navigate to package folder"
+        key code 36
     end tell
 end tell
 '''
@@ -252,16 +266,22 @@ def _ui_submit_package(package: Path) -> None:
         raise SoundMouseUploaderError(f"Could not submit package to Uploader: {detail}")
 
 
-def _receipt_path(ctx: ReleaseContext) -> Path:
-    return ctx.specials_dir / "_WORKFLOW" / "soundmouse_uploader_receipt.json"
+def _receipt_path(ctx: ReleaseContext, *, correction: bool = False) -> Path:
+    filename = (
+        "soundmouse_uploader_correction_receipt.json"
+        if correction else "soundmouse_uploader_receipt.json"
+    )
+    return ctx.specials_dir / "_WORKFLOW" / filename
 
 
 def _write_receipt(
     ctx: ReleaseContext,
     files: tuple[PackageFile, ...],
     rows: tuple[QueueRow, ...],
+    *,
+    correction: bool = False,
 ) -> Path:
-    path = _receipt_path(ctx)
+    path = _receipt_path(ctx, correction=correction)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = {
         "schema_version": 1,
@@ -269,6 +289,7 @@ def _write_receipt(
         "release_id": ctx.release_id,
         "workspace": REQUIRED_WORKSPACE,
         "module": REQUIRED_MODULE,
+        "correction": correction,
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "queue_row_ids": [row.row_id for row in rows],
         "files": [{"path": item.relative, "size": item.size} for item in files],
@@ -286,9 +307,21 @@ def deliver_soundmouse_uploader(
     logger: logging.Logger,
     *,
     timeout_hours: float = 24.0,
+    correction: bool = False,
 ) -> bool:
     try:
-        files = collect_package(ctx.soundmouse_release_dir)
+        package_root = (
+            ctx.soundmouse_release_dir / "Missing"
+            if correction else ctx.soundmouse_release_dir
+        )
+        files = collect_package(
+            package_root,
+            required_top_levels=(
+                frozenset({"Metadata"})
+                if correction
+                else frozenset({"MEDIA", "Covers", "Metadata"})
+            ),
+        )
         logger.info(
             "  SoundMouse package: %d file(s), %d byte(s)",
             len(files), sum(item.size for item in files),
@@ -316,7 +349,7 @@ def deliver_soundmouse_uploader(
                 f"Uploader already has {len(active)} active queue item(s)"
             )
 
-        _ui_submit_package(ctx.soundmouse_release_dir)
+        _ui_submit_package(package_root)
         deadline = time.monotonic() + max(timeout_hours, 0.1) * 3600
         new_rows: tuple[QueueRow, ...] = ()
         last_report = 0.0
@@ -343,9 +376,16 @@ def deliver_soundmouse_uploader(
         else:
             raise SoundMouseUploaderError("SoundMouse upload timed out before exact completion")
 
-        receipt = _write_receipt(ctx, files, new_rows)
-        set_partner_status(ctx.specials_dir, "soundmouse", "uploaded")
-        logger.info("  ✓ SoundMouse package uploaded to UPPM/Music: %s", receipt)
+        receipt = _write_receipt(
+            ctx, files, new_rows, correction=correction
+        )
+        if not correction:
+            set_partner_status(ctx.specials_dir, "soundmouse", "delivered")
+        logger.info(
+            "  ✓ SoundMouse %s uploaded to UPPM/Music: %s",
+            "correction" if correction else "package",
+            receipt,
+        )
         return True
     except Exception as exc:
         logger.error("  ✗ SoundMouse Uploader delivery failed: %s", exc)
@@ -363,6 +403,11 @@ def _main() -> int:
     parser.add_argument("--full-month-content", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--timeout-hours", type=float, default=24.0)
+    parser.add_argument(
+        "--correction",
+        action="store_true",
+        help="Upload only the validated SoundMouse Missing correction package",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ok = deliver_soundmouse_uploader(
@@ -370,6 +415,7 @@ def _main() -> int:
         args.dry_run,
         logging.getLogger("soundmouse_uploader"),
         timeout_hours=args.timeout_hours,
+        correction=args.correction,
     )
     return 0 if ok else 1
 

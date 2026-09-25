@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import os
 from pathlib import Path
 import re
@@ -333,6 +333,27 @@ DOCX_TO_PDF_METHODS: list[str] = ["libreoffice", "soffice"]
 # rolling cadence. All later exact-date deliveries remain exactly 14 days.
 _INITIAL_ROLLING_RANGE = (date(2026, 9, 1), date(2026, 9, 11))
 
+# These partners run in a standalone calendar-month workflow. Japan NTT DATA
+# includes its complete audio package; the other entries are metadata-only.
+MONTHLY_METADATA_PARTNERS: frozenset[str] = frozenset({
+    "Japan NTT DATA",
+    "Japan JMD and TSS",
+    "Qwire",
+    "Scripps",
+})
+
+
+def monthly_metadata_delivery_ready(
+    ctx: "ReleaseContext",
+    *,
+    today: date | None = None,
+) -> bool:
+    """True only on/after the owned calendar month's first day."""
+    if not ctx.monthly_metadata_due:
+        return False
+    current = today or date.today()
+    return current >= date.fromisoformat(ctx.monthly_metadata_delivery_date)
+
 
 # ---------------------------------------------------------------------------
 # ReleaseContext — the single source of truth for one run
@@ -353,6 +374,7 @@ class ReleaseContext:
         full_month_content: bool = False,
         range_start: date | None = None,
         range_end: date | None = None,
+        monthly_delivery: bool = False,
     ) -> None:
         # In previous-month mode there is no Part split — the run covers the
         # full calendar month — so `part` is normalised to 1 and ignored for
@@ -362,6 +384,10 @@ class ReleaseContext:
             part = 1
         if previous_month and (full_month_content or range_start or range_end):
             raise ValueError("previous-month cannot be combined with another date mode")
+        if monthly_delivery and (previous_month or full_month_content or range_start or range_end):
+            raise ValueError(
+                "monthly_delivery cannot be combined with another date mode"
+            )
         if (range_start is None) != (range_end is None):
             raise ValueError("range_start and range_end must be supplied together")
         if (
@@ -386,6 +412,7 @@ class ReleaseContext:
         self.previous_month = previous_month
         self.full_month_content = full_month_content
         self.is_date_range = range_start is not None
+        self.is_monthly_delivery = monthly_delivery
 
         run_date = datetime(year, month, 1)
 
@@ -401,7 +428,10 @@ class ReleaseContext:
         is_august_part2_transition = (
             year == 2026 and month == 8 and part == 2
         )
-        if self.is_date_range:
+        if self.is_monthly_delivery:
+            self.release_variant = "MONTHLY"
+            self.release_id = f"UPM-{self.year_str}-{self.month_num}-MONTHLY"
+        elif self.is_date_range:
             assert range_start is not None and range_end is not None
             self.release_variant = "RANGE"
             # Rolling deliveries use the inclusive period start as their compact,
@@ -443,7 +473,9 @@ class ReleaseContext:
         )
 
         # May 2026 Part 1, May 2026 Part 2, or May 2026 Full.
-        if self.is_date_range:
+        if self.is_monthly_delivery:
+            self.month_display_folder = self.month_display
+        elif self.is_date_range:
             assert range_start is not None and range_end is not None
             if range_start.year == range_end.year and range_start.month == range_end.month:
                 self.month_display_folder = (
@@ -472,7 +504,9 @@ class ReleaseContext:
         # Partner-facing rolling delivery names keep the full inclusive range
         # but abbreviate month names. Internal reports can continue using the
         # long-form month_display_folder value above.
-        if self.is_date_range and range_start is not None and range_end is not None:
+        if self.is_monthly_delivery:
+            self.delivery_display_folder = self.month_display
+        elif self.is_date_range and range_start is not None and range_end is not None:
             if (
                 range_start.year == range_end.year
                 and range_start.month == range_end.month
@@ -494,10 +528,24 @@ class ReleaseContext:
         else:
             self.delivery_display_folder = self.month_display_folder
 
+        # Monthly endpoints are completely independent of rolling and legacy
+        # release runs. A dedicated run on the 1st uses the entire previous
+        # calendar month as its content window while all client-facing names use
+        # the current delivery month.
+        self.monthly_metadata_due = self.is_monthly_delivery
+        self.monthly_metadata_display_folder = self.delivery_display_folder
+        self.monthly_metadata_start = ""
+        self.monthly_metadata_end = ""
+        self.monthly_metadata_delivery_date = (
+            f"{self.year_str}-{self.month_num}-01" if self.is_monthly_delivery else ""
+        )
+
         # Exact client-facing delivery label. Part deliveries intentionally do
         # not add "Release"; rolling date ranges use the requested plural.
         self.client_delivery_label = (
-            f"{self.delivery_display_folder} Releases"
+            self.month_display
+            if self.is_monthly_delivery
+            else f"{self.delivery_display_folder} Releases"
             if self.is_date_range
             else (
                 self.month_display_folder
@@ -512,7 +560,9 @@ class ReleaseContext:
 
         # May 2026 (Part 1), May 2026 (Part 2), or May 2026 (Full).
         self.month_display_text = (
-            self.delivery_display_folder
+            self.month_display
+            if self.is_monthly_delivery
+            else self.delivery_display_folder
             if self.is_date_range
             else (
                 "August 2026 (Part 1)"
@@ -539,7 +589,13 @@ class ReleaseContext:
 
         # ---- Release date range ---------------------------------------------
         last_day = monthrange(year, month)[1]
-        if self.is_date_range:
+        if self.is_monthly_delivery:
+            delivery_month_start = date(self.year, self.month, 1)
+            content_end = delivery_month_start - timedelta(days=1)
+            content_start = date(content_end.year, content_end.month, 1)
+            self.release_start = content_start.isoformat()
+            self.release_end = content_end.isoformat()
+        elif self.is_date_range:
             assert range_start is not None and range_end is not None
             self.release_start = range_start.isoformat()
             self.release_end = range_end.isoformat()
@@ -553,6 +609,17 @@ class ReleaseContext:
         else:
             self.release_start = f"{self.year_str}-{self.month_num}-15"
             self.release_end   = f"{self.year_str}-{self.month_num}-{last_day:02d}"
+
+        # Legacy contexts obtain their monthly window from the resolved release
+        # dates above. Rolling contexts were resolved from range_start/range_end
+        # before those public strings existed.
+        if self.is_monthly_delivery:
+            self.monthly_metadata_start = self.release_start
+            self.monthly_metadata_end = self.release_end
+        elif not self.is_date_range:
+            self.monthly_metadata_start = self.release_start
+            self.monthly_metadata_end = self.release_end
+            self.monthly_metadata_delivery_date = self.release_start
 
         # ---- Top-level directories ------------------------------------------
         self.specials_dir   = SPECIALS_BASE / self.specials_root
@@ -629,7 +696,7 @@ class ReleaseContext:
             self.specials_dir
             / "3-FINAL PACKAGING"
             / _japan_folder
-            / f"{self.delivery_display_folder} NTT Data Metadata.csv"
+            / f"{self.monthly_metadata_display_folder} NTT Data Metadata.csv"
         )
         # ---- Album list document paths --------------------------------------
         _doc_stem = (
@@ -740,7 +807,37 @@ class ReleaseContext:
             range_end=end_date,
         )
 
+    @classmethod
+    def for_monthly_delivery(
+        cls, delivery_date: str | date | None = None
+    ) -> "ReleaseContext":
+        """Build the standalone monthly context for a delivery month's 1st.
+
+        Client-facing names use the delivery month, while release_start and
+        release_end cover the complete preceding calendar month.
+        """
+        resolved = (
+            date.today()
+            if delivery_date is None
+            else date.fromisoformat(delivery_date)
+            if isinstance(delivery_date, str)
+            else delivery_date
+        )
+        if resolved.day != 1:
+            raise ValueError("monthly deliveries must be scheduled for the 1st")
+        return cls(
+            year=resolved.year,
+            month=resolved.month,
+            part=1,
+            monthly_delivery=True,
+        )
+
     def partner_folder_name(self, partner: str) -> str:
+        if partner in MONTHLY_METADATA_PARTNERS and self.monthly_metadata_due:
+            return (
+                "Universal Production Music "
+                f"{self.monthly_metadata_display_folder} - {partner}"
+            )
         return (
             "Universal Production Music "
             f"{self.client_delivery_label} - {partner}"
@@ -753,6 +850,8 @@ class ReleaseContext:
         resolved full-month context must pass the following month when handed
         to another machine. This prevents a Full run from reopening Part 1.
         """
+        if self.is_monthly_delivery:
+            return ["--delivery-date", self.monthly_metadata_delivery_date]
         if self.is_date_range:
             return ["--start-date", self.release_start, "--end-date", self.release_end]
         if self.is_full_month:
@@ -787,6 +886,7 @@ class ReleaseContext:
         japan_metadata_csv already lands in the NTT DATA deliverable folder.
         """
         mdf = self.delivery_display_folder
+        monthly_mdf = self.monthly_metadata_display_folder
         fp  = self.specials_dir / "3-FINAL PACKAGING"
 
         def _r(name: str) -> Path:
@@ -795,9 +895,9 @@ class ReleaseContext:
         return {
             "netmix":    _r("Netmix")    / "Metadata" / f"UPM {mdf} Metadata.csv",
             "synchtank": _r("SynchTank") / "Metadata" / f"UPM {mdf} Metadata.csv",
-            "scripps":   _r("Scripps")   / "Metadata" / f"UPM {mdf} Metadata.csv",
+            "scripps":   _r("Scripps")   / "Metadata" / f"UPM {monthly_mdf} Metadata.csv",
             "qwire":     _r("Qwire")     / "Metadata"
-                         / f"Qwire Library Submission Template \u2013 {mdf}.csv",
+                         / f"Qwire Library Submission Template \u2013 {monthly_mdf}.csv",
             "sourceaudio": _r("SourceAudio") / "Metadata"
                            / f"UPM {mdf} Metadata.csv",
             "sourceaudio_exus": _r("SourceAudio Ex-US") / "Metadata"
@@ -808,7 +908,7 @@ class ReleaseContext:
                                     / "SoundExchange Universal Music - Z Tunes, Llc.xlsx",
             # JMD/TSS is delivered as an Excel workbook, not CSV.
             "japan_jmdtss": fp / self.partner_folder_name("Japan JMD and TSS")
-                            / f"{mdf} UPM Japan JMD TSS Metadata.xlsx",
+                            / f"{monthly_mdf} UPM Japan JMD TSS Metadata.xlsx",
         }
 
     def _build_partner_dirs(self) -> dict[str, Path]:
@@ -850,7 +950,17 @@ class ReleaseContext:
     def _build_unisync_jobs(self) -> list[dict]:
         music = self.specials_dir / "1-ORIGINAL" / "Music"
 
-        return [
+        if self.is_monthly_delivery:
+            return [{
+                "name":        "Japan WAV",
+                "territory":   "Japan",
+                "cache_path":  str(UPM_CACHE_WAV),
+                "client_path": str(music / "Japan"),
+                "csv":         str(self.japan_metadata_csv),
+                "domo_card_key": "japan_metadata",
+            }]
+
+        jobs = [
             {
                 "name":        "US MP3",
                 "territory":   "United States (MP3)",
@@ -890,15 +1000,8 @@ class ReleaseContext:
                 "csv":         str(self.exus_tracklist_csv),
                 "domo_card_key": "exus_tracklist",
             },
-            {
-                "name":        "Japan WAV",
-                "territory":   "Japan",
-                "cache_path":  str(UPM_CACHE_WAV),
-                "client_path": str(music / "Japan"),
-                "csv":         str(self.japan_metadata_csv),
-                "domo_card_key": "japan_metadata",
-            },
         ]
+        return jobs
 
     # -------------------------------------------------------------------------
     def get_cleanup_job(self, partner: str) -> dict:

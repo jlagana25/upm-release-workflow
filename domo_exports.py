@@ -27,11 +27,12 @@ Card map:
 from __future__ import annotations
 
 import logging
+import csv
 import re
 import shutil
 import time
 from urllib.parse import urljoin, urlsplit
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -80,6 +81,8 @@ from auth_manager import (
     secure_private_directory,
     secure_private_file,
 )
+from domo_api import query_dataset
+from domo_projection_contracts import DOMO_PROJECTION_CONTRACTS, ProjectionField
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -262,6 +265,7 @@ CARD_CONFIGS: list[dict] = [
         "card_id":     DOMO_CARDS["japan_metadata"],
         "description": "Japan Metadata",
         "output_fn":   lambda ctx: ctx.japan_metadata_csv,
+        "monthly_metadata": True,
         # DataFlow 4278 directly owns the Japan card, but it consumes the
         # catalog produced by 4312. Refresh the true source first.
         "upstream_dataflow_ids": ("4312",),
@@ -302,12 +306,14 @@ CARD_CONFIGS: list[dict] = [
         # This card appends a GRAND TOTAL summary footer. It is an aggregate
         # row, not delivery metadata.
         "drop_summary_rows": True,
+        "monthly_metadata": True,
     },
     {
         "key":         "qwire_metadata",
         "card_id":     DOMO_CARDS["qwire_metadata"],
         "description": "Qwire Metadata",
         "output_fn":   lambda ctx: ctx.partner_metadata["qwire"],
+        "monthly_metadata": True,
     },
     {
         "key":         "sourceaudio_metadata",
@@ -339,6 +345,7 @@ CARD_CONFIGS: list[dict] = [
         "description": "Japan JMD/TSS Metadata",
         "output_fn":   lambda ctx: ctx.partner_metadata["japan_jmdtss"],
         "format":      "xlsx",
+        "monthly_metadata": True,
     },
     {
         "key":         "soundexchange_mgb",
@@ -389,10 +396,31 @@ def run_domo_exports(
             logger.warning("  No matching Domo cards to export.")
             return {}
 
+    not_due = [
+        card for card in cards
+        if card.get("monthly_metadata") and not ctx.monthly_metadata_due
+    ]
+    cards = [card for card in cards if card not in not_due]
+
     logger.info(
         f"  Release date range: {ctx.release_start} → {ctx.release_end}\n"
         f"  Tracklist token:    {ctx.tracklist_token}"
     )
+    if not_due:
+        logger.info(
+            "  Monthly metadata not due in this rolling run: "
+            + ", ".join(card["description"] for card in not_due)
+        )
+    monthly_due_cards = [card for card in cards if card.get("monthly_metadata")]
+    if monthly_due_cards:
+        logger.info(
+            "  Monthly metadata window: "
+            f"{ctx.monthly_metadata_start} → {ctx.monthly_metadata_end} "
+            f"({ctx.monthly_metadata_display_folder})"
+        )
+
+    if not cards:
+        return {card["key"]: "skipped_not_due" for card in not_due}
 
     if dry_run:
         logger.info("  [DRY RUN] Would export the following files:")
@@ -403,52 +431,208 @@ def run_domo_exports(
                     "      Then compare refreshed metadata with existing AIFF "
                     "media and rebuild the sibling Missing package if needed."
                 )
-        return {card["key"]: "skipped" for card in cards}
+        return {
+            **{card["key"]: "skipped_not_due" for card in not_due},
+            **{card["key"]: "skipped" for card in cards},
+        }
 
-    TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    results: dict[str, str] = {}
+    results: dict[str, str] = {
+        card["key"]: "skipped_not_due" for card in not_due
+    }
 
-    _require_playwright()
-    with sync_playwright() as p:
-        secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
-        with private_creation_umask():
-            ctx_pw = p.chromium.launch_persistent_context(
-                user_data_dir=str(DOMO_PROFILE_DIR),
-                headless=False,
-                downloads_path=str(TEMP_DOWNLOAD_DIR),
-                accept_downloads=True,
-            )
-        page = ctx_pw.pages[0] if ctx_pw.pages else ctx_pw.new_page()
-
+    for card in cards:
+        output_path = card["output_fn"](ctx)
+        logger.info(f"\n  ── {card['description']} (public Domo API) ──")
+        logger.info(f"     Output: {output_path}")
         try:
-            _authenticate(page, logger)
-
-            for card in cards:
-                output_path = card["output_fn"](ctx)
-                logger.info(f"\n  ── {card['description']} (card {card['card_id']}) ──")
-                logger.info(f"     Output: {output_path}")
-                try:
-                    _export_card(page, card, output_path, ctx, logger)
-                    _reconcile_sourceaudio_export(card, ctx, logger)
-                    results[card["key"]] = "ok"
-                    logger.info(f"     ✓ Saved: {output_path}")
-                except PlaywrightTimeoutError as exc:
-                    logger.error(f"     ✗ Timeout on '{card['description']}': {exc}")
-                    results[card["key"]] = "failed"
-                except Exception as exc:
-                    logger.error(f"     ✗ Failed '{card['description']}': {exc}")
-                    results[card["key"]] = "failed"
-        finally:
-            ctx_pw.close()
-            secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
-
-    try:
-        if TEMP_DOWNLOAD_DIR.exists() and not any(TEMP_DOWNLOAD_DIR.iterdir()):
-            TEMP_DOWNLOAD_DIR.rmdir()
-    except Exception:
-        pass
+            _export_api_projection(card, output_path, ctx, logger)
+            _reconcile_sourceaudio_export(card, ctx, logger)
+            results[card["key"]] = "ok"
+            logger.info(f"     ✓ Saved: {output_path}")
+        except Exception as exc:
+            logger.error(f"     ✗ Failed '{card['description']}': {exc}")
+            results[card["key"]] = "failed"
 
     return results
+
+
+_TRANSFORM_SOURCES = {
+    "album_no_masters": ("AlbumNo", "AlbumTitle"),
+    "album_track_number": ("AlbumNo", "TrackNo"),
+    "sourceaudio_version": ("VersionType", "EditType"),
+    "sourceaudio_keywords": (
+        "AlbumTagGenres", "VersionTagCountries", "VersionTagGenres",
+        "VersionTagInstruments", "VersionTagMoods", "VersionTagMusicFor",
+        "VersionTagTempos",
+    ),
+}
+
+
+def _sql_identifier(value: str) -> str:
+    return "`" + value.replace("`", "``") + "`"
+
+
+def _projection_sources(fields: tuple[ProjectionField, ...], date_column: str | None) -> list[str]:
+    sources: list[str] = []
+    for field in fields:
+        if field.source and field.source not in sources:
+            sources.append(field.source)
+        for source in _TRANSFORM_SOURCES.get(field.transform or "", ()):
+            if source not in sources:
+                sources.append(source)
+    if date_column and date_column not in sources:
+        sources.append(date_column)
+    return sources
+
+
+def _plain_date(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return f"{text[:10]} 00:00:00"
+
+
+def _duration(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    seconds = int(float(value))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def _sourceaudio_keywords(row: dict[str, object]) -> str:
+    values = []
+    for source in _TRANSFORM_SOURCES["sourceaudio_keywords"]:
+        text = str(row.get(source) or "").replace(" (all)", "")
+        values.extend(part.strip() for part in re.split(r"[,~]", text) if part.strip())
+    return ",".join(values)
+
+
+def _project_value(field: ProjectionField, row: dict[str, object]) -> object:
+    if field.constant is not None:
+        return field.constant
+    value = row.get(field.source or "", "")
+    if field.transform == "album_no_masters":
+        album_no = str(row.get("AlbumNo") or "").strip()
+        album_title = str(row.get("AlbumTitle") or "").strip()
+        return f"{album_no} - {album_title}" if album_no and album_title else album_no or album_title
+    if field.transform == "filename_no_extension":
+        return re.sub(r"\.(?:mp3|wav|aiff?|flac)$", "", str(value or ""), flags=re.I)
+    if field.transform == "mp3_filename":
+        return re.sub(r"\.(?:wav|aiff?|flac)$", ".mp3", str(value or ""), flags=re.I)
+    if field.transform == "clean_cover":
+        return re.sub(r"\.jpeg$", ".jpg", str(value or ""), flags=re.I)
+    if field.transform == "cdn_album_art":
+        stem = re.sub(r"\.(?:jpe?g|png|gif|webp)$", "", str(value or ""), flags=re.I)
+        return f"https://dams.cdn.unippm.com/AlbumImages/740x740/{stem}.webp" if stem else ""
+    if field.transform == "date":
+        return _plain_date(value)
+    if field.transform == "year":
+        return str(value or "")[:4]
+    if field.transform == "duration":
+        return _duration(value)
+    if field.transform == "publisher_role":
+        return "Publisher" if str(value or "").strip() else ""
+    if field.transform == "text":
+        return str(value or "")
+    if field.transform == "tunesat_people":
+        text = re.sub(r"\(([^()]*)\)", r"[\1]", str(value or ""))
+        return text.replace(" | ", " , ")
+    if field.transform == "album_track_number":
+        album = str(row.get("AlbumNo") or "").strip()
+        track = str(row.get("TrackNo") or "").strip()
+        return f"{album}-{track}" if album and track else album or track
+    if field.transform == "sourceaudio_version":
+        version = str(row.get("VersionType") or "").strip()
+        edit_type = str(row.get("EditType") or "").strip()
+        return f"{version} ({edit_type})" if version and edit_type else version or edit_type
+    if field.transform == "sourceaudio_keywords":
+        return _sourceaudio_keywords(row)
+    return "" if value is None else value
+
+
+def _write_projection(path: Path, headers: list[str], rows: list[list[object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.domo-api.tmp")
+    if temp.exists():
+        temp.unlink()
+    try:
+        if path.suffix.casefold() == ".xlsx":
+            from openpyxl import Workbook
+
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Sheet1"
+            worksheet.append(headers)
+            for row in rows:
+                worksheet.append(row)
+            workbook.save(temp)
+            workbook.close()
+        else:
+            with temp.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(headers)
+                writer.writerows(rows)
+        temp.replace(path)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def _export_api_projection(
+    card: dict,
+    output_path: Path,
+    ctx: ReleaseContext,
+    logger: logging.Logger,
+) -> None:
+    contract = DOMO_PROJECTION_CONTRACTS.get(card["key"])
+    if contract is None:
+        raise RuntimeError(f"No explicit Domo API projection contract for {card['key']}")
+    sources = _projection_sources(contract.fields, contract.date_column)
+    sql = ("SELECT DISTINCT " if contract.distinct else "SELECT ") + ", ".join(
+        _sql_identifier(source) for source in sources
+    ) + " FROM table"
+    predicates: list[str] = []
+    if contract.date_column:
+        if card.get("monthly_metadata"):
+            start = ctx.monthly_metadata_start
+            end = ctx.monthly_metadata_end
+        else:
+            start = ctx.release_start
+            end = ctx.release_end
+        exclusive_end = (datetime.fromisoformat(end).date() + timedelta(days=1)).isoformat()
+        date_column = _sql_identifier(contract.date_column)
+        predicates.append(f"{date_column} >= '{start}' AND {date_column} < '{exclusive_end}'")
+    if contract.where_sql:
+        predicates.append(f"({contract.where_sql})")
+    if predicates:
+        sql += " WHERE " + " AND ".join(predicates)
+    result = query_dataset(contract.dataset_id, sql)
+    dictionaries = result.dictionaries()
+    headers = [field.output for field in contract.fields]
+    rows = [[_project_value(field, row) for field in contract.fields] for row in dictionaries]
+
+    if contract.unique_by:
+        indexes = [headers.index(key) for key in contract.unique_by]
+        seen: set[tuple[str, ...]] = set()
+        duplicates: set[tuple[str, ...]] = set()
+        for row in rows:
+            value = tuple(str(row[index] or "").strip().casefold() for index in indexes)
+            if not any(value):
+                continue
+            if value in seen:
+                duplicates.add(value)
+            seen.add(value)
+        if duplicates:
+            raise RuntimeError(
+                f"Domo API projection {card['key']} is not unique by "
+                f"{', '.join(contract.unique_by)}: {len(duplicates)} duplicate value(s)"
+            )
+
+    _write_projection(output_path, headers, rows)
+    logger.info(
+        f"     API contract {contract.dataset_id}: {len(rows):,} row(s), "
+        f"{len(headers)} column(s)"
+    )
 
 
 def _latest_dataflow_history_entry(body_text: str) -> tuple[str | None, str | None]:
@@ -819,6 +1003,12 @@ def verify_exports_exist(
     """Check that every expected export exists and is not a baseline template."""
     results: dict[str, bool] = {}
     for card in CARD_CONFIGS:
+        if card.get("monthly_metadata") and not ctx.monthly_metadata_due:
+            results[card["key"]] = True
+            logger.info(
+                f"  –  {card['key']:<28} not due in this rolling run"
+            )
+            continue
         path = Path(card["output_fn"](ctx))
         exists = path.is_file() and path.stat().st_size > 0
         stale_template = False
@@ -977,7 +1167,19 @@ def _export_card(
     # 2. Set the date range.  Inventory/control cards such as BMAT keep their
     #    saved card filter and explicitly opt out of workflow date filtering.
     if not card.get("skip_timeframe"):
-        if getattr(ctx, "previous_month", False):
+        if card.get("monthly_metadata"):
+            if not ctx.monthly_metadata_due:
+                raise RuntimeError(
+                    f"Monthly metadata card {card['key']} is not due for "
+                    f"{ctx.release_id}"
+                )
+            _apply_between_date_range(
+                page,
+                ctx.monthly_metadata_start,
+                ctx.monthly_metadata_end,
+                logger,
+            )
+        elif getattr(ctx, "previous_month", False):
             _apply_previous_month_preset(page, logger)
         else:
             _apply_between_date_range(page, ctx.release_start, ctx.release_end, logger)

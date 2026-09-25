@@ -42,6 +42,19 @@ class SoundMouseUploaderDeliveryTests(unittest.TestCase):
         with self.assertRaises(sud.SoundMouseUploaderError):
             sud.collect_package(self.package)
 
+    def test_metadata_only_correction_is_valid(self) -> None:
+        correction = self.root / "Missing"
+        (correction / "Metadata").mkdir(parents=True)
+        (correction / "Metadata" / "corrected.xlsx").write_bytes(b"metadata")
+        files = sud.collect_package(
+            correction,
+            required_top_levels=frozenset({"Metadata"}),
+        )
+        self.assertEqual(
+            [item.relative for item in files],
+            ["Metadata/corrected.xlsx"],
+        )
+
     def test_missing_reports_and_correction_audits_are_not_uploaded(self) -> None:
         (self.package / "SoundMouse Missing Report.csv").write_text(
             "Type,Filename\n", encoding="utf-8"
@@ -91,6 +104,22 @@ class SoundMouseUploaderDeliveryTests(unittest.TestCase):
         )
         with self.assertRaises(sud.SoundMouseUploaderError):
             sud.validate_queue_rows(files, rows)
+
+    def test_ui_script_verifies_toolbar_without_brittle_sheet_query(self) -> None:
+        script = sud._ui_script(self.package)
+        self.assertIn("repeat with candidateWindow in windows", script)
+        self.assertIn("exists toolbar 1 of candidateWindow", script)
+        self.assertIn("toolbar 1 of mainWindow", script)
+        self.assertNotIn("toolbar 1 of window 1", script)
+        self.assertIn("set value of text field 1 of goToSheet", script)
+        self.assertIn(str(self.package), script)
+        self.assertNotIn('keystroke "' + str(self.package.parent), script)
+        self.assertIn('description is "Workspace"', script)
+        self.assertIn('value of workspaceButton is not "UPPM"', script)
+        self.assertIn('description is "Module"', script)
+        self.assertIn('value of moduleButton is not "Music"', script)
+        self.assertNotIn("every pop up button of entire contents", script)
+        self.assertNotIn("every radio button of entire contents", script)
 
     def test_latest_real_step16_failure_wins(self) -> None:
         reports = self.root / "reports" / self.ctx.release_id

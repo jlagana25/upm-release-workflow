@@ -19,6 +19,7 @@ from soundmouse import (
     _partition_soundmouse_rows,
     _soundmouse_unisync_jobs,
     _soundmouse_unisync_territories,
+    _soundmouse_metadata_value,
     activation_ranges_from_tracklist,
     create_soundmouse_directories,
     convert_soundmouse_csv_to_xlsx,
@@ -108,7 +109,10 @@ class SoundMouseTests(unittest.TestCase):
 
         transition_range = ReleaseContext.for_date_range("2026-09-01", "2026-09-11")
         same_month = ReleaseContext.for_date_range("2026-09-12", "2026-09-25")
+        pre_october = ReleaseContext.for_date_range("2026-09-26", "2026-10-09")
         crossing = ReleaseContext.for_date_range("2026-09-29", "2026-10-12")
+        october_monthly = ReleaseContext.for_monthly_delivery("2026-10-01")
+        january_monthly = ReleaseContext.for_monthly_delivery("2027-01-01")
         crossing_year = ReleaseContext.for_date_range("2026-12-29", "2027-01-11")
         self.assertEqual(transition_range.release_id, "UPM20260901")
         self.assertEqual(transition_range.specials_root, "UPM-2026-09-01")
@@ -128,6 +132,60 @@ class SoundMouseTests(unittest.TestCase):
             crossing.partner_folder_name("Japan NTT DATA"),
             "Universal Production Music Sep 29–Oct 12 2026 Releases - Japan NTT DATA",
         )
+        self.assertFalse(transition_range.monthly_metadata_due)
+        self.assertFalse(same_month.monthly_metadata_due)
+        self.assertFalse(pre_october.monthly_metadata_due)
+        self.assertFalse(crossing.monthly_metadata_due)
+        self.assertTrue(october_monthly.monthly_metadata_due)
+        self.assertEqual(october_monthly.release_id, "UPM-2026-10-MONTHLY")
+        self.assertEqual(october_monthly.specials_root, "UPM-2026-10-MONTHLY")
+        self.assertEqual(
+            october_monthly.monthly_metadata_display_folder, "October 2026"
+        )
+        self.assertEqual(october_monthly.monthly_metadata_start, "2026-09-01")
+        self.assertEqual(october_monthly.monthly_metadata_end, "2026-09-30")
+        self.assertEqual(
+            october_monthly.monthly_metadata_delivery_date, "2026-10-01"
+        )
+        self.assertEqual(
+            october_monthly.partner_folder_name("Qwire"),
+            "Universal Production Music October 2026 - Qwire",
+        )
+        self.assertEqual(
+            october_monthly.partner_folder_name("Scripps"),
+            "Universal Production Music October 2026 - Scripps",
+        )
+        self.assertEqual(
+            october_monthly.partner_folder_name("Japan NTT DATA"),
+            "Universal Production Music October 2026 - Japan NTT DATA",
+        )
+        self.assertEqual(
+            october_monthly.partner_folder_name("Japan JMD and TSS"),
+            "Universal Production Music October 2026 - Japan JMD and TSS",
+        )
+        self.assertEqual(
+            october_monthly.japan_metadata_csv.name,
+            "October 2026 NTT Data Metadata.csv",
+        )
+        self.assertEqual(
+            october_monthly.partner_metadata["qwire"].name,
+            "Qwire Library Submission Template – October 2026.csv",
+        )
+        self.assertEqual(
+            october_monthly.partner_metadata["scripps"].name,
+            "UPM October 2026 Metadata.csv",
+        )
+        self.assertEqual(
+            october_monthly.partner_metadata["japan_jmdtss"].name,
+            "October 2026 UPM Japan JMD TSS Metadata.xlsx",
+        )
+        self.assertEqual(
+            october_monthly.pinned_cli_args(),
+            ["--delivery-date", "2026-10-01"],
+        )
+        self.assertEqual(january_monthly.release_start, "2026-12-01")
+        self.assertEqual(january_monthly.release_end, "2026-12-31")
+        self.assertEqual(january_monthly.release_id, "UPM-2027-01-MONTHLY")
         self.assertEqual(
             crossing_year.partner_folder_name("SynchTank"),
             "Universal Production Music Dec 29 2026–Jan 11 2027 Releases - SynchTank",
@@ -421,6 +479,102 @@ class SoundMouseTests(unittest.TestCase):
             ))
             with report.open(encoding="utf-8-sig", newline="") as handle:
                 self.assertEqual(list(csv.DictReader(handle)), [])
+
+    def test_metadata_conversion_rejects_duplicate_filename_and_track_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._csv(
+                root,
+                "metadata.csv",
+                ["Filename", "UNIQUE TRACK ID", "ALBUM ARTWORK FILE NAME"],
+                [
+                    {
+                        "Filename": "duplicate.wav",
+                        "UNIQUE TRACK ID": "123",
+                        "ALBUM ARTWORK FILE NAME": "cover.jpg",
+                    },
+                    {
+                        "Filename": "duplicate.wav",
+                        "UNIQUE TRACK ID": "123",
+                        "ALBUM ARTWORK FILE NAME": "cover.jpg",
+                    },
+                ],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "1 duplicate Filename value.*1 duplicate Unique Track ID value",
+            ):
+                convert_soundmouse_csv_to_xlsx(source, root / "metadata.xlsx")
+
+    def test_domo_api_metadata_projection(self) -> None:
+        row = {
+            "LabelName": "Library",
+            "AlbumTitle": "Album",
+            "AlbumNo": "CAT001",
+            "Notes": "Direct",
+            "AlbumReleaseDate": "2026-09-03T23:00:00",
+            "AlbumCoverArt": "cover.jpg",
+            "Filename": "track.wav",
+            "domoAudioId": 123,
+            "WorkTitle": "Track",
+            "ComposerName_1": "Writer",
+            "ComposerCAECode_1": "456",
+            "PublisherName_1": "Publisher",
+            "PublisherIpiNumber_1": "789",
+        }
+        self.assertEqual(
+            _soundmouse_metadata_value("RECORD LABEL NAME", row),
+            "Universal Production Music",
+        )
+        self.assertEqual(
+            _soundmouse_metadata_value("ALBUM RELEASE DATE", row),
+            "2026-09-03",
+        )
+        self.assertEqual(
+            _soundmouse_metadata_value("UNIQUE TRACK ID", row), "123"
+        )
+        self.assertEqual(
+            _soundmouse_metadata_value("COMPOSER 1 FULL NAME", row), "Writer"
+        )
+        self.assertEqual(
+            _soundmouse_metadata_value("PUBLISHER 1 CAE/IPI NUMBER", row),
+            "789",
+        )
+
+    def test_metadata_validation_rejects_duplicate_rows(self) -> None:
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = root / "Metadata.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append([
+                "Filename", "UNIQUE TRACK ID", "ALBUM ARTWORK FILE NAME"
+            ])
+            sheet.append(["duplicate.wav", "123", "cover.jpg"])
+            sheet.append(["duplicate.wav", "123", "cover.jpg"])
+            workbook.save(metadata)
+            workbook.close()
+            (root / "MEDIA").mkdir()
+            (root / "Covers").mkdir()
+            (root / "MEDIA" / "duplicate.wav").write_bytes(b"audio")
+            (root / "Covers" / "cover.jpg").write_bytes(b"cover")
+            report = root / "report.csv"
+
+            self.assertFalse(validate_soundmouse_delivery(
+                [metadata],
+                root / "MEDIA",
+                root / "Covers",
+                report,
+                False,
+                logging.getLogger("test"),
+            ))
+            with report.open(encoding="utf-8-sig", newline="") as handle:
+                problems = [row["Problem"] for row in csv.DictReader(handle)]
+            self.assertEqual(len(problems), 2)
+            self.assertTrue(any("Duplicate Filename" in value for value in problems))
+            self.assertTrue(any("Duplicate Unique Track ID" in value for value in problems))
 
     def test_metadata_validation_accepts_uploaded_missing_package_union(self) -> None:
         from openpyxl import Workbook

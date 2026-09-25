@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -31,14 +31,13 @@ from config import (
     SOUNDMOUSE_BASE,
     SOUNDMOUSE_DOMO_CARDS,
     SOUNDMOUSE_DOMO_PAGE_ID,
-    DOMO_PROFILE_DIR,
     UPM_CACHE_WAV,
     ReleaseContext,
     context_from_cli_args,
 )
-from auth_manager import private_creation_umask, secure_private_directory
 from tracklist_columns import (
     POSSIBLE_COVER_COLS,
+    POSSIBLE_EXTERNAL_ID_COLS,
     POSSIBLE_FILENAME_COLS,
     POSSIBLE_URL_COLS,
     _find_column,
@@ -63,6 +62,37 @@ METADATA_SHEETS: dict[str, tuple[str, frozenset[str]]] = {
     "10": ("US",          frozenset({"US"})),
 }
 
+SOUNDMOUSE_DOMO_DATASET_ID = "a87fa3e8-5798-4b0b-aa46-8a134eb8b572"
+SOUNDMOUSE_TRACKLIST_COLUMNS = [
+    "LabelName", "AlbumNo", "AlbumNoMasters", "AlbumTitle", "Filename",
+    "workAudioId", "ActivationRange", "AlbumCoverArt", "CDNAlbumArt",
+    "Territory List",
+]
+SOUNDMOUSE_METADATA_COLUMNS = [
+    "RECORD LABEL NAME", "LIBRARY LABEL NAME", "ALBUM TITLE",
+    "ALBUM CATALOGUE NUMBER", "NUMBER OF ALBUM DISCS", "ALBUM NOTES",
+    "ALBUM RELEASE DATE", "ALBUM ARTWORK FILE NAME", "Filename",
+    "UNIQUE TRACK ID", "TRACK TITLE", "TRACK VERSION", "TRACK POSITION",
+    "ALBUM DISC NUMBER", "TRACK DURATION", "TRACK DESCRIPTION",
+    "KEYWORD/TAGS", "MOOD", "GENRE", "INSTRUMENTS", "BPM", "TEMPO",
+    "ISRC", "ISWC",
+    *[
+        value
+        for number in range(1, 9)
+        for value in (
+            f"COMPOSER {number} FULL NAME",
+            f"COMPOSER {number} CAE/IPI NUMBER",
+            f"COMPOSER {number} SOCIETY",
+            f"COMPOSER {number} SHARE",
+            f"PUBLISHER {number} NAME",
+            f"PUBLISHER {number} CAE/IPI NUMBER",
+            f"PUBLISHER {number} SOCIETY",
+            f"PUBLISHER {number} SHARE",
+            *(('GVL LABEL CODE 1',) if number == 1 else ()),
+        )
+    ],
+]
+
 
 def metadata_filename(code: str) -> str:
     label = METADATA_SHEETS[code][0]
@@ -71,6 +101,72 @@ def metadata_filename(code: str) -> str:
 
 def metadata_csv_filename(code: str) -> str:
     return Path(metadata_filename(code)).with_suffix(".csv").name
+
+
+def _soundmouse_metadata_duplicates(
+    headers: list[str],
+    rows: list[list[object] | tuple[object, ...]],
+) -> list[tuple[str, str, int, int, bool]]:
+    """Return duplicate filename/track-ID occurrences with source row numbers."""
+    keys = [
+        ("Filename", _find_column(headers, POSSIBLE_FILENAME_COLS), _file_key),
+        (
+            "Unique Track ID",
+            _find_column(
+                headers,
+                ["UNIQUE TRACK ID", *POSSIBLE_EXTERNAL_ID_COLS],
+            ),
+            lambda value: str(value or "").strip().casefold(),
+        ),
+    ]
+    duplicates: list[tuple[str, str, int, int, bool]] = []
+    for label, column, normalizer in keys:
+        if not column:
+            continue
+        index = headers.index(column)
+        seen: dict[str, tuple[int, tuple[str, ...]]] = {}
+        for row_number, row in enumerate(rows, start=2):
+            value = row[index] if index < len(row) else None
+            key = normalizer(value)
+            if not key:
+                continue
+            signature = tuple(
+                str(item) if item is not None else "" for item in row
+            )
+            previous = seen.get(key)
+            if previous is None:
+                seen[key] = (row_number, signature)
+                continue
+            first_row, first_signature = previous
+            duplicates.append(
+                (label, key, first_row, row_number, signature == first_signature)
+            )
+    return duplicates
+
+
+def _assert_unique_soundmouse_metadata(
+    headers: list[str],
+    rows: list[list[object] | tuple[object, ...]],
+    source: Path,
+) -> None:
+    duplicates = _soundmouse_metadata_duplicates(headers, rows)
+    if not duplicates:
+        return
+    counts: dict[str, int] = {}
+    for label, *_ in duplicates:
+        counts[label] = counts.get(label, 0) + 1
+    summary = ", ".join(
+        f"{count} duplicate {label} value(s)"
+        for label, count in counts.items()
+    )
+    examples = "; ".join(
+        f"{label} {value!r} rows {first}/{duplicate}"
+        for label, value, first, duplicate, _identical in duplicates[:5]
+    )
+    raise ValueError(
+        f"SoundMouse metadata contains {summary}: {source}. "
+        f"Examples: {examples}"
+    )
 
 
 def convert_soundmouse_csv_to_xlsx(csv_path: Path, xlsx_path: Path) -> None:
@@ -97,6 +193,7 @@ def convert_soundmouse_csv_to_xlsx(csv_path: Path, xlsx_path: Path) -> None:
                 f"SoundMouse CSV row {row_number} has {len(row)} columns; "
                 f"expected {expected_columns}: {csv_path}"
             )
+    _assert_unique_soundmouse_metadata(rows[0], rows[1:], csv_path)
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = xlsx_path.with_name(f".{xlsx_path.name}.from-csv.tmp.xlsx")
@@ -498,7 +595,22 @@ def validate_soundmouse_delivery(
                     recognized_sheet = True
                     audio_index = headers.index(audio_col)
                     cover_index = headers.index(cover_col)
-                    for row in rows:
+                    data_rows = list(rows)
+                    for label, value, first_row, duplicate_row, identical in (
+                        _soundmouse_metadata_duplicates(headers, data_rows)
+                    ):
+                        errors.append({
+                            "Type": "METADATA",
+                            "Filename": value,
+                            "Metadata Workbooks": metadata_path.name,
+                            "Expected Root": str(metadata_path),
+                            "Problem": (
+                                f"Duplicate {label} in rows {first_row} and "
+                                f"{duplicate_row} "
+                                f"({'identical row' if identical else 'conflicting metadata'})"
+                            ),
+                        })
+                    for row in data_rows:
                         if audio_index < len(row):
                             add_expected(
                                 expected_audio, row[audio_index], metadata_path
@@ -677,6 +789,171 @@ def metadata_codes_from_bucket(path: Path) -> list[str]:
     return sorted(found, key=int)
 
 
+def _soundmouse_metadata_value(header: str, row: dict[str, object]) -> str:
+    direct = {
+        "LIBRARY LABEL NAME": "LabelName",
+        "ALBUM TITLE": "AlbumTitle",
+        "ALBUM CATALOGUE NUMBER": "AlbumNo",
+        "ALBUM NOTES": "Notes",
+        "ALBUM ARTWORK FILE NAME": "AlbumCoverArt",
+        "Filename": "Filename",
+        "UNIQUE TRACK ID": "domoAudioId",
+        "TRACK TITLE": "WorkTitle",
+        "TRACK VERSION": "VersionType",
+        "TRACK POSITION": "TrackNo",
+        "TRACK DURATION": "Duration",
+        "TRACK DESCRIPTION": "WorkDescription",
+        "KEYWORD/TAGS": "VersionTagMusicFor",
+        "MOOD": "VersionTagMoods",
+        "GENRE": "VersionTagGenres",
+        "INSTRUMENTS": "VersionTagInstruments",
+        "BPM": "BPM",
+        "TEMPO": "VersionTagTempos",
+        "ISRC": "ISRC",
+        "ISWC": "ISWC",
+        "GVL LABEL CODE 1": "GermanLabelCode",
+    }
+    if header == "RECORD LABEL NAME":
+        return "Universal Production Music"
+    if header in {"NUMBER OF ALBUM DISCS", "ALBUM DISC NUMBER"}:
+        return "1"
+    if header == "ALBUM RELEASE DATE":
+        return str(row.get("AlbumReleaseDate") or "")[:10]
+    if header in direct:
+        return str(row.get(direct[header]) or "")
+    composer = re.fullmatch(
+        r"COMPOSER (\d+) (FULL NAME|CAE/IPI NUMBER|SOCIETY|SHARE)", header
+    )
+    if composer:
+        number, suffix = composer.groups()
+        field_suffix = {
+            "FULL NAME": "Name", "CAE/IPI NUMBER": "CAECode",
+            "SOCIETY": "Society", "SHARE": "Split",
+        }[suffix]
+        return str(row.get(f"Composer{field_suffix}_{number}") or "")
+    publisher = re.fullmatch(
+        r"PUBLISHER (\d+) (NAME|CAE/IPI NUMBER|SOCIETY|SHARE)", header
+    )
+    if publisher:
+        number, suffix = publisher.groups()
+        field_suffix = {
+            "NAME": "Name", "CAE/IPI NUMBER": "IpiNumber",
+            "SOCIETY": "Society", "SHARE": "Split",
+        }[suffix]
+        return str(row.get(f"Publisher{field_suffix}_{number}") or "")
+    raise ValueError(f"No SoundMouse API projection exists for {header!r}")
+
+
+def _write_csv_rows(path: Path, headers: list[str], rows: list[list[str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.api.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(headers)
+            writer.writerows(rows)
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _export_domo_cards_via_api(
+    ctx: ReleaseContext,
+    cards: list[dict],
+    logger: logging.Logger,
+) -> bool:
+    """Export SoundMouse cards from their owning DataSet, without a browser."""
+    from domo_api import query_dataset
+
+    start = str(ctx.release_start)
+    end = str(ctx.release_end)
+    exclusive_end = (
+        datetime.fromisoformat(end).date() + timedelta(days=1)
+    ).isoformat()
+    query = (
+        "SELECT * FROM table "
+        f"WHERE `AlbumReleaseDate` >= '{start}' "
+        f"AND `AlbumReleaseDate` < '{exclusive_end}'"
+    )
+    result = query_dataset(SOUNDMOUSE_DOMO_DATASET_ID, query)
+    source_rows = result.dictionaries()
+    logger.info(
+        f"  Domo API returned {len(source_rows)} SoundMouse row(s) for "
+        f"{start} through {end}."
+    )
+    for source_column in ("Filename", "domoAudioId"):
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for row in source_rows:
+            value = str(row.get(source_column) or "").strip().casefold()
+            if not value:
+                continue
+            if value in seen:
+                duplicates.add(value)
+            seen.add(value)
+        if duplicates:
+            raise ValueError(
+                f"Domo API SoundMouse output is not unique by {source_column}: "
+                f"{len(duplicates)} duplicate value(s)"
+            )
+    for card in cards:
+        key = card["key"]
+        output = card["output_fn"](ctx)
+        if key == "soundmouse_tracklist":
+            rows = [
+                [
+                    str(row.get(
+                        "domoAudioId" if column == "workAudioId" else column
+                    ) or "")
+                    for column in SOUNDMOUSE_TRACKLIST_COLUMNS
+                ]
+                for row in source_rows
+            ]
+            _write_csv_rows(output, SOUNDMOUSE_TRACKLIST_COLUMNS, rows)
+        elif key == "soundmouse_bucket":
+            territories = sorted({
+                str(row.get("Territory List") or "").strip()
+                for row in source_rows
+                if str(row.get("Territory List") or "").strip()
+            })
+            reverse = {
+                territory_set: code
+                for code, (_label, territory_set) in METADATA_SHEETS.items()
+            }
+            bucket_rows = []
+            for territory in territories:
+                code = reverse.get(_territory_set(territory))
+                if not code:
+                    raise ValueError(
+                        f"Unknown SoundMouse territory combination from Domo API: {territory}"
+                    )
+                bucket_rows.append([territory, code])
+            _write_csv_rows(output, ["Territory List", "Metadata Sheet"], bucket_rows)
+        elif key.startswith("soundmouse_metadata_"):
+            code = key.rsplit("_", 1)[-1]
+            expected_territories = METADATA_SHEETS[code][1]
+            selected = [
+                row for row in source_rows
+                if _territory_set(str(row.get("Territory List") or ""))
+                == expected_territories
+            ]
+            rows = [
+                [_soundmouse_metadata_value(header, row) for header in SOUNDMOUSE_METADATA_COLUMNS]
+                for row in selected
+            ]
+            _write_csv_rows(output, SOUNDMOUSE_METADATA_COLUMNS, rows)
+            xlsx_output_fn = card.get("xlsx_output_fn")
+            if xlsx_output_fn:
+                xlsx_output = xlsx_output_fn(ctx)
+                convert_soundmouse_csv_to_xlsx(output, xlsx_output)
+                output.unlink()
+        else:
+            raise ValueError(f"Unsupported SoundMouse Domo API export key: {key}")
+        logger.info(f"  Exported via Domo API: {card['description']} → {output}")
+    return True
+
+
 def _domo_configs(
     ctx: ReleaseContext,
     codes: list[str] | None = None,
@@ -738,56 +1015,11 @@ def _export_domo_cards(
             )
         return True
 
-    # domo_exports owns the known-good Domo interaction.  Its Playwright import
-    # is deliberately initialized here, inside the real-run function.
-    import domo_exports as domo
-
-    domo.TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    domo._require_playwright()
-    ok = True
-    secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
-    with domo.sync_playwright() as playwright:
-        with private_creation_umask():
-            browser_ctx = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(DOMO_PROFILE_DIR),
-                headless=False,
-                downloads_path=str(domo.TEMP_DOWNLOAD_DIR),
-                accept_downloads=True,
-            )
-        page = browser_ctx.new_page()
-        try:
-            try:
-                domo._authenticate(page, logger)
-            except domo.PlaywrightTimeoutError:
-                logger.error(
-                    "  ✗ The private Domo session requires reauthentication. "
-                    "The workflow did not pause. Run python3 auth_manager.py "
-                    "--enroll-domo-keychain, then python3 auth_manager.py "
-                    "--setup domo outside the release "
-                    "run, then rerun with --reuse-domo-seeds."
-                )
-                return False
-            for card in cards:
-                output = card["output_fn"](ctx)
-                logger.info(f"  Exporting {card['description']} → {output}")
-                try:
-                    domo._export_card(page, card, output, ctx, logger)
-                    xlsx_output_fn = card.get("xlsx_output_fn")
-                    if xlsx_output_fn:
-                        xlsx_output = xlsx_output_fn(ctx)
-                        convert_soundmouse_csv_to_xlsx(output, xlsx_output)
-                        output.unlink()
-                        logger.info(
-                            f"  Converted CSV → staged XLSX: "
-                            f"{xlsx_output.name}"
-                        )
-                except Exception as exc:  # browser errors are logged per card
-                    logger.error(f"  ✗ {card['description']} failed: {exc}")
-                    ok = False
-        finally:
-            browser_ctx.close()
-            secure_private_directory(DOMO_PROFILE_DIR, recursive=True)
-    return ok
+    try:
+        return _export_domo_cards_via_api(ctx, cards, logger)
+    except Exception as exc:
+        logger.error("  ✗ Domo API SoundMouse export failed closed: %s", exc)
+        return False
 
 
 def install_soundmouse_metadata(
@@ -1258,6 +1490,7 @@ def _write_soundmouse_correction_audit(
     cover_additions: set[str],
     cover_removals: set[str],
 ) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["Action", "Filename", "Local Result", "Required Manual Action"]
     rows: list[dict[str, str]] = []
     for action, values, local, manual in (
@@ -1519,7 +1752,7 @@ def run_soundmouse_step(
         return False
     if correction_package and has_delta:
         _write_soundmouse_correction_audit(
-            correction_root / "SoundMouse Missing Audit.csv",
+            ctx.specials_dir / "_WORKFLOW" / "SoundMouse Missing Audit.csv",
             audio_additions=audio_additions,
             audio_removals=audio_removals,
             cover_additions=cover_additions,

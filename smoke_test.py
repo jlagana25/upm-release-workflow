@@ -27,7 +27,8 @@ from pathlib import Path
 MODULES = [
     "config", "tracklist_columns", "logging_utils",
     "covers", "verification", "final_metadata_verification", "remediation",
-    "final_packaging", "cleanup", "audio_conversion", "domo_exports",
+    "final_packaging", "cleanup", "audio_conversion", "domo_api",
+    "domo_projection_contracts", "domo_exports",
     "split_se_ingest_forms", "folder_setup", "album_list_doc", "soundminer",
     "make_soundminer_crops", "prune", "unisync_automation", "unisync_prefs",
     "remote_runner", "soundminer_agent", "workflow_report", "auth_manager",
