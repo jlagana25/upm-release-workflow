@@ -1,7 +1,7 @@
 # Per-user authentication and privacy
 
 The repository contains workflow code only. Domo, DAMS, BMAT SFTP, SynchTank
-S3, UniSync, and Monday authentication is
+S3, TuneSat, ESPN, SoundExchange, SoundMouse, UniSync, and Monday authentication is
 owned by the macOS user running the workflow and must never be copied with the
 repo or onto a Pegasus delivery.
 
@@ -20,6 +20,11 @@ python3 auth_manager.py --setup unisync
 python3 auth_manager.py --enroll-bmat-keychain
 python3 auth_manager.py --enroll-synchtank-keychain
 python3 auth_manager.py --enroll-tunesat-keychain
+python3 auth_manager.py --enroll-espn-keychain
+python3 auth_manager.py --enroll-netmix-keychain
+python3 auth_manager.py --enroll-soundexchange-keychain
+python3 auth_manager.py --enroll-soundmouse-keychain
+python3 soundmouse_web_auth.py
 python3 auth_manager.py --enroll-monday-keychain
 python3 auth_manager.py --status
 ```
@@ -41,13 +46,20 @@ python3 auth_manager.py --status
 - UniSync opens its installed app. The user signs in there; the workflow never
   collects the credential. UniSync's local preferences stay at
   `~/Library/SMUniSync/UniSync.xml`.
-- Soundmouse Uploader owns its remembered account and Keychain entry. The
-  workflow never reads or stores that password; it can press the app's Sign In
-  button only when retained account details are already available, then
-  requires workspace `UPPM` and module `Music` before adding a package.
+- Soundmouse Uploader owns its remembered native-app account and Keychain entry.
+  Separately, `--enroll-soundmouse-keychain` stores the SoundMouse website
+  username and password for unattended recovery of a fresh web session before
+  metadata workbooks are processed. Neither pair is logged or written to the
+  repository. The native uploader still requires workspace `UPPM` and module
+  `Music` before adding a package.
 - DAMS opens a separate private Playwright profile. The user chooses UMG
   Employee SSO during `--setup dams`; normal BMAT runs reuse that retained
-  session for read-only album navigation and downloads.
+  session for read-only album navigation and downloads. DAMS stores its
+  application token in browser session storage rather than a persistent
+  cookie, so setup snapshots that token into the same private auth directory
+  and normal runs restore it before navigating. The snapshot is mode `0600`,
+  never enters the repository, and is refreshed only after protected Albums
+  access is verified.
 - `--enroll-bmat-keychain` collects the SFTP username and password through
   hidden prompts, atomically stores and verifies both values in Login Keychain,
   and never writes either value to argv, the environment, logs, or files.
@@ -59,6 +71,19 @@ python3 auth_manager.py --status
   password through hidden prompts and atomically stores and verifies both in
   Login Keychain without placing either value in argv, the environment, logs,
   or files.
+- `--enroll-espn-keychain`, `--enroll-netmix-keychain`,
+  `--enroll-soundexchange-keychain`, and
+  `--enroll-soundmouse-keychain` collect each
+  portal's separate username/email and password through hidden prompts and
+  atomically store the exact pairs in Login Keychain. Normal delivery runs
+  fill only a uniquely identified login form from memory, then require
+  protected portal controls before continuing. A changed or ambiguous login
+  UI, rejected credential, CAPTCHA, or MFA challenge remains fail-closed.
+- `soundmouse_web_auth.py` enters through `https://app.soundmouse.com/` and
+  verifies that the private retained SoundMouse website profile reaches the
+  protected UPPM Music page. On a fresh session
+  it uses the SoundMouse Keychain pair in memory and fails closed on an
+  ambiguous login form, rejected credential, CAPTCHA, or MFA challenge.
 - `--enroll-monday-keychain` collects that operator's Monday personal API token
   once through a hidden Terminal prompt and validates it before changing
   Keychain. It uses macOS Security.framework directly rather than putting the
@@ -79,7 +104,8 @@ python3 auth_manager.py --status
 
 Setup is the only interactive authentication operation. Normal workflow runs:
 
-- reuse the private Domo profile and allow Microsoft/Domo silent SSO to finish;
+- use the Keychain Domo API client for Step 1, BMAT, and SoundMouse exports;
+- reuse the private Domo profile only for bounded DataFlow lineage/run recovery;
 - reuse the private DAMS profile for bounded silent UMG Employee SSO;
 - load BMAT SFTP credentials into memory only for Step 17 and accept/persist a
   first-seen host key while rejecting a changed key on later runs;
@@ -87,9 +113,20 @@ Setup is the only interactive authentication operation. Normal workflow runs:
   delivery and upload `delivery.complete` only after exact remote verification;
 - load TuneSat SFTP credentials into memory only for its standalone delivery,
   pin the first-seen host key, and reject later host-key changes;
+- load ESPN and SoundExchange portal credentials from Keychain only when their
+  retained private browser sessions need reauthentication, then verify
+  protected destination/catalog controls before any delivery mutation;
+- ESPN selects only the canonical package path in Signiant's native folder
+  panel, then requires that exact package name to appear in Media Shuttle before
+  allowing the final Upload action;
+- load the Netmix upload-history login from Keychain when its retained history
+  session expires, then verify both the history grid and upload controls before
+  staging or uploading a package;
 - reuse UniSync's current-user application/Keychain session after each relaunch;
 - reuse Soundmouse Uploader's retained current-user sign-in without reading its
-  credentials, and fail rather than prompt during a delivery;
+  native-app credentials, and load the separate SoundMouse website pair from
+  Keychain only when a fresh web session requires sign-in before metadata
+  processing;
 - close completed UniSync Microsoft `Working...` tabs after each job by exact
   title, host, and UniSync Azure client-ID matching;
 - use the same private Domo profile for Step 5's one-time stalled-source
@@ -126,6 +163,10 @@ python3 auth_manager.py --delete-domo-keychain --confirm-reset
 python3 auth_manager.py --delete-domo-api-keychain --confirm-reset
 python3 auth_manager.py --delete-monday-keychain --confirm-reset
 python3 auth_manager.py --delete-bmat-keychain --confirm-reset
+python3 auth_manager.py --delete-espn-keychain --confirm-reset
+python3 auth_manager.py --delete-netmix-keychain --confirm-reset
+python3 auth_manager.py --delete-soundexchange-keychain --confirm-reset
+python3 auth_manager.py --delete-soundmouse-keychain --confirm-reset
 ```
 
 Browser/XML artifacts are moved into a timestamped directory in `~/.Trash`, not

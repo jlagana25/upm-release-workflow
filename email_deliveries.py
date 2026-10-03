@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from config import PRIVATE_STATE_DIR, ReleaseContext, context_from_cli_args
+from config import (
+    PRIVATE_STATE_DIR,
+    ReleaseContext,
+    context_from_cli_args,
+    monthly_metadata_delivery_ready,
+)
 from delivery_common import (
     DeliverySafetyError,
     ManifestFile,
@@ -176,6 +181,10 @@ def prepare_email_plan(
 ) -> EmailPlan:
     if endpoint not in {"qwire", "scripps"}:
         raise EmailDeliveryError(f"Unsupported email endpoint: {endpoint}")
+    if not getattr(ctx, "monthly_metadata_due", True):
+        raise EmailDeliveryError(
+            f"{endpoint} is monthly and is not due for {ctx.release_id}"
+        )
     source = ctx.partner_metadata[endpoint]
     source_manifest = collect_manifest(source, allowed_suffixes=frozenset({".csv"}))
     output = output_dir or (ctx.specials_dir / "_WORKFLOW" / "email_attachments" / endpoint)
@@ -189,9 +198,17 @@ def prepare_email_plan(
         raise EmailDeliveryError("Prepared Outlook attachment is not below 3 MiB")
     to = "libraries@qwire.com" if endpoint == "qwire" else "patrick.magee@scripps.com"
     body = compose_body(signature)
+    monthly_display = (
+        ctx.monthly_partner_display(endpoint)
+        if getattr(ctx, "is_monthly_delivery", False)
+        and hasattr(ctx, "monthly_partner_display")
+        else getattr(ctx, "monthly_metadata_display_folder", ctx.delivery_display_folder)
+    )
     return EmailPlan(
         endpoint, to,
-        f"Universal Production Music - {ctx.delivery_display_folder} Metadata Delivery",
+        "Universal Production Music - "
+        f"{monthly_display} "
+        "Metadata Delivery",
         body, attachment_manifest, source_manifest,
     )
 
@@ -248,6 +265,13 @@ def deliver_email(
                     endpoint, len(plan.attachments), plan.to, plan.subject,
                 )
             return True
+        if (
+            hasattr(ctx, "monthly_metadata_delivery_date")
+            and not monthly_metadata_delivery_ready(ctx)
+        ):
+            raise EmailDeliveryError(
+                f"{endpoint} is held until {ctx.monthly_metadata_delivery_date}"
+            )
         if not signature.strip():
             raise EmailDeliveryError("Approved private plain-text Outlook signature is required")
         plan = prepare_email_plan(ctx, endpoint, signature)
@@ -328,6 +352,10 @@ def _main() -> int:
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--full-month-content", action="store_true")
+    parser.add_argument(
+        "--delivery-date",
+        help="first day of the standalone monthly delivery month (YYYY-MM-01)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")

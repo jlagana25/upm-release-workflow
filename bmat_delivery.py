@@ -42,6 +42,7 @@ DAMS_BASE_URL = "https://dams.universalproductionmusic.com"
 DAMS_ALBUMS_URL = f"{DAMS_BASE_URL}/albums"
 DAMS_AUTH_TIMEOUT_MS = 90_000
 DAMS_DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000
+DAMS_SESSION_STORAGE_PATH = PRIVATE_STATE_DIR / "dams_session_storage.json"
 
 
 BMAT_CARD_CONFIGS: list[dict] = [
@@ -482,6 +483,49 @@ def _dams_is_authenticated(page) -> bool:
     )
 
 
+def _save_dams_session_storage(page) -> None:
+    """Persist DAMS's sessionStorage token in the private auth directory."""
+    from auth_manager import private_creation_umask, secure_private_file
+
+    items = page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage))")
+    if not isinstance(items, dict) or not items:
+        raise RuntimeError("DAMS authenticated without reusable session storage")
+    payload = {"origin": DAMS_BASE_URL, "items": items}
+    temporary = DAMS_SESSION_STORAGE_PATH.with_suffix(".json.tmp")
+    DAMS_SESSION_STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with private_creation_umask():
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(DAMS_SESSION_STORAGE_PATH)
+    secure_private_file(DAMS_SESSION_STORAGE_PATH)
+
+
+def _restore_dams_session_storage(context) -> bool:
+    """Restore the private DAMS sessionStorage token before page navigation."""
+    from auth_manager import secure_private_file
+
+    if not DAMS_SESSION_STORAGE_PATH.is_file():
+        return False
+    try:
+        payload = json.loads(DAMS_SESSION_STORAGE_PATH.read_text(encoding="utf-8"))
+        origin = payload.get("origin")
+        items = payload.get("items")
+        if origin != DAMS_BASE_URL or not isinstance(items, dict) or not items:
+            return False
+        secure_private_file(DAMS_SESSION_STORAGE_PATH)
+        encoded = json.dumps(payload, separators=(",", ":"))
+        context.add_init_script(
+            script=(
+                "(() => { const saved = " + encoded + "; "
+                "if (location.origin === saved.origin) { "
+                "for (const [key, value] of Object.entries(saved.items)) "
+                "sessionStorage.setItem(key, value); } })();"
+            )
+        )
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def _authenticate_dams(page, logger: logging.Logger, *, allow_interactive: bool) -> None:
     page.goto(DAMS_ALBUMS_URL, wait_until="domcontentloaded")
     if _dams_is_authenticated(page):
@@ -535,6 +579,7 @@ def setup_dams_auth(logger: logging.Logger) -> bool:
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 _authenticate_dams(page, logger, allow_interactive=True)
+                _save_dams_session_storage(page)
                 logger.info(
                     "Protected DAMS Albums page verified; leaving the browser "
                     "visible for 10 seconds for confirmation."
@@ -649,9 +694,13 @@ def download_bmat_audio_from_dams(
                     downloads_path=str(download_dir),
                     accept_downloads=True,
                 )
+            restored_session = _restore_dams_session_storage(context)
+            if restored_session:
+                logger.info("  Restored the private DAMS application session.")
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 _authenticate_dams(page, logger, allow_interactive=False)
+                _save_dams_session_storage(page)
                 for catalogue in missing_catalogues:
                     logger.info(f"  ── DAMS custom album {catalogue} ──")
                     archive = _download_catalogue_archive(

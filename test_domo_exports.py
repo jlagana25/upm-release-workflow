@@ -29,8 +29,26 @@ from prune import _tree_specs
 
 class DomoDeliveryMetadataTests(unittest.TestCase):
     def test_every_step1_and_bmat_card_has_explicit_api_contract(self) -> None:
-        expected = {card["key"] for card in CARD_CONFIGS + BMAT_CARD_CONFIGS}
+        expected = {
+            "monday_audio_batch",
+            *(card["key"] for card in CARD_CONFIGS + BMAT_CARD_CONFIGS),
+        }
         self.assertEqual(expected, set(DOMO_PROJECTION_CONTRACTS))
+
+    def test_monday_contract_uses_album_level_api_projection(self) -> None:
+        contract = DOMO_PROJECTION_CONTRACTS["monday_audio_batch"]
+        self.assertEqual(
+            "2e2c7f18-c9d1-45cf-897c-be18939cc044",
+            contract.dataset_id,
+        )
+        self.assertEqual("AlbumReleaseDate", contract.date_column)
+        self.assertEqual(("WorkGroupingId",), contract.unique_by)
+        self.assertTrue(contract.distinct)
+        fields = {field.output: field for field in contract.fields}
+        self.assertEqual("DomoAlbumId", fields["WorkGroupingId"].source)
+        self.assertEqual("", fields["Batch"].constant)
+        self.assertEqual("Create NEW", fields["Digital Fulfillment"].constant)
+        self.assertEqual("", fields["Batch Master"].constant)
 
     def test_api_projection_writes_ordered_tracklist_without_browser(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,7 +232,7 @@ class DomoDeliveryMetadataTests(unittest.TestCase):
             "scripps_metadata",
         ):
             self.assertTrue(cards[key]["monthly_metadata"])
-            self.assertIn("October 2026", str(cards[key]["output_fn"](ctx)))
+            self.assertIn("September 2026", str(cards[key]["output_fn"](ctx)))
 
     def test_off_cycle_context_omits_japan_unisync_and_final_check(self) -> None:
         ctx = ReleaseContext.for_date_range("2026-09-12", "2026-09-25")

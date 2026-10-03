@@ -86,6 +86,10 @@ def latest_workflow_gates(
 ) -> tuple[bool, str]:
     """Require the newest real non-skipped result for every named step."""
     wanted = set(required)
+    report_names = {
+        "10 Final packaging": "final_packaging",
+        "15 Final metadata check": "final_verification",
+    } if getattr(ctx, "is_monthly_delivery", False) else {}
     statuses: dict[str, str] = {}
     report_dir = Path(logs_dir or LOGS_DIR) / "reports" / ctx.release_id
     if report_dir.is_dir():
@@ -98,7 +102,12 @@ def latest_workflow_gates(
                 continue
             steps = data.get("steps") or {}
             for name in wanted - statuses.keys():
-                status = str((steps.get(name) or {}).get("status") or "")
+                raw = steps.get(report_names.get(name, name))
+                status = (
+                    str(raw.get("status") or "")
+                    if isinstance(raw, dict)
+                    else str(raw or "")
+                )
                 if status and status != "skipped":
                     statuses[name] = status
             if wanted <= statuses.keys():

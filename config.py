@@ -375,6 +375,7 @@ class ReleaseContext:
         range_start: date | None = None,
         range_end: date | None = None,
         monthly_delivery: bool = False,
+        monthly_delivery_date: date | None = None,
     ) -> None:
         # In previous-month mode there is no Part split — the run covers the
         # full calendar month — so `part` is normalised to 1 and ignored for
@@ -414,6 +415,18 @@ class ReleaseContext:
         self.is_date_range = range_start is not None
         self.is_monthly_delivery = monthly_delivery
 
+        if self.is_monthly_delivery:
+            next_year = year + (1 if month == 12 else 0)
+            next_month = 1 if month == 12 else month + 1
+            expected_delivery_date = date(next_year, next_month, 1)
+            monthly_delivery_date = monthly_delivery_date or expected_delivery_date
+            if monthly_delivery_date != expected_delivery_date:
+                raise ValueError(
+                    "monthly delivery date must be the first day after the content month"
+                )
+        elif monthly_delivery_date is not None:
+            raise ValueError("monthly_delivery_date requires monthly_delivery")
+
         run_date = datetime(year, month, 1)
 
         # ---- Basic name tokens -----------------------------------------------
@@ -429,8 +442,13 @@ class ReleaseContext:
             year == 2026 and month == 8 and part == 2
         )
         if self.is_monthly_delivery:
-            self.release_variant = "MONTHLY"
-            self.release_id = f"UPM-{self.year_str}-{self.month_num}-MONTHLY"
+            is_email_relabel_transition = monthly_delivery_date == date(2026, 11, 1)
+            self.release_variant = (
+                "MONTHLY-P2" if is_email_relabel_transition else "MONTHLY"
+            )
+            self.release_id = (
+                f"UPM-{self.year_str}-{self.month_num}-{self.release_variant}"
+            )
         elif self.is_date_range:
             assert range_start is not None and range_end is not None
             self.release_variant = "RANGE"
@@ -529,15 +547,22 @@ class ReleaseContext:
             self.delivery_display_folder = self.month_display_folder
 
         # Monthly endpoints are completely independent of rolling and legacy
-        # release runs. A dedicated run on the 1st uses the entire previous
-        # calendar month as its content window while all client-facing names use
-        # the current delivery month.
+        # release runs. A dedicated run on the 1st uses and names the entire
+        # previous calendar month; the following month's first remains only the
+        # schedule/authorization date.
         self.monthly_metadata_due = self.is_monthly_delivery
         self.monthly_metadata_display_folder = self.delivery_display_folder
         self.monthly_metadata_start = ""
         self.monthly_metadata_end = ""
         self.monthly_metadata_delivery_date = (
-            f"{self.year_str}-{self.month_num}-01" if self.is_monthly_delivery else ""
+            monthly_delivery_date.isoformat()
+            if self.is_monthly_delivery and monthly_delivery_date is not None
+            else ""
+        )
+        self.monthly_monday_batch = (
+            f"UPM{monthly_delivery_date.strftime('%Y%m%d')}"
+            if self.is_monthly_delivery and monthly_delivery_date is not None
+            else ""
         )
 
         # Exact client-facing delivery label. Part deliveries intentionally do
@@ -590,11 +615,8 @@ class ReleaseContext:
         # ---- Release date range ---------------------------------------------
         last_day = monthrange(year, month)[1]
         if self.is_monthly_delivery:
-            delivery_month_start = date(self.year, self.month, 1)
-            content_end = delivery_month_start - timedelta(days=1)
-            content_start = date(content_end.year, content_end.month, 1)
-            self.release_start = content_start.isoformat()
-            self.release_end = content_end.isoformat()
+            self.release_start = date(self.year, self.month, 1).isoformat()
+            self.release_end = date(self.year, self.month, last_day).isoformat()
         elif self.is_date_range:
             assert range_start is not None and range_end is not None
             self.release_start = range_start.isoformat()
@@ -696,7 +718,7 @@ class ReleaseContext:
             self.specials_dir
             / "3-FINAL PACKAGING"
             / _japan_folder
-            / f"{self.monthly_metadata_display_folder} NTT Data Metadata.csv"
+            / f"{self.monthly_partner_display('Japan NTT DATA')} NTT Data Metadata.csv"
         )
         # ---- Album list document paths --------------------------------------
         _doc_stem = (
@@ -811,11 +833,7 @@ class ReleaseContext:
     def for_monthly_delivery(
         cls, delivery_date: str | date | None = None
     ) -> "ReleaseContext":
-        """Build the standalone monthly context for a delivery month's 1st.
-
-        Client-facing names use the delivery month, while release_start and
-        release_end cover the complete preceding calendar month.
-        """
+        """Build a content-month context scheduled for the following month's 1st."""
         resolved = (
             date.today()
             if delivery_date is None
@@ -825,18 +843,31 @@ class ReleaseContext:
         )
         if resolved.day != 1:
             raise ValueError("monthly deliveries must be scheduled for the 1st")
+        content_end = resolved - timedelta(days=1)
         return cls(
-            year=resolved.year,
-            month=resolved.month,
+            year=content_end.year,
+            month=content_end.month,
             part=1,
             monthly_delivery=True,
+            monthly_delivery_date=resolved,
         )
+
+    def monthly_partner_display(self, partner: str) -> str:
+        """Return the content-month label, including the one-time email suffix."""
+        key = re.sub(r"[^a-z0-9]", "", partner.casefold())
+        if (
+            self.is_monthly_delivery
+            and self.monthly_metadata_delivery_date == "2026-11-01"
+            and key in {"qwire", "scripps"}
+        ):
+            return f"{self.monthly_metadata_display_folder} Part 2"
+        return self.monthly_metadata_display_folder
 
     def partner_folder_name(self, partner: str) -> str:
         if partner in MONTHLY_METADATA_PARTNERS and self.monthly_metadata_due:
             return (
                 "Universal Production Music "
-                f"{self.monthly_metadata_display_folder} - {partner}"
+                f"{self.monthly_partner_display(partner)} - {partner}"
             )
         return (
             "Universal Production Music "
@@ -887,6 +918,8 @@ class ReleaseContext:
         """
         mdf = self.delivery_display_folder
         monthly_mdf = self.monthly_metadata_display_folder
+        qwire_mdf = self.monthly_partner_display("Qwire")
+        scripps_mdf = self.monthly_partner_display("Scripps")
         fp  = self.specials_dir / "3-FINAL PACKAGING"
 
         def _r(name: str) -> Path:
@@ -895,9 +928,9 @@ class ReleaseContext:
         return {
             "netmix":    _r("Netmix")    / "Metadata" / f"UPM {mdf} Metadata.csv",
             "synchtank": _r("SynchTank") / "Metadata" / f"UPM {mdf} Metadata.csv",
-            "scripps":   _r("Scripps")   / "Metadata" / f"UPM {monthly_mdf} Metadata.csv",
+            "scripps":   _r("Scripps")   / "Metadata" / f"UPM {scripps_mdf} Metadata.csv",
             "qwire":     _r("Qwire")     / "Metadata"
-                         / f"Qwire Library Submission Template \u2013 {monthly_mdf}.csv",
+                         / f"Qwire Library Submission Template \u2013 {qwire_mdf}.csv",
             "sourceaudio": _r("SourceAudio") / "Metadata"
                            / f"UPM {mdf} Metadata.csv",
             "sourceaudio_exus": _r("SourceAudio Ex-US") / "Metadata"
@@ -1085,6 +1118,22 @@ def context_from_cli_args(args) -> "ReleaseContext":
     start = getattr(args, "start_date", None)
     end = getattr(args, "end_date", None)
     full_month_content = getattr(args, "full_month_content", False)
+    delivery_date = getattr(args, "delivery_date", None)
+
+    if delivery_date:
+        if (
+            previous
+            or year is not None
+            or month is not None
+            or part is not None
+            or start
+            or end
+            or full_month_content
+        ):
+            raise ValueError(
+                "--delivery-date cannot be combined with other release selectors"
+            )
+        return ReleaseContext.for_monthly_delivery(delivery_date)
 
     if start or end:
         if previous or year is not None or month is not None or part is not None:

@@ -1188,12 +1188,13 @@ _UNISYNC_TERRITORIES: tuple[tuple[str, str], ...] = (
 
 
 def _soundmouse_unisync_territories(tracklist_csv: Path) -> list[str]:
-    """Choose country passes that cover every SoundMouse territory list.
+    """Choose every country pass named by the SoundMouse territory lists.
 
     Australia is intentionally first and covers every row containing ``OZ``.
-    Remaining rows are covered greedily using their actual territory codes, so
-    a future SE-only or UK-only bucket adds that country instead of incorrectly
-    treating Rest of World or Japan as a SoundMouse territory.
+    The remaining declared countries are retained as runtime fallbacks because
+    a track can be absent from Australia even when OZ appears in its Domo
+    territory list. Each pass is filtered to rows that explicitly name that
+    country, so US-only and SE-only files can never be sent to another region.
     """
     fields, rows = _read_csv(tracklist_csv)
     territory_col = _find_column(
@@ -1215,19 +1216,11 @@ def _soundmouse_unisync_territories(tracklist_csv: Path) -> list[str]:
             )
         row_territories.append(territories)
 
-    remaining = list(row_territories)
-    chosen_codes: list[str] = []
     preference = [code for code, _name in _UNISYNC_TERRITORIES]
-    while remaining:
-        counts = {
-            code: sum(code in territories for territories in remaining)
-            for code in preference
-        }
-        best = max(preference, key=lambda code: (counts[code], -preference.index(code)))
-        if counts[best] == 0:
-            raise ValueError("SoundMouse territory lists could not be fully routed")
-        chosen_codes.append(best)
-        remaining = [territories for territories in remaining if best not in territories]
+    chosen_codes = [
+        code for code in preference
+        if any(code in territories for territories in row_territories)
+    ]
 
     names = dict(_UNISYNC_TERRITORIES)
     return [names[code] for code in chosen_codes]
@@ -1242,6 +1235,7 @@ def _soundmouse_unisync_jobs(
     """Build additive country jobs selected from ``Territory List``."""
     request_csv = all_request_csv or ctx.soundmouse_tracklist_csv
     selected = territories or _soundmouse_unisync_territories(Path(request_csv))
+    codes_by_name = {name: code for code, name in _UNISYNC_TERRITORIES}
     jobs = [
         {
             "name": f"SoundMouse {territory} WAV ({ctx.soundmouse_activation_range})",
@@ -1252,16 +1246,15 @@ def _soundmouse_unisync_jobs(
             # shared destination manifest means later countries automatically
             # request only rows not supplied by earlier countries.
             "csv": str(request_csv),
+            "eligible_territory_code": codes_by_name[territory],
+            # A country miss is provisional. Run every territory explicitly
+            # allowed by Domo, then enforce the union against the authoritative
+            # manifest after all passes complete.
+            "allow_unresolved": True,
+            "zero_progress_retries": 0,
         }
         for territory in selected
     ]
-    for current, following in zip(jobs, jobs[1:]):
-        current["fallback_territory"] = following["territory"]
-        current["zero_progress_retries"] = 0
-    if jobs:
-        jobs[-1]["zero_progress_retries"] = 0
-        if Path(request_csv) == Path(ctx.soundmouse_tracklist_csv):
-            jobs[-1]["domo_card_config"] = _domo_configs(ctx)[0]
     return jobs
 
 
@@ -1273,6 +1266,7 @@ def run_soundmouse_unisync(
     *,
     destination_dir: Path | None = None,
     existing_media_roots: tuple[Path, ...] = (),
+    _refresh_attempted: bool = False,
 ) -> bool:
     """Run the minimum country passes required by ``Territory List``."""
     if dry_run:
@@ -1343,12 +1337,46 @@ def run_soundmouse_unisync(
             dry_run=dry_run,
             logger=logger,
             overwrite=overwrite,
-            # Country passes form an explicit fallback chain. If the final
-            # required country also stalls, the canonical tracklist job can
-            # safely refresh/re-export its owning Domo card once.
-            allow_domo_refresh=True,
+            # SoundMouse evaluates all row-authorized countries before it
+            # decides whether one bounded ETL/card refresh is necessary.
+            allow_domo_refresh=False,
         )
-    return bool(results) and not any(v == STATUS_FAILED for v in results.values())
+    if not results or any(v == STATUS_FAILED for v in results.values()):
+        return False
+
+    expected_audio, _expected_covers = _soundmouse_expected_names(request_csv)
+    media_roots = (
+        destination_dir or (ctx.soundmouse_release_dir / "MEDIA"),
+        *existing_media_roots,
+    )
+    present = set().union(*(_disk_file_keys(root) for root in media_roots))
+    missing = expected_audio - present
+    if not missing:
+        return True
+
+    if not _refresh_attempted and Path(request_csv) == Path(ctx.soundmouse_tracklist_csv):
+        logger.warning(
+            f"  ↻ {len(missing)} SoundMouse file(s) remain after every "
+            "authorized territory. Refreshing the owning Domo ETL/card once."
+        )
+        from domo_exports import refresh_card_config_source_and_export
+
+        if refresh_card_config_source_and_export(ctx, _domo_configs(ctx)[0], logger):
+            return run_soundmouse_unisync(
+                ctx,
+                dry_run,
+                overwrite,
+                logger,
+                destination_dir=destination_dir,
+                existing_media_roots=existing_media_roots,
+                _refresh_attempted=True,
+            )
+
+    logger.error(
+        f"  ✗ SoundMouse exhausted every row-authorized territory with "
+        f"{len(missing)}/{len(expected_audio)} WAV file(s) still missing."
+    )
+    return False
 
 
 def download_soundmouse_covers(

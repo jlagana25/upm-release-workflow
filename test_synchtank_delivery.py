@@ -57,25 +57,34 @@ class SynchTankDeliveryTests(unittest.TestCase):
 
     @patch("synchtank_delivery.workflow_gate_passed", return_value=(True, "ready"))
     @patch("synchtank_delivery.set_partner_status")
-    def test_uploads_directly_and_marker_is_last(self, set_status, _gate) -> None:
-        gateway = FakeGateway()
+    def test_uploads_under_package_prefix_and_marker_is_last(self, set_status, _gate) -> None:
+        gateway = FakeGateway({"Historical Delivery/old.wav": 10})
         self.assertTrue(sd.deliver_synchtank(self.ctx, False, self.logger, gateway=gateway))
         uploaded_keys = [key for action, key in gateway.events if action == "upload"]
+        prefix = "Universal Production Music Test - SynchTank/"
         self.assertEqual(
             uploaded_keys,
-            ["Covers/cover.jpg", "Metadata/metadata.csv", "Music/Label/track.wav"],
+            [
+                prefix + "Covers/cover.jpg",
+                prefix + "Metadata/metadata.csv",
+                prefix + "Music/Label/track.wav",
+            ],
         )
-        self.assertEqual(gateway.events[-1], ("put_empty", "delivery.complete"))
-        self.assertNotIn("UPM20260912", "".join(gateway.objects))
-        set_status.assert_called_once_with(self.root, "synchtank", "uploaded")
+        self.assertEqual(
+            gateway.events[-1], ("put_empty", prefix + "delivery.complete")
+        )
+        self.assertIn("Historical Delivery/old.wav", gateway.objects)
+        set_status.assert_called_once_with(self.root, "synchtank", "delivered")
         self.assertTrue((self.root / "_WORKFLOW" / "synchtank_delivery_receipt.json").is_file())
 
     @patch("synchtank_delivery.workflow_gate_passed", return_value=(True, "ready"))
     @patch("synchtank_delivery.set_partner_status")
     def test_exact_completed_delivery_is_idempotent(self, set_status, _gate) -> None:
         manifest = sd.collect_package(self.package)
-        initial = {item.key: item.size for item in manifest}
-        initial[sd.COMPLETION_MARKER] = 0
+        prefix = sd.package_prefix(self.ctx)
+        initial = {prefix + item.key: item.size for item in manifest}
+        initial[prefix + sd.COMPLETION_MARKER] = 0
+        initial["Historical Delivery/old.wav"] = 10
         gateway = FakeGateway(initial)
         self.assertTrue(sd.deliver_synchtank(self.ctx, False, self.logger, gateway=gateway))
         self.assertEqual(gateway.events, [])
@@ -84,7 +93,9 @@ class SynchTankDeliveryTests(unittest.TestCase):
     @patch("synchtank_delivery.workflow_gate_passed", return_value=(True, "ready"))
     @patch("synchtank_delivery.set_partner_status")
     def test_unexpected_remote_object_fails_before_upload(self, set_status, _gate) -> None:
-        gateway = FakeGateway({"old.wav": 10})
+        gateway = FakeGateway(
+            {sd.package_prefix(self.ctx) + "unexpected-old.wav": 10}
+        )
         self.assertFalse(sd.deliver_synchtank(self.ctx, False, self.logger, gateway=gateway))
         self.assertEqual(gateway.events, [])
         set_status.assert_not_called()

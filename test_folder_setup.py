@@ -84,6 +84,37 @@ class RetiredPartnerFolderTests(unittest.TestCase):
             self.assertFalse(any(destination.rglob("*MTV*")))
             self.assertFalse(any(destination.rglob("*NBC*")))
 
+    def test_non_triggering_run_excludes_monthly_metadata_partner_trees(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = self._build_source(root)
+            final = source / "3-FINAL PACKAGING"
+            for name in (
+                "UPM Japan NTT DATA MMMM YYYY Release",
+                "UPM Japan JMD and TSS MMMM YYYY Release",
+                "Universal Production Music MMMM YYYY Release - Qwire",
+                "Universal Production Music MMMM YYYY Release - Scripps",
+            ):
+                folder = final / name
+                folder.mkdir()
+                (folder / "metadata.csv").write_text("header\n", encoding="utf-8")
+            destination = root / "release"
+            self.assertTrue(
+                folder_setup._safe_copytree(
+                    source,
+                    destination,
+                    False,
+                    False,
+                    "test",
+                    self.logger,
+                    exclude_monthly_metadata=True,
+                )
+            )
+            self.assertFalse(any(destination.rglob("*Qwire*")))
+            self.assertFalse(any(destination.rglob("*Scripps*")))
+            self.assertFalse(any(destination.rglob("*JMD*")))
+            self.assertFalse(any(destination.rglob("*NTT*")))
+
     def test_part_and_range_delivery_folder_names_are_normalized(self):
         cases = [
             (
@@ -105,6 +136,40 @@ class RetiredPartnerFolderTests(unittest.TestCase):
                 self.assertTrue(
                     (root / ctx.partner_folder_name("Japan NTT DATA")).is_dir()
                 )
+
+    def test_standalone_monthly_folder_is_minimal_and_restartable(self):
+        ctx = config.ReleaseContext.for_monthly_delivery("2026-10-01")
+        with tempfile.TemporaryDirectory() as raw:
+            ctx.specials_dir = Path(raw) / ctx.storage_root
+            ctx.partner_dirs = ctx._build_partner_dirs()
+            ctx.japan_metadata_csv = (
+                ctx.partner_dirs["japan_final_media"].parent
+                / "September 2026 NTT Data Metadata.csv"
+            )
+            ctx.partner_metadata = ctx._build_partner_metadata()
+
+            self.assertTrue(
+                folder_setup.create_monthly_delivery_folder(
+                    ctx, False, self.logger
+                )
+            )
+            self.assertTrue(
+                (ctx.specials_dir / "1-ORIGINAL" / "Music" / "Japan" / "MEDIA").is_dir()
+            )
+            self.assertTrue(ctx.partner_dirs["japan_final_media"].is_dir())
+            self.assertTrue(ctx.partner_metadata["qwire"].parent.is_dir())
+            self.assertTrue(ctx.partner_metadata["scripps"].parent.is_dir())
+            self.assertFalse((ctx.specials_dir / "1-ORIGINAL" / "Music" / "MP3").exists())
+
+            # A resume preserves existing work and remains successful.
+            marker = ctx.partner_dirs["japan_final_media"] / "existing.wav"
+            marker.write_bytes(b"audio")
+            self.assertTrue(
+                folder_setup.create_monthly_delivery_folder(
+                    ctx, False, self.logger
+                )
+            )
+            self.assertEqual(marker.read_bytes(), b"audio")
 
 
 if __name__ == "__main__":

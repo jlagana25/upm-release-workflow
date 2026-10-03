@@ -41,6 +41,8 @@ def _content(batch="202609", status="", child_status="Not Started"):
         for index, name in enumerate(names)
     ]
     children.append(BoardSubitem(1099, "Adrev/Fuga (+APM Shared Assets)", "API Client - Not Needed"))
+    children.append(BoardSubitem(1100, "NBC", child_status))
+    children.append(BoardSubitem(1101, "MTV/Viacom (Metadata only)", child_status))
     return BoardItem(100, f"{batch} - Delivery", GROUP_CONTENT, batch, "Aggregator (AG)", status, tuple(children))
 
 
@@ -78,6 +80,7 @@ class FakeGateway:
         self.validated = False
         self.changes = []
         self.source_items = []
+        self.removed_monthly = []
         self.source_schema = SourceBoardSchema(999, {
             title: (f"column_{index}", "date" if title == "Release Date" else "text")
             for index, title in enumerate((
@@ -115,9 +118,14 @@ class FakeGateway:
     def create_source_group(self, _schema, _title):
         return "source-group"
 
-    def create_source_item(self, _schema, group_id, row):
+    def create_source_item(
+        self, _schema, group_id, row, *, include_master=False
+    ):
         item_id = 9000 + len(self.source_items)
-        self.source_items.append(SourceItem(item_id, group_id, row))
+        created = row if include_master else SourceRow(**{
+            **row.__dict__, "batch_master": "",
+        })
+        self.source_items.append(SourceItem(item_id, group_id, created))
         return item_id
 
     def set_source_item_values(self, _schema, item_id, row, *, include_master):
@@ -129,6 +137,33 @@ class FakeGateway:
                 self.source_items[index] = SourceItem(item_id, item.group_id, updated)
                 return
         raise AssertionError("source item not found")
+
+    def repair_soundmouse_destination(self, _batch, _items):
+        return False
+
+    def remove_rolling_monthly_subitems(self, batch, items):
+        monthly_names = {
+            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
+            "UPM Japan - NTT DATA", "Scripps (Metadata only)",
+            "QWire (Metadata only)",
+        }
+        content = next(item for item in items if item.group == GROUP_CONTENT)
+        removed = [
+            child for child in content.subitems if child.name in monthly_names
+        ]
+        if not removed:
+            return 0
+        self.removed_monthly.extend(child.name for child in removed)
+        replacement = BoardItem(
+            content.id, content.name, content.group, content.batch,
+            content.delivery_type, content.status,
+            tuple(child for child in content.subitems if child.name not in monthly_names),
+        )
+        self.items_by_batch[batch] = [
+            replacement if item.id == content.id else item
+            for item in self.items_by_batch[batch]
+        ]
+        return len(removed)
 
 
 class NonPersistingGateway(FakeGateway):
@@ -199,6 +234,47 @@ class MondaySyncTests(unittest.TestCase):
             soundmouse_batch(rolling, "UPM20260901"), "UPM20260901"
         )
 
+        monthly = ReleaseContext.for_monthly_delivery("2026-10-01")
+        self.assertEqual(monday_batch_key(monthly), "UPM20261001")
+
+    def test_client_creates_restartable_monthly_content_item(self):
+        ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        required_names = {
+            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
+            "UPM Japan - NTT DATA",
+            "Scripps (Metadata only)",
+            "QWire (Metadata only)",
+        }
+        confirmed = BoardItem(
+            500,
+            "UPM20261001 - Monthly Delivery",
+            GROUP_CONTENT,
+            "UPM20261001",
+            "",
+            "Prepping Content",
+            tuple(
+                BoardSubitem(600 + index, name, "Working On It")
+                for index, name in enumerate(sorted(required_names))
+            ),
+        )
+        client = MondayClient("sample-value")
+        with (
+            patch.object(client, "fetch_batch", side_effect=[[], [confirmed]]),
+            patch.object(
+                client,
+                "_request",
+                side_effect=[
+                    {"boards": [{"groups": [{"id": "content", "title": GROUP_CONTENT}]}]},
+                    {"create_item": {"id": "500"}},
+                    *({"create_subitem": {"id": str(600 + index)}} for index in range(4)),
+                ],
+            ) as request,
+        ):
+            result = client.ensure_monthly_batch(ctx)
+
+        self.assertEqual(result, confirmed)
+        self.assertEqual(request.call_count, 6)
+
     @patch("monday_sync.partner_status", return_value="pending")
     def test_ready_plan_sets_packages_clear_to_send(self, _status):
         ctx = ReleaseContext(
@@ -226,8 +302,129 @@ class MondaySyncTests(unittest.TestCase):
         main_changes = [change for change in plan if not change.is_subitem]
         self.assertEqual(
             {(change.item_id, change.new_status) for change in main_changes},
-            {(100, "Ready to Close"), (200, "Ready to Close"), (300, "Prepping Content")},
+            {(100, "Prepping Content"), (200, "Ready to Close"), (300, "Prepping Content")},
         )
+
+    @patch("monday_sync.partner_status", return_value="pending")
+    def test_non_triggering_run_ignores_monthly_deliveries(self, _status):
+        ctx = ReleaseContext.for_date_range("2026-09-12", "2026-09-25")
+        batch = "UPM20260912"
+        plan = build_status_plan(
+            ctx,
+            READY_RESULTS,
+            {
+                batch: [
+                    _content(batch=batch),
+                    _hd(batch=batch),
+                    _soundmouse(batch=batch),
+                ],
+            },
+        )
+        desired = {change.item_name: change.new_status for change in plan}
+        self.assertNotIn(
+            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)", desired
+        )
+        self.assertNotIn("UPM Japan - NTT DATA", desired)
+        self.assertNotIn("Scripps (Metadata only)", desired)
+        self.assertNotIn("QWire (Metadata only)", desired)
+        self.assertEqual(desired["NBC"], "Not Needed")
+        self.assertEqual(desired["MTV/Viacom (Metadata only)"], "Not Needed")
+        self.assertEqual(desired["ESPN"], "Clear to Send")
+
+    @patch("monday_sync.partner_status", return_value="pending")
+    def test_rolling_plan_leaves_legacy_monthly_subitems_unchanged(self, _status):
+        ctx = ReleaseContext.for_date_range("2026-09-12", "2026-09-25")
+        batch = "UPM20260912"
+        content = _content(batch=batch)
+        monthly_names = {
+            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
+            "UPM Japan - NTT DATA",
+            "Scripps (Metadata only)",
+            "QWire (Metadata only)",
+        }
+        content = BoardItem(
+            content.id,
+            content.name,
+            content.group,
+            content.batch,
+            content.delivery_type,
+            content.status,
+            tuple(
+                BoardSubitem(child.id, child.name, "Not Needed")
+                if child.name in monthly_names else child
+                for child in content.subitems
+            ),
+        )
+        plan = build_status_plan(
+            ctx,
+            READY_RESULTS,
+            {
+                batch: [content, _hd(batch=batch), _soundmouse(batch=batch)],
+            },
+        )
+        changed = {
+            change.item_name: change.new_status
+            for change in plan
+            if change.item_name in monthly_names
+        }
+        self.assertEqual(changed, {})
+
+    @patch("monday_sync.partner_status", return_value="pending")
+    def test_monthly_run_uses_working_only_while_building(self, _status):
+        ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        batch = "UPM20261001"
+        content = _content(batch=batch)
+        monthly_names = {
+            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
+            "UPM Japan - NTT DATA",
+            "Scripps (Metadata only)",
+            "QWire (Metadata only)",
+        }
+        content = BoardItem(
+            content.id, content.name, content.group, content.batch,
+            content.delivery_type, content.status,
+            tuple(child for child in content.subitems if child.name in monthly_names),
+        )
+        items = {
+            batch: [content],
+        }
+
+        building = build_status_plan(ctx, {}, items)
+        building_by_name = {
+            change.item_name: change.new_status for change in building
+        }
+        self.assertEqual(
+            building_by_name["UPM Japan - NTT DATA"], "Working On It"
+        )
+
+        built = build_status_plan(ctx, READY_RESULTS, items)
+        built_by_name = {change.item_name: change.new_status for change in built}
+        self.assertEqual(
+            built_by_name["UPM Japan - NTT DATA"], "Clear to Send"
+        )
+
+    @patch("monday_sync.partner_status")
+    def test_verified_uploaded_partner_is_complete(self, status):
+        status.side_effect = lambda _root, partner: (
+            "uploaded" if partner in {"espn", "synchtank", "tunesat"} else "pending"
+        )
+        ctx = ReleaseContext.for_date_range("2026-09-01", "2026-09-11")
+        batch = "UPM20260901"
+        plan = build_status_plan(
+            ctx,
+            READY_RESULTS,
+            {
+                batch: [
+                    _content(batch=batch),
+                    _hd(batch=batch),
+                    _soundmouse(batch=batch),
+                ],
+            },
+        )
+        desired = {change.item_name: change.new_status for change in plan}
+        self.assertEqual(desired["ESPN"], "Complete")
+        self.assertEqual(desired["SynchTank"], "Complete")
+        self.assertEqual(desired["TuneSat (+Bruton & Kosinus)"], "Complete")
 
     @patch("monday_sync.partner_status", return_value="pending")
     def test_soundmouse_phase_progress_updates_only_finished_subitem(self, _status):
@@ -296,18 +493,27 @@ class MondaySyncTests(unittest.TestCase):
             2026, 9, 1,
             range_start=date(2026, 9, 1), range_end=date(2026, 9, 14),
         )
+        monthly_names = {
+            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
+            "UPM Japan - NTT DATA", "Scripps (Metadata only)",
+            "QWire (Metadata only)",
+        }
+        content = _content(batch="UPM20260901")
+        content = BoardItem(
+            content.id, content.name, content.group, content.batch,
+            content.delivery_type, content.status,
+            tuple(child for child in content.subitems if child.name not in monthly_names),
+        )
         plan = build_status_plan(
             ctx, {},
             {"UPM20260901": [
-                _content(batch="UPM20260901"),
+                content,
                 _hd(batch="UPM20260901"),
                 _soundmouse(batch="UPM20260901"),
             ]},
         )
         desired = {change.item_name: change.new_status for change in plan}
         for package in (
-            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
-            "Scripps (Metadata only)", "QWire (Metadata only)",
             "SoundExchange (Metadata only)", "MP3", "WAV",
             "Process Metadata in SoundMouse",
         ):
@@ -426,6 +632,44 @@ class MondaySyncTests(unittest.TestCase):
                 ))
         self.assertEqual(1, len(gateway.source_items))
         self.assertEqual("Batch Master", gateway.source_items[0].row.batch_master)
+        self.assertEqual(4, len(gateway.removed_monthly))
+
+    def test_source_preflight_backfills_after_trigger_without_second_master(self):
+        ctx = ReleaseContext(
+            2026, 9, 1,
+            range_start=date(2026, 9, 12), range_end=date(2026, 9, 25),
+        )
+        gateway = FakeGateway({
+            "UPM20260912": [
+                _content(batch="UPM20260912"),
+                _hd(batch="UPM20260912"),
+                _soundmouse(batch="UPM20260912"),
+            ],
+        })
+        master = SourceRow(
+            "42", "UPM20260912", "UPM-US", "2026-09-12", "7",
+            "ABC1", "Album One", "Create NEW", "Batch Master",
+        )
+        gateway.source_items = [SourceItem(9000, "source-group", master)]
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx.monday_audio_batch_csv = Path(tmp) / "batch.csv"
+            ctx.monday_audio_batch_csv.write_text(
+                "WorkGroupingId,Batch,Catalog,Release Date,LabelId,Album Code,"
+                "Album Title,Digital Fulfillment,Batch Master\n"
+                "42,UPM20260912,UPM-US,2026-09-12,7,ABC1,Album One,Create NEW,Batch Master\n"
+                "43,UPM20260912,UPM-US,2026-09-12,8,ABC2,Album Two,Create NEW,\n",
+                encoding="utf-8",
+            )
+            with patch("domo_exports.run_domo_exports", return_value={"monday_audio_batch": "ok"}):
+                self.assertTrue(run_monday_source_preflight(
+                    ctx, dry_run=False, logger=logging.getLogger("source-backfill"),
+                    gateway=gateway, timeout_seconds=0, poll_seconds=0,
+                ))
+        self.assertEqual(2, len(gateway.source_items))
+        self.assertEqual(1, sum(
+            item.row.batch_master == "Batch Master"
+            for item in gateway.source_items
+        ))
 
     @patch("monday_sync.partner_status", return_value="pending")
     def test_only_step_recovery_uses_latest_real_report(self, _status):

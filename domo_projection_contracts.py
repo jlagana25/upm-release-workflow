@@ -1,4 +1,4 @@
-"""Explicit public-Domo-API projection contracts for Step 1 and BMAT.
+"""Explicit public-Domo-API projection contracts for Step 1, BMAT, and Monday.
 
 These contracts replace card-export scraping.  Every deliverable column is
 ordered and named here, so edits to a Domo card cannot silently change a file
@@ -319,6 +319,27 @@ def _bmat_submission_fields() -> tuple[ProjectionField, ...]:
 
 
 DOMO_PROJECTION_CONTRACTS = {
+    "monday_audio_batch": DomoProjectionContract(
+        "2e2c7f18-c9d1-45cf-897c-be18939cc044",
+        (
+            ProjectionField("WorkGroupingId", "DomoAlbumId"),
+            # The workflow's exact-date key is authoritative.  Leaving Batch
+            # blank lets monday_sync bind every validated row to that key;
+            # the source DataSet's legacy semi-monthly Workflow ID does not
+            # describe rolling Saturday-through-Friday releases.
+            ProjectionField("Batch", constant=""),
+            ProjectionField("Catalog", "Catalog"),
+            ProjectionField("Release Date", "AlbumReleaseDate", "date"),
+            ProjectionField("LabelId", "LabelId"),
+            ProjectionField("Album Code", "AlbumNo"),
+            ProjectionField("Album Title", "AlbumTitle"),
+            ProjectionField("Digital Fulfillment", constant="Create NEW"),
+            # monday_sync assigns one deterministic trigger after validating
+            # and de-duplicating the complete projected batch.
+            ProjectionField("Batch Master", constant=""),
+        ),
+        "AlbumReleaseDate", ("WorkGroupingId",), distinct=True,
+    ),
     "us_tracklist": DomoProjectionContract(
         "5768120c-002a-48d6-a5c5-58988d39d701", US_TRACKLIST,
         "AlbumReleaseDate", ("Filename", "workAudioId"),

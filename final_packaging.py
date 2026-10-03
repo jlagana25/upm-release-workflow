@@ -339,7 +339,17 @@ def _build_ops(ctx: ReleaseContext) -> list[CopyOp]:
     exus_wav_src    = music / "Ex-US (WAV)"   / "MEDIA"
     japan_src       = music / "Japan"         / "MEDIA"
 
-    return [
+    if ctx.is_monthly_delivery:
+        return [
+            CopyOp(
+                "Japan → UPM Japan NTT DATA",
+                japan_src,
+                pd["japan_final_media"],
+                partner_key="japan_ntt",
+            )
+        ]
+
+    ops = [
         # ---- MP3 (3 destinations) ----
         CopyOp("MP3 → Tunesat",           mp3_src,    pd["tunesat_mp3"], partner_key="tunesat"),
         CopyOp("MP3 → Discovery",         mp3_src,    pd["discovery_mp3"], partner_key="discovery"),
@@ -367,9 +377,17 @@ def _build_ops(ctx: ReleaseContext) -> list[CopyOp]:
             partner_key="tunesat",
         ),
 
-        # ---- Japan (1 destination) ----
-        CopyOp("Japan → UPM Japan NTT DATA", japan_src, pd["japan_final_media"], partner_key="japan_ntt"),
     ]
+    if ctx.monthly_metadata_due:
+        ops.append(
+            CopyOp(
+                "Japan → UPM Japan NTT DATA",
+                japan_src,
+                pd["japan_final_media"],
+                partner_key="japan_ntt",
+            )
+        )
+    return ops
 
 
 def _expected_destination_files(ops: list[CopyOp]) -> Optional[set[Path]]:

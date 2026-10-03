@@ -15,8 +15,12 @@ class FakeGateway:
         self.files = dict(initial or {})
         self.uploads: list[str] = []
 
-    def list_files(self) -> dict[str, int]:
-        return dict(self.files)
+    def list_files(self, prefix: str = "") -> dict[str, int]:
+        return {
+            key: size
+            for key, size in self.files.items()
+            if not prefix or key.startswith(prefix)
+        }
 
     def upload(self, local_path: Path, relative: str) -> None:
         self.uploads.append(relative)
@@ -55,23 +59,25 @@ class TuneSatDeliveryTests(unittest.TestCase):
 
     @patch("tunesat_delivery.workflow_gate_passed", return_value=(True, "ready"))
     @patch("tunesat_delivery.set_partner_status")
-    def test_uploads_complete_package_directly(self, set_status, _gate) -> None:
-        gateway = FakeGateway()
+    def test_uploads_complete_package_beside_history(self, set_status, _gate) -> None:
+        gateway = FakeGateway({"Historical Package/Music/old.mp3": 10})
         self.assertTrue(td.deliver_tunesat(self.ctx, False, self.logger, gateway=gateway))
+        prefix = "Universal Production Music Test - Tunesat/"
         self.assertEqual(
             gateway.uploads,
-            ["Metadata/metadata.csv", "Music/Label/track.mp3"],
+            [prefix + "Metadata/metadata.csv", prefix + "Music/Label/track.mp3"],
         )
-        self.assertNotIn("UPM20260912", "".join(gateway.files))
+        self.assertIn("Historical Package/Music/old.mp3", gateway.files)
         self.assertNotIn("delivery.complete", gateway.files)
-        set_status.assert_called_once_with(self.root, "tunesat", "uploaded")
+        set_status.assert_called_once_with(self.root, "tunesat", "delivered")
         self.assertTrue((self.root / "_WORKFLOW" / "tunesat_delivery_receipt.json").is_file())
 
     @patch("tunesat_delivery.workflow_gate_passed", return_value=(True, "ready"))
     @patch("tunesat_delivery.set_partner_status")
     def test_exact_files_are_resumed_without_upload(self, set_status, _gate) -> None:
         manifest = td.collect_package(self.package)
-        gateway = FakeGateway({item.relative: item.size for item in manifest})
+        prefix = td.package_prefix(self.ctx)
+        gateway = FakeGateway({prefix + item.relative: item.size for item in manifest})
         self.assertTrue(td.deliver_tunesat(self.ctx, False, self.logger, gateway=gateway))
         self.assertEqual(gateway.uploads, [])
         set_status.assert_called_once()
@@ -79,16 +85,17 @@ class TuneSatDeliveryTests(unittest.TestCase):
     @patch("tunesat_delivery.workflow_gate_passed", return_value=(True, "ready"))
     @patch("tunesat_delivery.set_partner_status")
     def test_matching_part_file_is_recoverable(self, set_status, _gate) -> None:
-        gateway = FakeGateway({"Music/Label/track.mp3.part": 2})
+        prefix = td.package_prefix(self.ctx)
+        gateway = FakeGateway({prefix + "Music/Label/track.mp3.part": 2})
         self.assertTrue(td.deliver_tunesat(self.ctx, False, self.logger, gateway=gateway))
-        self.assertIn("Music/Label/track.mp3", gateway.uploads)
-        self.assertNotIn("Music/Label/track.mp3.part", gateway.files)
+        self.assertIn(prefix + "Music/Label/track.mp3", gateway.uploads)
+        self.assertNotIn(prefix + "Music/Label/track.mp3.part", gateway.files)
         set_status.assert_called_once()
 
     @patch("tunesat_delivery.workflow_gate_passed", return_value=(True, "ready"))
     @patch("tunesat_delivery.set_partner_status")
     def test_unexpected_remote_file_fails_closed(self, set_status, _gate) -> None:
-        gateway = FakeGateway({"old.mp3": 10})
+        gateway = FakeGateway({td.package_prefix(self.ctx) + "old.mp3": 10})
         self.assertFalse(td.deliver_tunesat(self.ctx, False, self.logger, gateway=gateway))
         self.assertEqual(gateway.uploads, [])
         set_status.assert_not_called()

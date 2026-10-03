@@ -70,12 +70,22 @@ setting up a new machine, work through Part 2 top to bottom.
 | August transition Part 1 refresh (July full-month content) | `python3 upm_release_workflow.py --previous-month` (while run date is August 2026; targets the existing August 2026 Part 1 client folders) |
 | Initial rolling transition | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-11` |
 | Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-12 --end-date 2026-09-25` |
+| First-of-month NTT/JMD-TSS/Qwire/Scripps build | `python3 monthly_delivery_workflow.py --delivery-date 2026-10-01 --dry-run` |
 | Previous month (full month), auto from today | `python3 upm_release_workflow.py --previous-month` |
 | Previous month relative to a given month | `python3 upm_release_workflow.py --previous-month --year 2026 --month 6` |
-
 | Preview the whole run incl. non-maintrack deletions | add `--dry-run` |
 | Re-do a step that already produced output | add `--overwrite` |
 | Resume after a failure, skipping finished steps | add the matching `--skip-*` flags |
+
+NTT DATA, JMD/TSS, Qwire, and Scripps use the separate monthly command:
+`python3 monthly_delivery_workflow.py --delivery-date 2026-10-01 --dry-run`.
+Confirm it uses root `UPM-2026-10-MONTHLY`, Monday batch `UPM20261001`, and
+content dates September 1–30 while every client-facing label says
+`October 2026`. It must export only the four monthly cards and run only Japan
+UniSync. Every rolling context must report these endpoints as `not_due`, omit
+Japan UniSync, and leave no monthly partner tree in Final Packaging. Confirm a
+monthly rerun preserves existing exact files and never imports audio or metadata
+from a rolling release.
 
 ## What runs, and in what order
 
@@ -94,7 +104,12 @@ missing-report path, the log-file path, and the overall status).
 
 ## A normal release (Part 1 or Part 2)
 
-1. **Mount check** — `ls -d "/Volumes/Pegasus32 R8 - 1" "/Volumes/Pegasus32 R8 - 2"`.
+1. **Mount check** — preflight automatically reconnects the exact known HDF1
+   SMB shares on HDF2 and exact attached volume names on HDF1, then checks
+   `ls -d "/Volumes/Pegasus32 R8 - 1" "/Volumes/Pegasus32 R8 - 2"`.
+   Test the intentional-unmount guard separately with `--no-auto-mount` (or
+   the private `~/.upm_release_workflow/disable_auto_mount` sentinel); required
+   Pegasus mounts must then fail closed instead of being reconnected.
 2. **Dry-run first** — preview the whole plan without changing anything:
    ```bash
    python3 upm_release_workflow.py --year 2026 --month 5 --part 1 --dry-run
@@ -822,6 +837,8 @@ workbooks selected by the bucket.
   python3 upm_release_workflow.py --previous-month --only 16
   ```
 - **Expected full-month naming (June 2026 example):**
+  - Confirm the enrolled Domo API is attempted before any retained-browser
+    fallback and the API projection reproduces the expected card columns.
   - Tracklist: `Soundmouse 06-01-26 to 07-01-26.csv` (exclusive upper bound).
   - Delivery: `2026-06-01_to_2026-06-30/{MEDIA,Covers,Metadata}` (inclusive range).
     This directory is derived from the workflow period; raw `ActivationRange`
@@ -841,6 +858,8 @@ workbooks selected by the bucket.
     resulting workbook name, and then keeps that bound workbook object so an
     unrelated workbook becoming active cannot redirect the save. It fails if
     Excel was not the final writer or changed a metadata value.
+    Duplicate `Filename` or `UNIQUE TRACK ID` values must fail both conversion
+    and final validation, including otherwise-identical duplicate rows.
   - The final SoundMouse validation unions every `Filename` and album-artwork
     filename across those selected workbooks and confirms they exist under
     `MEDIA` and `Covers`. Any missing item fails Step 16 and is listed in
@@ -925,9 +944,17 @@ than browser UI automation.
   ```
 - Confirm the log maps Content/HD/SoundMouse to `UPM20260901`,
   lists every proposed old/new status, and performs no mutation.
+- Confirm source preflight removes NTT DATA, JMD/TSS, Qwire, and Scripps from
+  rolling Content Updates through the Monday API; those subitems exist only on
+  the standalone `UPMYYYYMM01` monthly item.
 - A real full run advances successfully prepared package subitems to
   `Clear to Send`. It derives each main-item status from its subitems and never
   downgrades `Complete`, `Done`, `Not Needed`, or `API Client - Not Needed`.
+  Rolling batches must not contain NTT DATA, JMD/TSS, Qwire, or Scripps
+  subitems; source preflight removes template-created copies through the API.
+  The standalone `UPMYYYYMM01` monthly item contains only those four subitems;
+  they show `Working On It` while building and `Clear to Send` after all
+  previous-month metadata/audio and final-package gates pass.
   After mutation it re-reads both batches and fails if any requested status is
   not confirmed.
 - Confirm live checkpoints run after Step 10 (Hard Drive), after Step 15
@@ -943,11 +970,34 @@ than browser UI automation.
 
 ---
 
-## 19. SynchTank S3 delivery test
+## 19. Sony Ci delivery test
+
+Sony Ci remains credential-blocked until the developer key is enrolled. Before
+the first live delivery, use a dry-run plan and synthetic API fixtures to verify:
+
+- Only workspace `UPM-Audio` is accepted, and the batch folder is placed under
+  the correct `Content Updates`, `HD Updates`, or `SoundMouse Updates` parent.
+- The folder name is `ctx.storage_root` while its `Batch` metadata value is
+  exactly `ctx.release_id`.
+- A new MediaBox is created rather than mutating the historical template, with
+  Secure/Protected access, notifications, source download, and 30-day expiry as
+  specified in `DELIVERY_ENDPOINTS.md`.
+- MP3 and WAV resolve to separate private rosters of exactly 12 and 8 unique
+  normalized addresses. Neither roster is written to logs or receipts, and any
+  appearance of `CIMT-TV` fails before upload or notification.
+- The HD notification body matches the approved template byte-for-byte after
+  substituting the active client-facing release label and private delivery
+  contact. Confirm the final paragraph retains its literal double asterisks.
+- Creating an exact-name duplicate, notifying before upload verification, or
+  receiving an ambiguous API response fails without advancing delivery state.
+
+---
+
+## 20. SynchTank S3 delivery test
 
 The SynchTank endpoint is standalone while the broader post-packaging delivery
-layer is developed. It uploads the contents of the final SynchTank package
-directly to the bucket root and creates `delivery.complete` last.
+layer is developed. It uploads the final SynchTank package beneath an exact
+package-name prefix and creates `delivery.complete` inside that prefix last.
 
 - **Offline logic test:**
   ```bash
@@ -961,18 +1011,20 @@ directly to the bucket root and creates `delivery.complete` last.
   ```bash
   python3 synchtank_delivery.py --start-date 2026-09-12 --end-date 2026-09-25 --dry-run
   ```
-- Before a live run, confirm Step 15 passed for this exact batch and the remote
-  inbox is ready. A live run fails on unexpected root objects, uploads or
-  resumes package keys by exact byte size, verifies the complete manifest, and
-  writes the empty marker last. The release-local receipt and partner delivery
+- Before a live run, confirm Step 15 passed for this exact batch. A live run
+  preserves historical package prefixes, fails on unexpected objects inside
+  the active prefix, uploads or resumes active package keys by exact byte size,
+  verifies that complete manifest, and writes the empty marker inside the
+  active prefix last. The release-local receipt and partner delivery
   state are written only after that final verification.
 
 ---
 
-## 20. TuneSat SFTP delivery test
+## 21. TuneSat SFTP delivery test
 
 The standalone TuneSat endpoint uploads the complete final package, preserving
-`Music/` and `Metadata/` directly beneath `/AudioFiles`.
+the complete package beneath its exact package-name folder in `/AudioFiles`,
+with `Music/` and `Metadata/` inside that folder.
 
 - **Offline logic test:**
   ```bash
@@ -989,12 +1041,12 @@ The standalone TuneSat endpoint uploads the complete final package, preserving
 - A live run requires completed Step 10 and Step 15 results for the exact batch,
   rejects unexpected remote files, resumes exact size-matched files, uploads
   through `.part` temporary siblings and atomic renames, verifies the final
-  manifest, writes a private receipt, and marks TuneSat uploaded. TuneSat does
+  manifest, writes a private receipt, and marks TuneSat delivered. TuneSat does
   not receive a completion marker.
 
 ---
 
-## 21. SoundMouse Uploader delivery test
+## 22. SoundMouse Uploader delivery test
 
 This standalone endpoint submits the complete Step 16 release directory through
 the installed Soundmouse Uploader. The target must be workspace `UPPM`, module
@@ -1014,31 +1066,57 @@ the installed Soundmouse Uploader. The target must be workspace `UPPM`, module
   and Add panel, submits the complete release directory, and requires the newly
   inserted queue file URLs to match every local `MEDIA`, `Covers`, and
   `Metadata` file exactly. Every row must reach completed status before the
-  receipt is written and SoundMouse is marked uploaded.
+  uploader receipt is written and SoundMouse is marked `uploaded`, never
+  `delivered`.
+- Re-running the unified endpoint runner while SoundMouse is `uploaded` must
+  return `awaiting_metadata_processing` and must not reopen or requeue the
+  native Uploader.
+- `--acknowledge-delivered soundmouse` must fail even when an uploader receipt
+  exists. Delivery requires the separate website processor to match every
+  metadata workbook and verify zero processing errors.
+- A metadata-only correction may contain only `Metadata` and must queue only
+  those corrected workbooks. Keep correction audit CSVs outside the selected
+  package folder.
 
 ---
 
-## 22. Post-packaging delivery runner (offline first)
+## 23. Post-packaging delivery runner (offline first)
 
 The unified runner plans selected endpoints without opening a browser, app,
 connector, Keychain item, or network connection:
 
 ```bash
 python3 post_packaging_delivery.py --start-date 2026-09-12 --end-date 2026-09-25 --endpoints espn,soundexchange,qwire,scripps
-python3 -m unittest test_post_packaging_delivery.py
+python3 post_packaging_delivery.py --start-date 2026-09-12 --end-date 2026-09-25 --endpoints netmix
+python3 post_packaging_delivery.py --delivery-date 2026-10-01 --endpoints qwire,scripps
+python3 delivery_state.py --delivery-date 2026-10-01 --show
+python3 -m unittest test_post_packaging_delivery.py test_netmix_portal_delivery.py
 ```
 
 - Confirm dry-run creates no release-local checkpoint, receipt, draft, message,
   portal submission, or remote upload.
 - ESPN requires the exact top-level folder, a matching completed transfer in My
-  Transfers, and visibility beneath `from_killer_tracks/`.
+  Transfers, and visibility beneath `from_killer_tracks/`. For a supervised
+  live run, pass `--interactive-native-selection`, choose the exact canonical
+  package in Signiant's native picker, and let the adapter verify the staged
+  name before final Upload.
 - SoundExchange processes MGB before Z Tunes, requires zero pre-existing
   pending rows, exact workbook-to-screen ISRC/count parity, and writes a
-  private invalid-entry audit before refusing Submit Recordings.
+  private invalid-entry audit before refusing Submit Recordings. Use
+  `--interactive-login` when a fresh login is needed; authentication and both
+  submissions must remain in that one process. Verify each newest applicable
+  history CSV against the exact expected ISRCs, not a displayed row count.
 - Qwire preserves the original CSV when it is already below the connector
   limit, otherwise makes verified ZIP/split attachments. Every part stays
   below 500,000 records and 3 MiB, and reconstructs the original rows exactly.
 - Scripps prepares one CSV or one verified single-CSV ZIP only.
+- Netmix planning requires exactly one metadata CSV, exact case-insensitive
+  `Filename` parity with unique WAV/AIFF basenames, and exactly one cover in
+  every audio-bearing album directory. Confirm that an available API adapter is
+  attempted before the portal, an uncertain API result blocks fallback, and a
+  safe pre-mutation API failure can use the retained portal session. Portal
+  success requires exact batch filenames and accepted terminal states from
+  View Uploads before the receipt and `uploaded` state are written.
 - The Outlook bridge must prepare exactly one attachment, create the draft
   through the connected Outlook Email app, and verify the Drafts copy before
   recording it. The connector has no Send action: native Outlook may send only
@@ -1050,17 +1128,18 @@ python3 -m unittest test_post_packaging_delivery.py
   Compare connector-returned text after CRLF and trailing-space normalization
   only, because Outlook adds trailing spaces to stored plain-text lines.
 - Live execution is unavailable without both `--execute` and the exact
-  `--confirm-live-release` value. The first live ESPN and SoundExchange runs
-  remain supervised pilots during a real workflow; do not run them against a
-  synthetic batch.
-- Successful uploads remain `uploaded`. Promote them to `delivered` only after
-  downstream acknowledgement, using `--acknowledge-delivered` with the same
-  exact release confirmation. Email and SoundExchange submissions become
-  `delivered` only after Sent Items or Upload History verification.
+  `--confirm-live-release` value. ESPN and SoundExchange require their
+  supervised flags when native selection or a fresh login is needed; do not
+  run them against a synthetic batch.
+- Successful uploads become `delivered` as soon as the endpoint-specific remote
+  verification succeeds. No separate partner acknowledgement is required.
+  `--acknowledge-delivered` remains only for migrating older verified records
+  left in the legacy `uploaded` state. Email and SoundExchange submissions
+  become `delivered` only after Sent Items or Upload History verification.
 
 ---
 
-## 23. Full end-to-end test
+## 24. Full end-to-end test
 
 The real thing: all steps in order, through the orchestrator. Do a complete **dry-run first**, then the real run.
 

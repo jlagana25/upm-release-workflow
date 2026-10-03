@@ -71,6 +71,13 @@ def run_preflight(ctx: ReleaseContext, logger, args=None) -> bool:
     ok = True
 
     # -- Mounted volumes ------------------------------------------------------
+    from volume_mounts import ensure_workflow_volumes
+
+    if not ensure_workflow_volumes(
+        logger,
+        skip_auto_mount=bool(getattr(args, "no_auto_mount", False)),
+    ):
+        ok = False
     for vol_key, vol_path in VOLUMES.items():
         if vol_path.exists():
             logger.info(f"  ✓  Volume {vol_key}: {vol_path}")
@@ -1386,6 +1393,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--overwrite",
         action="store_true",
         help="Replace existing destination folders/files",
+    )
+    p.add_argument(
+        "--no-auto-mount",
+        action="store_true",
+        help=(
+            "Do not reconnect known workflow volumes during preflight; use "
+            "when a volume was intentionally unmounted."
+        ),
     )
     p.add_argument(
         "--copy-workers",

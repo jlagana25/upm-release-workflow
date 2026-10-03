@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Upload the verified SynchTank package directly to its S3 bucket.
+"""Upload the verified SynchTank package to its batch-scoped S3 prefix.
 
-The bucket root is an ingestion inbox, not an archive. Package objects are
-uploaded at the root, checked by exact key and byte size, and the empty
-``delivery.complete`` trigger is written last. AWS credentials are supplied
-from the current user's macOS Keychain and are never logged or persisted here.
+The bucket retains historical deliveries. Each package is uploaded beneath a
+prefix matching its local package-folder name, checked by exact key and byte
+size within that prefix, and the empty ``delivery.complete`` trigger is written
+inside that prefix last. AWS credentials are supplied from the current user's
+macOS Keychain and are never logged or persisted here.
 """
 
 from __future__ import annotations
@@ -106,6 +107,11 @@ def package_root(ctx: ReleaseContext) -> Path:
     )
 
 
+def package_prefix(ctx: ReleaseContext) -> str:
+    """Return the exact batch folder prefix used in the shared S3 bucket."""
+    return package_root(ctx).name.rstrip("/") + "/"
+
+
 def collect_package(root: Path) -> tuple[PackageObject, ...]:
     """Return a deterministic root-relative manifest and reject unsafe input."""
     root = Path(root)
@@ -162,7 +168,11 @@ def workflow_gate_passed(ctx: ReleaseContext) -> tuple[bool, str]:
     return True, "Step 10 and Step 15 completed"
 
 
-def _write_receipt(ctx: ReleaseContext, objects: tuple[PackageObject, ...]) -> Path:
+def _write_receipt(
+    ctx: ReleaseContext,
+    objects: tuple[PackageObject, ...],
+    prefix: str,
+) -> Path:
     path = _receipt_path(ctx)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = {
@@ -170,8 +180,8 @@ def _write_receipt(ctx: ReleaseContext, objects: tuple[PackageObject, ...]) -> P
         "partner": "synchtank",
         "release_id": ctx.release_id,
         "bucket": SYNCHTANK_BUCKET,
-        "remote_prefix": "",
-        "completion_marker": COMPLETION_MARKER,
+        "remote_prefix": prefix,
+        "completion_marker": prefix + COMPLETION_MARKER,
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "objects": [{"key": item.key, "size": item.size} for item in objects],
     }
@@ -189,20 +199,22 @@ def deliver_synchtank(
     *,
     gateway: SynchTankGateway | None = None,
 ) -> bool:
-    """Deliver the package to the bucket root and write the trigger last."""
+    """Deliver one batch prefix and write its trigger last."""
     try:
         objects = collect_package(package_root(ctx))
-        expected = {item.key: item.size for item in objects}
+        prefix = package_prefix(ctx)
+        marker_key = prefix + COMPLETION_MARKER
+        expected = {prefix + item.key: item.size for item in objects}
         logger.info(
             "  SynchTank package: %d object(s), %d byte(s)",
             len(objects), sum(item.size for item in objects),
         )
         if dry_run:
             logger.info(
-                "  [DRY RUN] Would upload package keys directly to s3://%s/",
-                SYNCHTANK_BUCKET,
+                "  [DRY RUN] Would upload package to s3://%s/%s",
+                SYNCHTANK_BUCKET, prefix,
             )
-            logger.info("  [DRY RUN] Would upload %s last", COMPLETION_MARKER)
+            logger.info("  [DRY RUN] Would upload %s last", marker_key)
             return True
 
         gate_ok, gate_detail = workflow_gate_passed(ctx)
@@ -221,11 +233,12 @@ def deliver_synchtank(
                 )
             gateway = Boto3SynchTankGateway(*credentials)
 
-        remote = gateway.list_objects()
-        if COMPLETION_MARKER in remote:
-            if remote[COMPLETION_MARKER] != 0:
+        all_remote = gateway.list_objects()
+        remote = {key: size for key, size in all_remote.items() if key.startswith(prefix)}
+        if marker_key in remote:
+            if remote[marker_key] != 0:
                 raise SynchTankDeliveryError("Existing delivery.complete is not empty")
-            actual = {key: size for key, size in remote.items() if key != COMPLETION_MARKER}
+            actual = {key: size for key, size in remote.items() if key != marker_key}
             if actual != expected:
                 raise SynchTankDeliveryError(
                     "SynchTank completion marker exists but the remote manifest does not "
@@ -240,27 +253,32 @@ def deliver_synchtank(
                     + ", ".join(unexpected[:10])
                 )
             for item in objects:
-                if remote.get(item.key) == item.size:
-                    logger.info("  ↩ Already verified: %s", item.key)
+                remote_key = prefix + item.key
+                if remote.get(remote_key) == item.size:
+                    logger.info("  ↩ Already verified: %s", remote_key)
                     continue
-                logger.info("  Uploading: %s", item.key)
-                gateway.upload(item.path, item.key)
-                if gateway.object_size(item.key) != item.size:
+                logger.info("  Uploading: %s", remote_key)
+                gateway.upload(item.path, remote_key)
+                if gateway.object_size(remote_key) != item.size:
                     raise SynchTankDeliveryError(
-                        f"Remote size verification failed for {item.key}"
+                        f"Remote size verification failed for {remote_key}"
                     )
-            final = gateway.list_objects()
+            final = {
+                key: size
+                for key, size in gateway.list_objects().items()
+                if key.startswith(prefix)
+            }
             if final != expected:
                 raise SynchTankDeliveryError(
                     "SynchTank remote manifest did not exactly match before completion"
                 )
-            gateway.put_empty(COMPLETION_MARKER)
-            if gateway.object_size(COMPLETION_MARKER) != 0:
+            gateway.put_empty(marker_key)
+            if gateway.object_size(marker_key) != 0:
                 raise SynchTankDeliveryError("Could not verify delivery.complete")
             logger.info("  ✓ SynchTank delivery.complete uploaded last")
 
-        receipt = _write_receipt(ctx, objects)
-        set_partner_status(ctx.specials_dir, "synchtank", "uploaded")
+        receipt = _write_receipt(ctx, objects, prefix)
+        set_partner_status(ctx.specials_dir, "synchtank", "delivered")
         logger.info("  ✓ SynchTank receipt: %s", receipt)
         credentials = None
         return True

@@ -13,7 +13,12 @@ import json
 import logging
 from pathlib import Path
 
-from config import PRIVATE_STATE_DIR, ReleaseContext, context_from_cli_args
+from config import (
+    PRIVATE_STATE_DIR,
+    ReleaseContext,
+    context_from_cli_args,
+    monthly_metadata_delivery_ready,
+)
 from delivery_common import (
     DeliverySafetyError,
     checkpoint,
@@ -151,6 +156,13 @@ def authorize_send(
     message_id: str,
     confirmation: str | None,
 ) -> Path:
+    if (
+        hasattr(ctx, "monthly_metadata_delivery_date")
+        and not monthly_metadata_delivery_ready(ctx)
+    ):
+        raise OutlookBridgeError(
+            f"{endpoint} is held until {ctx.monthly_metadata_delivery_date}"
+        )
     require_live_authorization(ctx, confirmation)
     plan = _current_plan(ctx, endpoint)
     prior = load_endpoint_state(ctx, endpoint) or {}
@@ -214,6 +226,10 @@ def _main() -> int:
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--full-month-content", action="store_true")
+    parser.add_argument(
+        "--delivery-date",
+        help="first day of the standalone monthly delivery month (YYYY-MM-01)",
+    )
     args = parser.parse_args()
     try:
         if args.enroll_signature:

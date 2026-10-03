@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from openpyxl import Workbook
 
 import delivery_common as common
+from config import ReleaseContext, context_from_cli_args
 import email_deliveries as email
 import espn_delivery as espn
 import post_packaging_delivery as runner
@@ -53,7 +55,7 @@ class FakeSoundExchange:
         assert len(rows) == expected_total
         return tuple(sx.ValidationEntry(str(i + 1), title, isrc, True) for i, (isrc, title) in enumerate(rows))
     def submit_recordings(self): self.submitted.append(self.current.key)
-    def verify_upload_history(self, registrant, _count):
+    def verify_upload_history(self, registrant, _expected_isrcs):
         return f"history-{registrant.key}" if registrant.key in self.submitted else None
     def close(self): pass
 
@@ -88,6 +90,32 @@ class PostPackagingDeliveryTests(unittest.TestCase):
         )
 
     def tearDown(self): self.temp.cleanup()
+
+    def test_monthly_context_and_report_gate_aliases(self):
+        args = SimpleNamespace(
+            delivery_date="2026-10-01", previous_month=False,
+            year=None, month=None, part=None, start_date=None, end_date=None,
+            full_month_content=False,
+        )
+        ctx = context_from_cli_args(args)
+        self.assertTrue(ctx.is_monthly_delivery)
+        self.assertEqual(ctx.release_id, "UPM-2026-09-MONTHLY")
+
+        logs = self.root / "logs"
+        report_dir = logs / "reports" / ctx.release_id
+        report_dir.mkdir(parents=True)
+        (report_dir / "run-20261001-120000.json").write_text(json.dumps({
+            "run": {"dry_run": False},
+            "steps": {
+                "final_packaging": "completed",
+                "final_verification": "completed",
+            },
+        }), encoding="utf-8")
+        ok, _detail = common.latest_workflow_gates(
+            ctx, ("10 Final packaging", "15 Final metadata check"),
+            logs_dir=logs,
+        )
+        self.assertTrue(ok)
 
     def test_manifest_hash_changes_with_content(self):
         package = self.root / "package"
@@ -125,7 +153,43 @@ class PostPackagingDeliveryTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(gateway.started, 1)
-        state.assert_called_once_with(self.ctx.specials_dir, "espn", "uploaded")
+        state.assert_called_once_with(self.ctx.specials_dir, "espn", "delivered")
+
+    def test_espn_transfer_status_uses_exact_completion_phrase(self):
+        self.assertEqual(
+            "uploaded",
+            espn.classify_transfer_text(
+                "Uploaded 1 file(s) Universal Production Music Sep 1–11 2026 Releases - ESPN"
+            ),
+        )
+        self.assertEqual("interrupted", espn.classify_transfer_text("Transfer interrupted"))
+
+    def test_espn_native_picker_selects_exact_directory_from_parent(self):
+        package = self.root / "Universal Production Music Sep 12–25 2026 Releases - ESPN"
+        package.mkdir()
+        gui = Mock()
+        with (
+            patch.dict(sys.modules, {"pyautogui": gui}),
+            patch.object(espn.time, "sleep"),
+            patch.object(
+                espn.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+            ) as run,
+        ):
+            espn._select_native_folder(package)
+        run.assert_called_once_with(
+            ["/usr/bin/pbcopy"], input=str(package), text=True, check=False,
+            stdout=espn.subprocess.DEVNULL, stderr=espn.subprocess.DEVNULL,
+        )
+        self.assertEqual(
+            gui.hotkey.call_args_list,
+            [
+                call("command", "shift", "g"),
+                call("command", "a"),
+                call("command", "v"),
+                call("command", "up"),
+            ],
+        )
+        self.assertEqual(gui.press.call_args_list, [call("enter"), call("enter")])
 
     def _workbook(self, path: Path, isrc: str, title: str):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,6 +213,14 @@ class PostPackagingDeliveryTests(unittest.TestCase):
         self.assertEqual(
             (("USAAA2600001", "A Recording"),), workbook_rows(path)
         )
+
+    def test_soundexchange_history_csv_requires_exact_isrc_column(self):
+        path = self.root / "history.csv"
+        path.write_text(
+            "Recording Title,Sound Recording ISRC\nA Recording,US-AAA-26-00001\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(("USAAA2600001",), sx._history_csv_isrcs(path))
 
     def test_soundexchange_processes_registrants_in_order(self):
         self._workbook(self.ctx.soundexchange_final_dir / "ISRC Ingest Form - MGB NA LLC - Part 1.xlsx", "USAAA2600001", "MGB")
@@ -193,6 +265,58 @@ class PostPackagingDeliveryTests(unittest.TestCase):
         self.ctx.partner_metadata["scripps"] = source
         self.assertTrue(email.deliver_email(self.ctx, "scripps", True, LOG))
         self.assertFalse((self.ctx.specials_dir / "_WORKFLOW").exists())
+
+    def test_monthly_email_uses_content_month_subject(self):
+        ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        source = self.root / "qwire-monthly.csv"
+        source.write_text("Trackid,Title\n1,One\n", encoding="utf-8")
+        ctx.partner_metadata["qwire"] = source
+        plan = email.prepare_email_plan(ctx, "qwire", "Signature")
+        self.assertEqual(
+            plan.subject,
+            "Universal Production Music - September 2026 Metadata Delivery",
+        )
+
+    def test_november_delivery_uses_october_part_2_for_email_endpoints_only(self):
+        ctx = ReleaseContext.for_monthly_delivery("2026-11-01")
+        self.assertEqual(ctx.release_id, "UPM-2026-10-MONTHLY-P2")
+        self.assertEqual(ctx.monthly_monday_batch, "UPM20261101")
+        for endpoint in ("qwire", "scripps"):
+            source = self.root / f"{endpoint}-monthly.csv"
+            source.write_text("Trackid,Title\n1,One\n", encoding="utf-8")
+            ctx.partner_metadata[endpoint] = source
+            plan = email.prepare_email_plan(ctx, endpoint, "Signature")
+            self.assertEqual(
+                plan.subject,
+                "Universal Production Music - October 2026 Part 2 Metadata Delivery",
+            )
+        self.assertEqual(
+            ctx.partner_folder_name("Japan NTT DATA"),
+            "Universal Production Music October 2026 - Japan NTT DATA",
+        )
+
+    def test_monthly_email_refuses_non_triggering_run(self):
+        ctx = ReleaseContext.for_date_range("2026-09-12", "2026-09-25")
+        with self.assertRaisesRegex(email.EmailDeliveryError, "not due"):
+            email.prepare_email_plan(ctx, "qwire", "Signature")
+
+    def test_monthly_email_live_send_is_held_until_first(self):
+        ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        source = self.root / "qwire-held.csv"
+        source.write_text("Trackid,Title\n1,One\n", encoding="utf-8")
+        ctx.partner_metadata["qwire"] = source
+        with patch("email_deliveries.monthly_metadata_delivery_ready", return_value=False):
+            self.assertFalse(
+                email.deliver_email(
+                    ctx,
+                    "qwire",
+                    False,
+                    LOG,
+                    gateway=FakeOutlook(),
+                    signature="Signature",
+                    live_confirmation=ctx.release_id,
+                )
+            )
 
     def test_email_uncertain_send_refuses_duplicate(self):
         source = self.root / "qwire.csv"
@@ -248,6 +372,37 @@ class PostPackagingDeliveryTests(unittest.TestCase):
                 live_confirmation="wrong", runners={"espn": lambda *_: True},
             )
 
+    def test_runner_syncs_monday_after_successful_live_endpoint(self):
+        synced = []
+        result = runner.run_deliveries(
+            self.ctx,
+            ("espn",),
+            LOG,
+            dry_run=False,
+            live_confirmation=self.ctx.release_id,
+            runners={"espn": lambda *_: True},
+            progress_sync=lambda ctx, _logger: synced.append(ctx.release_id) or True,
+        )
+        self.assertEqual(result, {"espn": "delivered", "monday": "completed"})
+        self.assertEqual(synced, [self.ctx.release_id])
+
+    def test_acknowledgement_syncs_monday_after_state_change(self):
+        self.ctx.specials_dir.mkdir(parents=True)
+        from delivery_state import set_partner_status
+        set_partner_status(self.ctx.specials_dir, "espn", "uploaded")
+        workflow = self.ctx.specials_dir / "_WORKFLOW"
+        (workflow / "espn_delivery_receipt.json").write_text("{}\n", encoding="utf-8")
+        synced = []
+        result = runner.acknowledge_delivered(
+            self.ctx,
+            ("espn",),
+            self.ctx.release_id,
+            logger=LOG,
+            progress_sync=lambda ctx, _logger: synced.append(ctx.release_id) or True,
+        )
+        self.assertEqual(result, {"espn": "delivered", "monday": "completed"})
+        self.assertEqual(synced, [self.ctx.release_id])
+
     def test_runner_skips_already_delivered_endpoint(self):
         self.ctx.specials_dir.mkdir(parents=True)
         from delivery_state import set_partner_status
@@ -258,6 +413,93 @@ class PostPackagingDeliveryTests(unittest.TestCase):
             runners={"qwire": lambda *_: called.append(True) or True},
         )
         self.assertEqual(result, {"qwire": "already_delivered"})
+        self.assertEqual(called, [])
+
+    def test_runner_does_not_requeue_uploaded_soundmouse(self):
+        self.ctx.specials_dir.mkdir(parents=True)
+        from delivery_state import set_partner_status
+        set_partner_status(self.ctx.specials_dir, "soundmouse", "uploaded")
+        called = []
+        result = runner.run_deliveries(
+            self.ctx,
+            ("soundmouse",),
+            LOG,
+            dry_run=True,
+            runners={"soundmouse": lambda *_: called.append(True) or True},
+        )
+        self.assertEqual(
+            result, {"soundmouse": "awaiting_metadata_processing"}
+        )
+        self.assertEqual(called, [])
+
+    def test_uploader_receipt_cannot_acknowledge_soundmouse_delivered(self):
+        self.ctx.specials_dir.mkdir(parents=True)
+        from delivery_state import set_partner_status
+        set_partner_status(self.ctx.specials_dir, "soundmouse", "uploaded")
+        workflow = self.ctx.specials_dir / "_WORKFLOW"
+        (workflow / "soundmouse_uploader_receipt.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(
+            runner.PostPackagingError, "website metadata processor"
+        ):
+            runner.acknowledge_delivered(
+                self.ctx,
+                ("soundmouse",),
+                self.ctx.release_id,
+                logger=LOG,
+            )
+
+    def test_runner_marks_monthly_endpoint_not_due_without_calling_it(self):
+        ctx = ReleaseContext.for_date_range("2026-09-12", "2026-09-25")
+        called = []
+        result = runner.run_deliveries(
+            ctx,
+            ("qwire", "scripps", "japan_jmdtss", "japan_ntt"),
+            LOG,
+            dry_run=True,
+            runners={
+                key: lambda *_: called.append(key) or True
+                for key in ("qwire", "scripps", "japan_jmdtss", "japan_ntt")
+            },
+        )
+        self.assertEqual(
+            result,
+            {
+                "qwire": "not_due",
+                "scripps": "not_due",
+                "japan_jmdtss": "not_due",
+                "japan_ntt": "not_due",
+            },
+        )
+        self.assertEqual(called, [])
+
+    def test_runner_holds_owned_monthly_package_until_first(self):
+        ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        called = []
+        with patch(
+            "post_packaging_delivery.monthly_metadata_delivery_ready",
+            return_value=False,
+        ):
+            result = runner.run_deliveries(
+                ctx,
+                ("qwire", "scripps", "japan_jmdtss", "japan_ntt"),
+                LOG,
+                dry_run=True,
+                runners={
+                    key: lambda *_: called.append(key) or True
+                    for key in ("qwire", "scripps", "japan_jmdtss", "japan_ntt")
+                },
+            )
+        self.assertEqual(
+            result,
+            {
+                "qwire": "scheduled_for_month_start",
+                "scripps": "scheduled_for_month_start",
+                "japan_jmdtss": "scheduled_for_month_start",
+                "japan_ntt": "scheduled_for_month_start",
+            },
+        )
         self.assertEqual(called, [])
 
 

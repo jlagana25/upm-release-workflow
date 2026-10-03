@@ -76,14 +76,18 @@ def _albumno_of(folder_name: str) -> str:
 def _tree_specs(ctx: ReleaseContext) -> list[tuple[str, Path, Path, str, bool]]:
     """(label, media_root, csv_path, ext, has_covers) for every Music tree."""
     music = ctx.specials_dir / "1-ORIGINAL" / "Music"
-    return [
+    specs = [
         ("MP3",          music / "MP3" / "MEDIA",          ctx.us_tracklist_csv,   "mp3", False),
         ("WAV",          music / "WAV" / "MEDIA",          ctx.us_tracklist_csv,   "wav", False),
         ("WAV w COVERS", music / "WAV w COVERS" / "MEDIA", ctx.us_tracklist_csv,   "wav", True),
         ("Ex-US (MP3)",  music / "Ex-US (MP3)" / "MEDIA",  ctx.exus_tracklist_csv, "mp3", False),
         ("Ex-US (WAV)",  music / "Ex-US (WAV)" / "MEDIA",  ctx.exus_tracklist_csv, "wav", False),
-        ("Japan",        music / "Japan" / "MEDIA",        ctx.japan_metadata_csv, "wav", False),
     ]
+    if ctx.monthly_metadata_due:
+        specs.append(
+            ("Japan", music / "Japan" / "MEDIA", ctx.japan_metadata_csv, "wav", False)
+        )
+    return specs
 
 
 def _norm(s: str) -> str:

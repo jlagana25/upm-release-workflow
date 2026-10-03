@@ -48,6 +48,14 @@ SYNCHTANK_S3_ACCESS_KEY_SERVICE = "com.upm-release-workflow.synchtank-s3.access-
 SYNCHTANK_S3_SECRET_KEY_SERVICE = "com.upm-release-workflow.synchtank-s3.secret-access-key"
 TUNESAT_SFTP_USERNAME_SERVICE = "com.upm-release-workflow.tunesat-sftp.username"
 TUNESAT_SFTP_PASSWORD_SERVICE = "com.upm-release-workflow.tunesat-sftp.password"
+ESPN_USERNAME_SERVICE = "com.upm-release-workflow.espn.username"
+ESPN_PASSWORD_SERVICE = "com.upm-release-workflow.espn.password"
+NETMIX_USERNAME_SERVICE = "com.upm-release-workflow.netmix.username"
+NETMIX_PASSWORD_SERVICE = "com.upm-release-workflow.netmix.password"
+SOUNDEXCHANGE_USERNAME_SERVICE = "com.upm-release-workflow.soundexchange.username"
+SOUNDEXCHANGE_PASSWORD_SERVICE = "com.upm-release-workflow.soundexchange.password"
+SOUNDMOUSE_USERNAME_SERVICE = "com.upm-release-workflow.soundmouse.username"
+SOUNDMOUSE_PASSWORD_SERVICE = "com.upm-release-workflow.soundmouse.password"
 DOMO_API_TOKEN_URL = "https://api.domo.com/oauth/token"
 _ERR_SEC_ITEM_NOT_FOUND = -25300
 _SECURITY_FRAMEWORK_PATH = (
@@ -205,6 +213,56 @@ def load_tunesat_sftp_credentials() -> tuple[str, str] | None:
 
 def tunesat_sftp_keychain_configured() -> bool:
     return load_tunesat_sftp_credentials() is not None
+
+
+def _load_web_credentials(
+    username_service: str, password_service: str,
+) -> tuple[str, str] | None:
+    username = _read_native_keychain_secret(username_service)
+    password = _read_native_keychain_secret(password_service)
+    if not username or not password:
+        return None
+    return username, password
+
+
+def load_espn_credentials() -> tuple[str, str] | None:
+    """Load the ESPN portal pair into memory without logging either value."""
+    return _load_web_credentials(ESPN_USERNAME_SERVICE, ESPN_PASSWORD_SERVICE)
+
+
+def espn_keychain_configured() -> bool:
+    return load_espn_credentials() is not None
+
+
+def load_netmix_credentials() -> tuple[str, str] | None:
+    """Load the Netmix history-portal pair without logging either value."""
+    return _load_web_credentials(NETMIX_USERNAME_SERVICE, NETMIX_PASSWORD_SERVICE)
+
+
+def netmix_keychain_configured() -> bool:
+    return load_netmix_credentials() is not None
+
+
+def load_soundexchange_credentials() -> tuple[str, str] | None:
+    """Load the SoundExchange portal pair without logging either value."""
+    return _load_web_credentials(
+        SOUNDEXCHANGE_USERNAME_SERVICE, SOUNDEXCHANGE_PASSWORD_SERVICE
+    )
+
+
+def soundexchange_keychain_configured() -> bool:
+    return load_soundexchange_credentials() is not None
+
+
+def load_soundmouse_credentials() -> tuple[str, str] | None:
+    """Load the SoundMouse website pair without logging either value."""
+    return _load_web_credentials(
+        SOUNDMOUSE_USERNAME_SERVICE, SOUNDMOUSE_PASSWORD_SERVICE
+    )
+
+
+def soundmouse_keychain_configured() -> bool:
+    return load_soundmouse_credentials() is not None
 
 
 def _keychain_frameworks():
@@ -566,6 +624,87 @@ def enroll_tunesat_sftp_keychain(logger: logging.Logger) -> bool:
     return True
 
 
+def _enroll_web_keychain_pair(
+    logger: logging.Logger,
+    *,
+    label: str,
+    username_service: str,
+    password_service: str,
+    loader,
+) -> bool:
+    """Atomically store one portal login pair after hidden TTY collection."""
+    if not sys.stdin.isatty():
+        logger.error("%s enrollment must be run in an interactive Terminal.", label)
+        return False
+    print(f"\n{label} Keychain enrollment.", flush=True)
+    username = _prompt_hidden_secret(f"{label} username or email")
+    password = _prompt_hidden_secret(f"{label} password")
+    if not username or not password:
+        logger.error("Both %s values are required; Keychain was not changed.", label)
+        return False
+    previous_username = _read_native_keychain_secret(username_service)
+    previous_password = _read_native_keychain_secret(password_service)
+    username_ok = _store_native_keychain_secret(username_service, username)
+    password_ok = username_ok and _store_native_keychain_secret(
+        password_service, password
+    )
+    stored = loader()
+    exact = bool(
+        stored
+        and hmac.compare_digest(stored[0], username)
+        and hmac.compare_digest(stored[1], password)
+    )
+    username = password = ""
+    stored = None
+    if not (username_ok and password_ok and exact):
+        _restore_native_keychain_secret(username_service, previous_username)
+        _restore_native_keychain_secret(password_service, previous_password)
+        logger.error("Could not atomically store the %s Keychain pair.", label)
+        return False
+    logger.info("%s credentials stored in macOS Keychain (values redacted).", label)
+    return True
+
+
+def enroll_espn_keychain(logger: logging.Logger) -> bool:
+    return _enroll_web_keychain_pair(
+        logger,
+        label="ESPN Media Shuttle",
+        username_service=ESPN_USERNAME_SERVICE,
+        password_service=ESPN_PASSWORD_SERVICE,
+        loader=load_espn_credentials,
+    )
+
+
+def enroll_netmix_keychain(logger: logging.Logger) -> bool:
+    return _enroll_web_keychain_pair(
+        logger,
+        label="Netmix upload history",
+        username_service=NETMIX_USERNAME_SERVICE,
+        password_service=NETMIX_PASSWORD_SERVICE,
+        loader=load_netmix_credentials,
+    )
+
+
+def enroll_soundexchange_keychain(logger: logging.Logger) -> bool:
+    return _enroll_web_keychain_pair(
+        logger,
+        label="SoundExchange Direct",
+        username_service=SOUNDEXCHANGE_USERNAME_SERVICE,
+        password_service=SOUNDEXCHANGE_PASSWORD_SERVICE,
+        loader=load_soundexchange_credentials,
+    )
+
+
+def enroll_soundmouse_keychain(logger: logging.Logger) -> bool:
+    return _enroll_web_keychain_pair(
+        logger,
+        label="SoundMouse website",
+        username_service=SOUNDMOUSE_USERNAME_SERVICE,
+        password_service=SOUNDMOUSE_PASSWORD_SERVICE,
+        loader=load_soundmouse_credentials,
+    )
+
+
 def _validate_domo_api_credentials(
     client_id: str,
     client_secret: str,
@@ -776,6 +915,54 @@ def delete_tunesat_sftp_keychain_credentials(logger: logging.Logger) -> bool:
     return ok
 
 
+def _delete_web_keychain_pair(
+    logger: logging.Logger,
+    *,
+    label: str,
+    services: tuple[str, str],
+) -> bool:
+    ok = True
+    for service in services:
+        ok = _delete_native_keychain_secret(service) and ok
+    if ok:
+        logger.info("Workflow-owned %s Keychain credentials deleted.", label)
+    else:
+        logger.error("One or more workflow-owned %s Keychain items could not be deleted.", label)
+    return ok
+
+
+def delete_espn_keychain_credentials(logger: logging.Logger) -> bool:
+    return _delete_web_keychain_pair(
+        logger,
+        label="ESPN Media Shuttle",
+        services=(ESPN_USERNAME_SERVICE, ESPN_PASSWORD_SERVICE),
+    )
+
+
+def delete_netmix_keychain_credentials(logger: logging.Logger) -> bool:
+    return _delete_web_keychain_pair(
+        logger,
+        label="Netmix upload history",
+        services=(NETMIX_USERNAME_SERVICE, NETMIX_PASSWORD_SERVICE),
+    )
+
+
+def delete_soundexchange_keychain_credentials(logger: logging.Logger) -> bool:
+    return _delete_web_keychain_pair(
+        logger,
+        label="SoundExchange Direct",
+        services=(SOUNDEXCHANGE_USERNAME_SERVICE, SOUNDEXCHANGE_PASSWORD_SERVICE),
+    )
+
+
+def delete_soundmouse_keychain_credentials(logger: logging.Logger) -> bool:
+    return _delete_web_keychain_pair(
+        logger,
+        label="SoundMouse website",
+        services=(SOUNDMOUSE_USERNAME_SERVICE, SOUNDMOUSE_PASSWORD_SERVICE),
+    )
+
+
 def delete_domo_api_keychain_credentials(logger: logging.Logger) -> bool:
     """Delete only the two Domo API items created by this workflow."""
     ok = True
@@ -850,6 +1037,26 @@ def auth_status() -> dict[str, dict[str, object]]:
         },
         "tunesat_sftp": {
             "state": "configured" if tunesat_sftp_keychain_configured() else "missing",
+            "private_permissions": True,
+            "location": "macOS Keychain",
+        },
+        "espn": {
+            "state": "configured" if espn_keychain_configured() else "missing",
+            "private_permissions": True,
+            "location": "macOS Keychain",
+        },
+        "netmix": {
+            "state": "configured" if netmix_keychain_configured() else "missing",
+            "private_permissions": True,
+            "location": "macOS Keychain",
+        },
+        "soundexchange": {
+            "state": "configured" if soundexchange_keychain_configured() else "missing",
+            "private_permissions": True,
+            "location": "macOS Keychain",
+        },
+        "soundmouse": {
+            "state": "configured" if soundmouse_keychain_configured() else "missing",
             "private_permissions": True,
             "location": "macOS Keychain",
         },
@@ -1034,6 +1241,38 @@ def _main(argv: list[str] | None = None) -> int:
         "--delete-tunesat-keychain", action="store_true",
         help="Delete the workflow-owned TuneSat SFTP pair from macOS Keychain",
     )
+    action.add_argument(
+        "--enroll-espn-keychain", action="store_true",
+        help="Store ESPN Media Shuttle credentials using hidden Keychain prompts",
+    )
+    action.add_argument(
+        "--delete-espn-keychain", action="store_true",
+        help="Delete the workflow-owned ESPN Media Shuttle credential pair",
+    )
+    action.add_argument(
+        "--enroll-netmix-keychain", action="store_true",
+        help="Store Netmix upload-history credentials using hidden Keychain prompts",
+    )
+    action.add_argument(
+        "--delete-netmix-keychain", action="store_true",
+        help="Delete the workflow-owned Netmix upload-history credential pair",
+    )
+    action.add_argument(
+        "--enroll-soundexchange-keychain", action="store_true",
+        help="Store SoundExchange Direct credentials using hidden Keychain prompts",
+    )
+    action.add_argument(
+        "--delete-soundexchange-keychain", action="store_true",
+        help="Delete the workflow-owned SoundExchange Direct credential pair",
+    )
+    action.add_argument(
+        "--enroll-soundmouse-keychain", action="store_true",
+        help="Store SoundMouse website credentials using hidden Keychain prompts",
+    )
+    action.add_argument(
+        "--delete-soundmouse-keychain", action="store_true",
+        help="Delete the workflow-owned SoundMouse website credential pair",
+    )
     action.add_argument("--reset", choices=("domo", "dams", "unisync", "all"), help="Move local auth state to Trash")
     parser.add_argument("--confirm-reset", action="store_true", help="Required with --reset")
     parser.add_argument("--json", action="store_true", help="Machine-readable redacted status")
@@ -1111,6 +1350,30 @@ def _main(argv: list[str] | None = None) -> int:
         if not args.confirm_reset:
             parser.error("--delete-tunesat-keychain requires --confirm-reset")
         return 0 if delete_tunesat_sftp_keychain_credentials(logger) else 1
+    if args.enroll_espn_keychain:
+        return 0 if enroll_espn_keychain(logger) else 1
+    if args.delete_espn_keychain:
+        if not args.confirm_reset:
+            parser.error("--delete-espn-keychain requires --confirm-reset")
+        return 0 if delete_espn_keychain_credentials(logger) else 1
+    if args.enroll_netmix_keychain:
+        return 0 if enroll_netmix_keychain(logger) else 1
+    if args.delete_netmix_keychain:
+        if not args.confirm_reset:
+            parser.error("--delete-netmix-keychain requires --confirm-reset")
+        return 0 if delete_netmix_keychain_credentials(logger) else 1
+    if args.enroll_soundexchange_keychain:
+        return 0 if enroll_soundexchange_keychain(logger) else 1
+    if args.delete_soundexchange_keychain:
+        if not args.confirm_reset:
+            parser.error("--delete-soundexchange-keychain requires --confirm-reset")
+        return 0 if delete_soundexchange_keychain_credentials(logger) else 1
+    if args.enroll_soundmouse_keychain:
+        return 0 if enroll_soundmouse_keychain(logger) else 1
+    if args.delete_soundmouse_keychain:
+        if not args.confirm_reset:
+            parser.error("--delete-soundmouse-keychain requires --confirm-reset")
+        return 0 if delete_soundmouse_keychain_credentials(logger) else 1
 
     ok = True
     if args.setup in {"domo", "all"}:

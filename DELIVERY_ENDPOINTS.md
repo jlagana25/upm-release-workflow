@@ -12,7 +12,10 @@ must never be stored here or elsewhere in the repository.
 - Every endpoint supports a non-mutating dry run and fails closed on missing,
   ambiguous, duplicate, or unexpected remote content.
 - Remote delivery is verified before `delivery_state.py` advances the partner
-  from `pending` to `uploaded` or `delivered`.
+  from `pending` to its endpoint-specific completion state. For most endpoints,
+  a fully verified upload is the `delivered` boundary. SoundMouse is explicitly
+  two-phase: native Uploader completion is only `uploaded`; it becomes
+  `delivered` only after website metadata processing finishes with zero errors.
 - Each run records an auditable receipt containing non-secret remote IDs,
   filenames, sizes, and timestamps.
 - Authentication material is collected interactively and stored only in the
@@ -26,6 +29,14 @@ must never be stored here or elsewhere in the repository.
   destination, expanded permission scope, or unrelated system authorization is
   not covered by this standing authorization and must continue to fail closed
   or request separate approval.
+- NTT DATA, JMD/TSS, Qwire, and Scripps run independently on the 1st through
+  `monthly_delivery_workflow.py`. Each run covers the complete previous
+  calendar month and uses the current delivery month for its folder names,
+  filenames, MediaBox/email labels, and subjects. The root is
+  `UPM-YYYY-MM-MONTHLY`; the Monday batch is `UPMYYYYMM01`. NTT downloads the
+  complete previous-month Japan audio manifest directly, with no carry-forward
+  from rolling releases. Rolling runs must not create, export, download NTT
+  audio, upload, draft, or mark these four endpoints delivered.
 
 ## Sony Ci Media Cloud
 
@@ -69,6 +80,10 @@ Dynamic MediaBox names:
 
 Here, `<release label>` is the context's client-facing release label, such as
 `August 2026 Part 2` or the resolved rolling date range.
+For NTT DATA and JMD/TSS after the rolling transition, use their monthly label
+instead (for example, `UPM Japan October 2026 - NTT Data New Release Delivery`
+and `UPM Japan October 2026 - JMD and TSS Metadata Delivery`). Prepare them in
+the standalone first-of-month workflow and do not attach them to a rolling run.
 
 MediaBox policy:
 
@@ -78,21 +93,96 @@ MediaBox policy:
 - Email notifications are enabled.
 - Expiration is 30 days.
 - Source download is enabled for delivered package content.
-- Recipient lists and other non-secret preferences are cloned from the matching
-  existing MediaBox through the Ci API. The HD recipient list must exclude
+- Discovery, NTT DATA, and JMD/TSS recipients and other non-secret preferences
+  are cloned from their matching existing MediaBoxes through the Ci API.
+- HD recipients are not rediscovered from an older MediaBox. Load the approved
+  private runtime rosters supplied by the operator: 12 recipients for MP3 and
+  8 recipients for WAV. The rosters must never be committed, logged, or copied
+  into a receipt. Validate the exact normalized recipient set before notifying;
+  fail closed if a roster is missing, contains a duplicate, or contains
   `CIMT-TV`.
 - Discovery contains only the current Discovery batch folder.
-- NTT DATA contains only the current NTT DATA batch folder.
+- NTT DATA contains only the current monthly NTT DATA batch folder, including
+  the complete Japan audio and metadata for the previous calendar month.
 - JMD/TSS contains the current metadata workbook.
 - MP3 and WAV are separate HD MediaBoxes. Each contains its corresponding
   UDrive folder, the release album-list PDF, and the U-Drive user guide.
 - SoundMouse is never sent through a MediaBox; its Ci copy is archive-only.
 
+After the protected monthly NTT DATA and JMD/TSS MediaBoxes have been created,
+uploaded, and verified, create two Outlook drafts. These are draft-only
+handoffs: do not send them automatically. Resolve the approved recipient and
+CC from private operator configuration; identities must not enter repository
+documentation. Subjects use the
+**content month represented by the package**, not the following month's
+first-of-month execution date:
+
+- JMD/TSS: `UPM Japan JMD / TSS Data <content month> Delivery`
+- NTT DATA: `NTT DATA <content month>`
+
+For example, the October 1, 2026 monthly run contains September content, so
+the subjects are `UPM Japan JMD / TSS Data September 2026 Delivery` and
+`NTT DATA September 2026`. Do not add `Part 1` or `Part 2` to a normal monthly
+subject.
+
+JMD/TSS body:
+
+```text
+Hi Jonny,
+
+Please see the link below for the most recent UPM metadata for JMD and TSS
+
+If there are any issues, please let me know.
+
+<current JMD/TSS MediaBox link> | Password: <current JMD/TSS MediaBox password>
+
+Best,
+Joe
+```
+
+NTT DATA body:
+
+```text
+Hi Jonny,
+
+Please see the link below to download the latest releases for NTT Data. If there are any issues, please let me know.
+
+<current NTT DATA MediaBox link> | Password: <current NTT DATA MediaBox password>
+
+Best,
+Joe
+```
+
+Always copy the link and newly generated password from the exact MediaBox just
+created for that monthly package. Never reuse a historical link or password,
+and never place either password in repository data, logs, or receipts.
+
+Both HD MediaBoxes use this notification message, with the first line populated
+from the context's client-facing release label:
+
+```text
+<release label>
+
+Please see the link below to download the latest releases from Universal Production Music.
+
+If you have any questions, please reach out to: <delivery contact name> (<delivery contact email>).
+
+**We are now requiring users to log in with a SonyCi account to access our updates. Please create a FREE account before downloading.**
+```
+
+The delivery contact comes from private runtime configuration. Preserve the
+wording, paragraph breaks, capitalization, `SonyCi` spelling, and the literal
+double-asterisk markers shown above. Do not insert a historical month/part;
+always derive `<release label>` from the active context.
+
 ## Other delivery routes
 
 - ESPN: deliver through the authenticated ESPN Media Shuttle Share portal at
-  `https://espn-file-transfers-shr.mediashuttle.com/memberLogin`. The writable
-  destination is `from_killer_tracks/`. Upload the complete final ESPN folder
+  `https://espn-file-transfers-shr.mediashuttle.com/memberLogin`. The portal
+  credential pair is enrolled with
+  `python3 auth_manager.py --enroll-espn-keychain`; it remains in Login
+  Keychain and is filled only when the retained private session has expired.
+  The writable destination is `from_killer_tracks/`. Upload the complete final ESPN folder
   as one top-level item, named exactly
   `Universal Production Music <release label> - ESPN`; its existing `Music/`
   label/album hierarchy must remain intact. The installed Signiant App is the
@@ -106,6 +196,12 @@ MediaBox policy:
   `Uploaded 1 file(s)` for that exact folder name and the destination folder to
   be visible beneath `from_killer_tracks/`. `Transfer interrupted` is not
   success and must be resumed and reverified before delivery state advances.
+  Media Shuttle keeps authenticated content on the `/memberLogin` route, so
+  authentication must be verified from the portal controls rather than the
+  URL. A supervised run uses `--interactive-native-selection`: after the
+  adapter opens the exact writable destination and starts Signiant, select the
+  exact canonical package in the native picker. The adapter verifies the
+  staged folder name before it clicks the portal's final Upload button.
 - Netmix: deliver through the authenticated Music Tracker browser portal at
   `https://www.cndmusictracker.com/auth/web/`. Use **Upload Music** to select the
   complete final Netmix folder as one master directory. The browser uploader's
@@ -120,11 +216,20 @@ MediaBox policy:
   batch was accepted for ingestion; do not mark the partner uploaded while any
   track from the submitted manifest remains rejected or unaccounted for.
 
+  The guarded portal adapter is implemented in `netmix_portal_delivery.py` and
+  is available through the unified post-packaging runner. It stores only a
+  private retained browser session, never credentials. The transport boundary
+  is API-first: when a future API gateway is configured it is always attempted
+  first, and the portal may be used only when that gateway explicitly reports
+  that no remote mutation occurred and fallback is safe. An uncertain API
+  result blocks a duplicate portal upload.
+
   The two published API pages are complementary, not alternate formats:
   **Upload Flow** defines login, `/api/v1/import/upload`, and asynchronous status
   checks, while **Upload JSON format** defines the per-track metadata body. API
   delivery is the intended future replacement if it supports the full existing
-  package. Status: deferred pending CND access, like Sony Ci. Request all of:
+  package. API transport remains deferred pending CND access; the guarded
+  portal transport is active in the meantime. Request all of:
   API enablement for the Universal Production Music account, the API base URL,
   a dedicated username/password, the account-specific Postman collection and
   PHP example, documented multipart form-field names, rate/concurrency limits,
@@ -132,7 +237,9 @@ MediaBox policy:
   Also ask CND to confirm how local JPG/PNG album covers should be delivered by
   API: direct multipart image upload, another endpoint, embedded artwork, or a
   temporary signed `url_album_image`. Do not use unrelated existing S3 buckets
-  to publish covers without explicit authorization.
+  to publish covers without explicit authorization. Enroll the retained portal
+  session once with `python3 netmix_portal_delivery.py --setup-auth`; live
+  delivery still requires the exact release confirmation and workflow gates.
 
   When access is received, store the API credentials only in the current
   macOS user's Keychain and validate them against `/api/v1/login` before
@@ -154,14 +261,17 @@ MediaBox policy:
   and verify that the union of the parts exactly equals the source file with no
   missing or duplicate rows.
 
+  Qwire is delivered only on the shared monthly metadata trigger described
+  above. Its folder, CSV filename, and subject use the current calendar month
+  and year, while the CSV contains exactly the previous calendar month's
+  content.
+
   Subject:
 
   `Universal Production Music - <release label> Metadata Delivery`
 
-  Example for a rolling range:
-  `Universal Production Music - Sep 1–11 2026 Metadata Delivery`.
-  Use the workflow's abbreviated client-facing release range for rolling
-  deliveries and the established full label for legacy Parts.
+  Example for an October 1 monthly run:
+  `Universal Production Music - October 2026 Metadata Delivery`.
 
   Message body before the signature:
 
@@ -194,12 +304,17 @@ MediaBox policy:
   delivery: attach the single current Scripps CSV and no audio, artwork,
   album-list document, or unrelated file.
 
+  Scripps is delivered only on the shared monthly metadata trigger described
+  above. Its folder, CSV filename, and subject use the current calendar month
+  and year, while the CSV contains exactly the previous calendar month's
+  content.
+
   Subject:
 
   `Universal Production Music - <release label> Metadata Delivery`
 
-  Example for a rolling range:
-  `Universal Production Music - Sep 1–11 2026 Metadata Delivery`. Use the
+  Example for an October 1 monthly run:
+  `Universal Production Music - October 2026 Metadata Delivery`. Use the
   workflow's normal client-facing capitalization and do not include a leading
   space before `Universal`.
 
@@ -230,6 +345,10 @@ MediaBox policy:
   private receipt and marking Scripps delivered.
 - SoundExchange: deliver through SoundExchange Direct at
   `https://sxdirect.soundexchange.com/login/?next=%2Fcatalog%2Fsubmit%2F`.
+  Enroll its separate portal pair with
+  `python3 auth_manager.py --enroll-soundexchange-keychain`. The normal adapter
+  first reuses its private retained session and otherwise performs a bounded
+  Keychain-backed sign-in before requiring protected catalog controls.
   Reuse the user's retained browser login, then always navigate through
   **My Catalog → Submit Recordings**. Do not hardcode or deep-link a historical
   Rights Owner URL: select and reverify the displayed registrant, registrant
@@ -270,6 +389,15 @@ MediaBox policy:
   delivery state. Record both registrant IDs, input part filenames and hashes,
   row counts, submitted recording counts, and non-secret history identifiers
   in the private receipt.
+  SoundExchange may keep the authenticated application on its login URL and
+  may not preserve a usable session across a separate setup/reopen. The
+  Keychain-backed sign-in therefore occurs in the same browser process as both
+  submissions. Use `--interactive-login` only when the portal requires a
+  supervised challenge. Bulk Import begins when the
+  `data-cy=bulk-upload-file` input is populated; there is no second Import
+  button. Validation reads the Angular summary model rather than the
+  virtualized 20-row table, and Upload History is accepted only after its
+  generated CSV exactly matches the expected ISRC set.
 - SourceAudio US and Ex-US: migrate delivery from the portal to SourceAudio's
   Import API. Status: design agreed; implementation and live validation are
   deferred until the dedicated API token and an approved HTTPS staging service
@@ -425,21 +553,35 @@ MediaBox policy:
   re-discover the live site fieldset and run non-production capability checks
   before enabling delivery. SourceAudio's DDEX ECHO/ERN ingestion is a separate,
   site-enabled delivery method and is not a fallback for this API integration.
-- SoundMouse: deliver through the SoundMouse Uploader application. Its Ci copy
-  is for archive purposes only. Upload the complete Step 16 release directory
-  and always explicitly select and verify workspace `UPPM` and module `Music`
-  before adding files. Completion requires the app's new queue rows to match
-  the exact local package manifest and every row to reach completed status.
-- SynchTank: deliver the package contents directly to the root of its Amazon S3
-  bucket, with no batch prefix. Upload `delivery.complete` only after every
-  package object has passed remote size verification. The trigger
-  name exactly matches BMAT's lower-case `delivery.complete` marker.
+- SoundMouse: first transfer the complete Step 16 package through the SoundMouse
+  Uploader application. Its Ci copy is for archive purposes only. Always
+  explicitly select and verify workspace `UPPM` and module `Music` before
+  adding files. Native upload success requires the app's new queue rows to
+  match the exact local package manifest and every row to reach completed
+  status; this writes the uploader receipt and marks SoundMouse `uploaded`, not
+  `delivered`.
+
+  The second phase runs in the SoundMouse website. Process every metadata
+  workbook included in the exact uploaded package, require a terminal result
+  for each workbook, and require zero processing errors across all workbooks.
+  Missing, duplicate, still-processing, warning-as-error, rejected, or
+  unaccounted-for sheets block completion and leave SoundMouse `uploaded`.
+  Only a website-processing receipt containing the exact workbook manifest and
+  zero-error results may mark SoundMouse `delivered`. An Uploader receipt alone
+  can never be acknowledged or promoted to delivery.
+- SynchTank: deliver each complete package beneath an Amazon S3 prefix exactly
+  matching the local package-folder name. Historical package prefixes remain
+  in the bucket and are outside the active manifest. Upload
+  `delivery.complete` inside the active package prefix only after every package
+  object has passed remote size verification. The trigger name exactly matches
+  BMAT's lower-case `delivery.complete` marker.
   The AWS access-key ID and secret are private credentials and must be enrolled
   through hidden Keychain prompts; neither value belongs in this document.
 - Tunesat: deliver by SFTP on port 22 to the account's `/AudioFiles` remote
-  path. Upload the complete partner package so `Music/` and `Metadata/` appear
-  directly beneath `/AudioFiles`; do not add a batch folder or completion
-  marker. The server address is `upload.tunesat.com`. The username and password
+  path. Upload the complete partner package beneath a folder exactly matching
+  the local package-folder name, so `Music/` and `Metadata/` appear inside that
+  batch folder. Preserve historical package folders alongside it and do not
+  add a completion marker. The server address is `upload.tunesat.com`. The username and password
   are private credentials and must be enrolled through hidden Keychain prompts;
   neither value belongs in this document.
 
@@ -450,19 +592,30 @@ default mode is a non-mutating plan; live execution requires both `--execute`
 and `--confirm-live-release <exact release id>`. It supports comma-separated
 endpoint selection, refuses duplicate submissions for partners already marked
 `delivered`, invokes the standalone upload/browser/connector modules, and
-preserves `uploaded` separately from `delivered`. An uploaded receipt may be
-promoted only through `--acknowledge-delivered` with the same exact-release
-authorization after the downstream acknowledgement is received.
+marks a fully verified upload `delivered` immediately for single-phase
+endpoints. SoundMouse intentionally remains `uploaded` between native transfer
+and zero-error website metadata processing; `--acknowledge-delivered` may not
+bypass that processing gate. For other endpoints the legacy `uploaded` state
+and acknowledgement command remain only to migrate older verified records.
+After every successful live endpoint mutation or migration,
+the runner immediately invokes the Monday API synchronizer and verifies the
+resulting board statuses. A Monday failure is reported as a failed runner
+result without rolling back an already verified remote upload. Pass
+`--delivery-date YYYY-MM-01` to target the independent monthly release context;
+the same selector is accepted by `delivery_state.py` for inspection or guarded
+status maintenance.
 
-ESPN and SoundExchange have visible retained-session Playwright adapters, but
-their first production use remains the explicitly approved live pilot during a
-real workflow. Qwire and Scripps expose an Outlook gateway boundary and write a
+ESPN and SoundExchange have completed their first production pilot. Their
+visible adapters retain fail-closed checks while exposing bounded supervised
+flags for the native Signiant picker and one-session SoundExchange login.
+Qwire and Scripps expose an Outlook gateway boundary and write a
 private, exact connector handoff. `outlook_connector_bridge.py` and the
 repository's `outlook-delivery-bridge` skill consume that handoff through the
 connected Outlook Email app. The app supports draft creation and inspection
 but not Send, so the bridge uses native Outlook only for the separately
 authorized final send action, then returns to the connector for exact Sent
 Items verification. Preparing a handoff or draft never counts as sending.
-Sony Ci and the Netmix API remain visible as
-credential-blocked endpoints rather than being silently skipped. SourceAudio
-remains owned by its dedicated worktree until that implementation is merged.
+Sony Ci remains visible as credential-blocked rather than being silently
+skipped. Netmix is implemented with an API-priority portal fallback while CND
+API access is pending. SourceAudio remains owned by its dedicated worktree
+until that implementation is merged.

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import logging
 import re
@@ -64,6 +66,38 @@ REGISTRANTS = (
 )
 
 
+def _history_csv_text_isrcs(text: str) -> tuple[str, ...]:
+    """Parse a portal history CSV already held in memory."""
+    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff"), newline=""))
+    if not reader.fieldnames:
+        raise SoundExchangeDeliveryError("SoundExchange history CSV has no header")
+    normalized = {
+        re.sub(r"[^a-z0-9]", "", str(name).casefold()): name
+        for name in reader.fieldnames
+    }
+    header = next(
+        (
+            original for key, original in normalized.items()
+            if key == "isrc" or key.startswith("soundrecordingisrc")
+        ),
+        None,
+    )
+    if header is None:
+        raise SoundExchangeDeliveryError("SoundExchange history CSV has no ISRC column")
+    values = tuple(
+        re.sub(r"[^A-Z0-9]", "", str(row.get(header) or "").upper())
+        for row in reader
+    )
+    if not values or any(not value for value in values):
+        raise SoundExchangeDeliveryError("SoundExchange history CSV contains a blank ISRC")
+    return values
+
+
+def _history_csv_isrcs(path: Path) -> tuple[str, ...]:
+    """Read the portal's generated history CSV and return canonical ISRCs."""
+    return _history_csv_text_isrcs(path.read_text(encoding="utf-8-sig"))
+
+
 class SoundExchangeGateway(Protocol):
     def require_authenticated(self) -> None: ...
     def select_registrant(self, registrant: Registrant) -> None: ...
@@ -71,14 +105,14 @@ class SoundExchangeGateway(Protocol):
     def bulk_import(self, workbook: Path) -> None: ...
     def wait_for_validation(self, expected_total: int, timeout_seconds: float) -> tuple[ValidationEntry, ...]: ...
     def submit_recordings(self) -> None: ...
-    def verify_upload_history(self, registrant: Registrant, expected_count: int) -> str | None: ...
+    def verify_upload_history(self, registrant: Registrant, expected_isrcs: tuple[str, ...]) -> str | None: ...
     def close(self) -> None: ...
 
 
 class PlaywrightSoundExchangeGateway:
     """Visible retained-session adapter. Selectors fail closed if the UI drifts."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, interactive_login: bool = False) -> None:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -91,82 +125,300 @@ class PlaywrightSoundExchangeGateway:
         )
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self._page.goto(PORTAL_URL, wait_until="domcontentloaded")
+        self._interactive_login = interactive_login
 
     def require_authenticated(self) -> None:
-        if self._page.locator("input[type=password]").count() or "/login" in self._page.url:
-            raise SoundExchangeDeliveryError("SoundExchange session is not authenticated")
+        def ready() -> bool:
+            return (
+                not self._page.locator("input[type=password]:visible").count()
+                and bool(self._page.get_by_text("MY CATALOG", exact=True).count())
+            )
+
+        if ready():
+            return
+        # Osano can be the only rendered UI immediately after navigation. If
+        # login recovery runs during that gap, the generic form helper sees no
+        # credential fields and can mistake the cookie controls for an
+        # ambiguous sign-in action. Close only Osano's exact dialog control,
+        # then give the real SoundExchange password field a bounded chance to
+        # render before examining the form.
+        cookie_close = self._page.get_by_text("Close this dialog", exact=True)
+        if cookie_close.count() == 1 and cookie_close.is_visible():
+            cookie_close.click()
+        try:
+            self._page.locator("input[type=password]:visible").first.wait_for(
+                state="visible", timeout=15_000
+            )
+        except Exception:
+            # `attempt_keychain_login` remains the authoritative fail-closed
+            # form/ready-state check and emits the redacted setup guidance.
+            pass
+        from auth_manager import load_soundexchange_credentials
+        from portal_auth import PortalAuthenticationError, attempt_keychain_login
+        try:
+            if attempt_keychain_login(
+                self._page, load_soundexchange_credentials(), ready=ready
+            ):
+                return
+        except PortalAuthenticationError as exc:
+            raise SoundExchangeDeliveryError(
+                f"SoundExchange authentication failed closed: {exc}"
+            ) from exc
+        if self._interactive_login:
+            try:
+                self._page.get_by_text("MY CATALOG", exact=True).wait_for(
+                    state="visible", timeout=300_000
+                )
+            except Exception as exc:
+                raise SoundExchangeDeliveryError(
+                    "SoundExchange interactive sign-in did not complete within five minutes"
+                ) from exc
+            if ready():
+                return
+        raise SoundExchangeDeliveryError(
+            "SoundExchange session is not authenticated; run "
+            "auth_manager.py --enroll-soundexchange-keychain"
+        )
 
     def select_registrant(self, registrant: Registrant) -> None:
-        self._page.get_by_text("My Catalog", exact=True).click()
-        self._page.get_by_text("Submit Recordings", exact=True).click()
+        self._page.goto(
+            "https://sxdirect.soundexchange.com/catalog/submit/",
+            wait_until="domcontentloaded",
+        )
         row = self._page.locator("tr", has_text=registrant.name)
+        try:
+            row.first.wait_for(state="visible", timeout=15_000)
+        except Exception as exc:
+            raise SoundExchangeDeliveryError(
+                f"Could not load the verified registrant row for {registrant.name}"
+            ) from exc
         if row.count() != 1 or registrant.registrant_id not in row.inner_text():
             raise SoundExchangeDeliveryError(f"Could not uniquely verify {registrant.name}")
         link = row.get_by_text(registrant.rights_owner, exact=True)
         if link.count() != 1:
             raise SoundExchangeDeliveryError(f"Rights Owner changed for {registrant.name}")
         link.click()
-        self._page.get_by_text("Bulk Import", exact=True).wait_for()
+        self._page.locator(
+            'input[type=file][data-cy="bulk-upload-file"]'
+        ).wait_for(state="attached")
 
     def pending_count(self) -> int:
-        rows = self._page.locator("table tbody tr")
-        return rows.count()
+        payload = self._summary_records()
+        return len(payload)
 
     def bulk_import(self, workbook: Path) -> None:
-        self._page.get_by_text("Bulk Import", exact=True).click()
-        picker = self._page.locator("input[type=file]")
+        picker = self._page.locator('input[type=file][data-cy="bulk-upload-file"]')
         if picker.count() != 1:
             raise SoundExchangeDeliveryError("Bulk Import file input was not unique")
+        # Do not click the visible Bulk Import button first: it opens a native
+        # file chooser that remains modal while Playwright separately injects
+        # the file into the verified input. The portal imports immediately when
+        # this exact input receives the workbook.
         picker.set_input_files(str(workbook))
-        submit = self._page.get_by_role("button", name=re.compile("upload|import", re.I))
-        if submit.count() != 1:
-            raise SoundExchangeDeliveryError("Bulk Import action was not unique")
-        submit.click()
+
+    def _summary_records(self) -> list[dict[str, object]]:
+        body = self._page.locator('[data-cy="summary-table-body"]')
+        if body.count() != 1:
+            return []
+        return body.evaluate(
+            """root => {
+                const norm = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                const controllers = [];
+                let node = root;
+                for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+                    if (!window.angular) break;
+                    const wrapped = window.angular.element(node);
+                    for (const accessor of ['scope', 'isolateScope', 'data']) {
+                        try {
+                            const candidate = wrapped[accessor] && wrapped[accessor]();
+                            if (candidate && candidate.ctrl) controllers.push(candidate.ctrl);
+                            if (candidate && candidate.$ngControllerController) {
+                                controllers.push(candidate.$ngControllerController);
+                            }
+                        } catch (_) {}
+                    }
+                }
+                const seen = new WeakSet();
+                const arrays = [];
+                const walk = (value, depth) => {
+                    if (!value || depth > 5 || (typeof value !== 'object')) return;
+                    if (seen.has(value)) return;
+                    seen.add(value);
+                    if (Array.isArray(value)) {
+                        if (value.some(item => item && typeof item === 'object' &&
+                            Object.keys(item).some(key => norm(key).includes('isrc')))) arrays.push(value);
+                        for (const item of value) walk(item, depth + 1);
+                        return;
+                    }
+                    for (const [key, item] of Object.entries(value)) {
+                        if (!key.startsWith('$') && key !== 'window' && key !== 'document') {
+                            walk(item, depth + 1);
+                        }
+                    }
+                };
+                const direct = controllers.find(controller =>
+                    controller && Array.isArray(controller.recordings)
+                );
+                const roots = [root, ...controllers];
+                if (window.angular) {
+                    const wrapped = window.angular.element(root);
+                    try { roots.push(wrapped.scope()); } catch (_) {}
+                    try { roots.push(wrapped.isolateScope()); } catch (_) {}
+                    try { roots.push(wrapped.data()); } catch (_) {}
+                }
+                for (const candidate of roots) walk(candidate, 0);
+                // The current portal exposes the authoritative ui-scroll
+                // collection as ctrl.recordings. Do not select the largest
+                // arbitrary Angular array: `countries` is larger and caused
+                // completed imports to look permanently empty.
+                const records = direct ? direct.recordings :
+                    (arrays.sort((a, b) => b.length - a.length)[0] || []);
+                const valueFor = (record, names) => {
+                    for (const [key, value] of Object.entries(record || {})) {
+                        if (names.includes(norm(key))) return value;
+                    }
+                    return undefined;
+                };
+                return records.map((record, index) => {
+                    const isrc = valueFor(record, ['isrc', 'soundrecordingisrc']);
+                    const title = valueFor(record, ['title', 'recordingtitle', 'soundrecordingtitle']);
+                    const valid = valueFor(record, ['valid', 'isvalid', 'validationvalid']);
+                    const processing = valueFor(record, ['processing', 'isprocessing', 'validating']);
+                    const rawMessages = valueFor(record, ['messages', 'errors', 'validationmessages']);
+                    const messages = Array.isArray(rawMessages) ? rawMessages.map(String) :
+                        (rawMessages ? [String(rawMessages)] : []);
+                    return {
+                        entry_number: String(index + 1), title: String(title || ''),
+                        isrc: String(isrc || ''), valid: valid === true,
+                        ready: typeof valid === 'boolean' && processing !== true,
+                        valid_type: typeof valid,
+                        processing_type: typeof processing,
+                        schema: Object.keys(record || {}).map(norm).filter(Boolean).sort(),
+                        messages,
+                    };
+                });
+            }"""
+        )
 
     def wait_for_validation(self, expected_total: int, timeout_seconds: float) -> tuple[ValidationEntry, ...]:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            rows = self._page.locator("table tbody tr")
-            if rows.count() == expected_total:
-                parsed: list[ValidationEntry] = []
-                still_processing = False
-                for index in range(rows.count()):
-                    text = " ".join(rows.nth(index).inner_text().split())
-                    lowered = text.casefold()
-                    if "processing" in lowered or "validating" in lowered:
-                        still_processing = True
-                        break
-                    isrc_match = re.search(r"\b[A-Z]{2}[A-Z0-9]{3}\d{7}\b", text, re.I)
-                    messages = tuple(
-                        item.strip() for item in re.findall(r"(?:error|invalid|warning):?[^|;]*", text, re.I)
+            payload = self._summary_records()
+            if len(payload) == expected_total and payload and all(
+                item.get("valid_type") == "undefined" for item in payload
+            ):
+                schema = ", ".join(map(str, payload[0].get("schema") or ()))
+                raise SoundExchangeDeliveryError(
+                    "SoundExchange validation model changed; no boolean validity "
+                    f"field was found. Record schema: {schema or 'empty'}"
+                )
+            if len(payload) == expected_total and all(item.get("ready") for item in payload):
+                return tuple(
+                    ValidationEntry(
+                        str(item["entry_number"]), str(item["title"]),
+                        re.sub(r"[^A-Z0-9]", "", str(item["isrc"]).upper()),
+                        bool(item["valid"]), tuple(map(str, item.get("messages") or ())),
                     )
-                    parsed.append(ValidationEntry(
-                        str(index + 1), text, isrc_match.group(0).upper() if isrc_match else "",
-                        not any(word in lowered for word in ("invalid", "error", "rejected")),
-                        messages,
-                    ))
-                if not still_processing:
-                    return tuple(parsed)
+                    for item in payload
+                )
             time.sleep(2)
         raise SoundExchangeDeliveryError("SoundExchange validation timed out")
 
     def submit_recordings(self) -> None:
-        button = self._page.get_by_role("button", name="Submit Recordings", exact=True)
+        button = self._page.locator('[data-cy="submit-recordings-btn"]')
         if button.count() != 1 or not button.is_enabled():
             raise SoundExchangeDeliveryError("Submit Recordings is unavailable")
         button.click()
 
-    def verify_upload_history(self, registrant: Registrant, expected_count: int) -> str | None:
-        self._page.get_by_text("My Catalog", exact=True).click()
-        self._page.get_by_text("Upload History", exact=True).click()
-        self._page.get_by_text("View Upload History", exact=True).click()
-        row = self._page.locator("tr", has_text=registrant.name).first
-        if not row.count():
+    def verify_upload_history(
+        self, registrant: Registrant, expected_isrcs: tuple[str, ...]
+    ) -> str | None:
+        self._page.goto(
+            "https://sxdirect.soundexchange.com/catalog/history/",
+            wait_until="domcontentloaded",
+        )
+        owner_row = self._page.locator("tr", has_text=registrant.name)
+        owner_row = owner_row.filter(has_text=registrant.registrant_id)
+        try:
+            owner_row.first.wait_for(state="visible", timeout=15_000)
+        except Exception:
             return None
-        text = " ".join(row.inner_text().split())
-        if str(expected_count) not in text or not any(word in text.casefold() for word in ("submitted", "complete")):
+        if owner_row.count() != 1:
             return None
-        return row.get_attribute("data-id") or text[:200]
+        action = owner_row.get_by_text("View Submission History", exact=True)
+        if action.count() != 1:
+            return None
+        action.click()
+        try:
+            self._page.wait_for_url("**/catalog/history/*/", timeout=15_000)
+        except Exception:
+            return None
+        expected = tuple(re.sub(r"[^A-Z0-9]", "", value.upper()) for value in expected_isrcs)
+        rows = self._page.locator('tr[data-cy^="upload-row-"]')
+        try:
+            rows.first.wait_for(state="visible", timeout=15_000)
+        except Exception:
+            return None
+        uploads = self._page.evaluate(
+            """() => {
+                let node = document.querySelector('tr[data-cy^="upload-row-"]');
+                for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+                    const wrapped = window.angular && window.angular.element(node);
+                    for (const accessor of ['scope', 'isolateScope', 'data']) {
+                        try {
+                            const candidate = wrapped && wrapped[accessor] && wrapped[accessor]();
+                            const controller = candidate && (
+                                candidate.uploadHistoryPage || candidate.ctrl ||
+                                candidate.$ngControllerController
+                            );
+                            if (controller && Array.isArray(controller.uploads)) {
+                                return controller.uploads.slice(0, 25).map(upload => ({
+                                    file_id: upload.fileId,
+                                    filename: String(upload.userFileName || ''),
+                                    date: String(upload.date || ''),
+                                    type: String(upload.type || ''),
+                                    isrc_download: upload.isrcDownload === true,
+                                }));
+                            }
+                        } catch (_) {}
+                    }
+                }
+                return [];
+            }"""
+        )
+        for upload in uploads:
+            if not upload.get("isrc_download") or upload.get("file_id") is None:
+                continue
+            csv_text = self._page.evaluate(
+                """async fileId => {
+                    const token = String(window.csrfmiddlewaretoken || '');
+                    const body = new URLSearchParams({
+                        fileId: String(fileId),
+                        'X-CSRFToken': token,
+                        csrfmiddlewaretoken: token,
+                    });
+                    const response = await fetch('/catalog/api/isrc/csv/', {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                            'X-CSRFToken': token,
+                        },
+                        body: body.toString(),
+                    });
+                    if (!response.ok) throw new Error(`history csv http ${response.status}`);
+                    return await response.text();
+                }""",
+                upload["file_id"],
+            )
+            actual = _history_csv_text_isrcs(str(csv_text))
+            if len(actual) != len(expected) or sorted(actual) != sorted(expected):
+                continue
+            return (
+                f"{registrant.key}:{upload['file_id']}:{len(actual)}:"
+                f"{upload.get('date', '')}:{str(upload.get('filename', ''))[:80]}"
+            )
+        return None
 
     def close(self) -> None:
         self._context.close()
@@ -295,6 +547,7 @@ def deliver_soundexchange(
     gateway: SoundExchangeGateway | None = None,
     live_confirmation: str | None = None,
     validation_timeout_seconds: float = 3600,
+    interactive_login: bool = False,
 ) -> bool:
     owned = False
     try:
@@ -322,13 +575,14 @@ def deliver_soundexchange(
         if not gate_ok:
             raise SoundExchangeDeliveryError(f"SoundExchange submission is blocked: {detail}")
         if gateway is None:
-            gateway = PlaywrightSoundExchangeGateway()
+            gateway = PlaywrightSoundExchangeGateway(interactive_login=interactive_login)
             owned = True
         gateway.require_authenticated()
         history_ids: dict[str, str] = {}
         for registrant, paths in batches:
             rows = expected[registrant.key]
-            existing_history = gateway.verify_upload_history(registrant, len(rows))
+            expected_isrcs = tuple(isrc for isrc, _title in rows)
+            existing_history = gateway.verify_upload_history(registrant, expected_isrcs)
             if existing_history:
                 history_ids[registrant.key] = existing_history
                 continue
@@ -351,14 +605,14 @@ def deliver_soundexchange(
                 gateway.bulk_import(path)
             entries = gateway.wait_for_validation(len(rows), validation_timeout_seconds)
             actual_isrcs = [entry.isrc for entry in entries]
-            expected_isrcs = [isrc for isrc, _ in rows]
+            expected_isrcs_list = [isrc for isrc, _ in rows]
             invalid = [entry for entry in entries if not entry.valid]
             if invalid:
                 audit = _invalid_audit(ctx, registrant, paths, entries)
                 raise SoundExchangeDeliveryError(
                     f"{len(invalid)} invalid entries for {registrant.name}; audit: {audit}"
                 )
-            if len(entries) != len(rows) or sorted(actual_isrcs) != sorted(expected_isrcs):
+            if len(entries) != len(rows) or sorted(actual_isrcs) != sorted(expected_isrcs_list):
                 raise SoundExchangeDeliveryError(
                     f"Validated recordings do not exactly match {registrant.name} workbooks"
                 )
@@ -369,10 +623,10 @@ def deliver_soundexchange(
             )
             gateway.submit_recordings()
             deadline = time.monotonic() + validation_timeout_seconds
-            history_id = gateway.verify_upload_history(registrant, len(rows))
+            history_id = gateway.verify_upload_history(registrant, expected_isrcs)
             while not history_id and time.monotonic() < deadline:
                 time.sleep(2)
-                history_id = gateway.verify_upload_history(registrant, len(rows))
+                history_id = gateway.verify_upload_history(registrant, expected_isrcs)
             if not history_id:
                 raise SoundExchangeDeliveryError(f"Upload History did not verify {registrant.name}")
             history_ids[registrant.key] = history_id
@@ -415,11 +669,16 @@ def _main() -> int:
     parser.add_argument("--full-month-content", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--confirm-live-release")
+    parser.add_argument(
+        "--interactive-login", action="store_true",
+        help="wait up to five minutes for a one-session SoundExchange sign-in",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     return 0 if deliver_soundexchange(
         context_from_cli_args(args), args.dry_run, logging.getLogger("soundexchange"),
         live_confirmation=args.confirm_live_release,
+        interactive_login=args.interactive_login,
     ) else 1
 
 

@@ -4,6 +4,7 @@ import json
 import logging
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -88,6 +89,46 @@ class SoundMouseUploaderDeliveryTests(unittest.TestCase):
         )
         sud.validate_queue_rows(files, rows)
 
+    def test_uploaded_and_complete_rows_are_successful(self) -> None:
+        files = sud.collect_package(self.package)
+        rows = tuple(
+            sud.QueueRow(
+                row_id=index,
+                url=item.path.as_uri(),
+                status=(
+                    sud.UPLOADED_STATUS if index == 1 else sud.COMPLETED_STATUS
+                ),
+                workspace_id="workspace-id",
+                module_name="music_manager",
+                failure_reason=0,
+                original_filename=item.path.name,
+            )
+            for index, item in enumerate(files, start=1)
+        )
+        self.assertTrue(sud.queue_rows_successful(rows))
+        self.assertNotIn(sud.UPLOADED_STATUS, sud.ACTIVE_STATUSES)
+
+    def test_success_status_supersedes_stale_retry_failure_reason(self) -> None:
+        files = sud.collect_package(self.package)
+        rows = tuple(
+            sud.QueueRow(
+                row_id=index,
+                url=item.path.as_uri(),
+                status=sud.COMPLETED_STATUS,
+                workspace_id="workspace-id",
+                module_name="music_manager",
+                failure_reason=1,
+                original_filename=item.path.name,
+            )
+            for index, item in enumerate(files, start=1)
+        )
+        self.assertTrue(sud.queue_rows_successful(rows))
+        self.assertFalse(
+            sud.queue_rows_successful(
+                (replace(rows[0], status=4),) + rows[1:]
+            )
+        )
+
     def test_wrong_module_fails(self) -> None:
         files = sud.collect_package(self.package)
         rows = tuple(
@@ -138,6 +179,44 @@ class SoundMouseUploaderDeliveryTests(unittest.TestCase):
             passed, detail = sud.soundmouse_gate_passed(self.ctx)
         self.assertFalse(passed)
         self.assertIn("failed", detail)
+
+    @patch("soundmouse_uploader_delivery.set_partner_status")
+    @patch("soundmouse_uploader_delivery._write_receipt")
+    @patch("soundmouse_uploader_delivery.queue_snapshot")
+    @patch("soundmouse_uploader_delivery.subprocess.run")
+    @patch("soundmouse_uploader_delivery.soundmouse_gate_passed")
+    def test_completed_native_upload_stays_uploaded_until_web_processing(
+        self, gate, run, snapshot, receipt, set_status
+    ) -> None:
+        files = sud.collect_package(self.package)
+        rows = tuple(
+            sud.QueueRow(
+                row_id=index,
+                url=item.path.as_uri(),
+                status=sud.COMPLETED_STATUS,
+                workspace_id="workspace-id",
+                module_name="music_manager",
+                failure_reason=0,
+                original_filename=item.path.name,
+            )
+            for index, item in enumerate(files, start=1)
+        )
+        gate.return_value = (True, "Step 16 completed")
+        snapshot.return_value = (len(rows), rows)
+        receipt.return_value = self.root / "receipt.json"
+        logger = logging.getLogger("test_soundmouse_uploaded_boundary")
+        queue_db = self.root / "queue.sqlite"
+        queue_db.write_bytes(b"queue")
+
+        with patch.object(sud, "APP_PATH", self.root), patch.object(
+            sud, "QUEUE_DB", queue_db
+        ):
+            self.assertTrue(sud.deliver_soundmouse_uploader(self.ctx, False, logger))
+
+        run.assert_called_once()
+        set_status.assert_called_once_with(
+            self.ctx.specials_dir, "soundmouse", "uploaded"
+        )
 
     @patch("soundmouse_uploader_delivery._ui_submit_package")
     @patch("soundmouse_uploader_delivery.subprocess.run")

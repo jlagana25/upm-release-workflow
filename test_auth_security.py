@@ -285,6 +285,155 @@ class AuthSecurityTests(unittest.TestCase):
         self.assertNotIn(username, rendered)
         self.assertNotIn(credential_value, rendered)
 
+    def test_espn_enrollment_atomically_stores_both_values(self):
+        logger = Mock()
+        username = "private-espn-user"
+        credential_value = "private-espn-" + "value"
+        prompts = iter((username, credential_value))
+        with (
+            patch.object(auth_manager.sys.stdin, "isatty", return_value=True),
+            patch.object(
+                auth_manager,
+                "_prompt_hidden_secret",
+                side_effect=lambda _description: next(prompts),
+            ),
+            patch.object(
+                auth_manager, "_read_native_keychain_secret", return_value=None
+            ),
+            patch.object(
+                auth_manager, "_store_native_keychain_secret", return_value=True
+            ) as store,
+            patch.object(
+                auth_manager,
+                "load_espn_credentials",
+                return_value=(username, credential_value),
+            ),
+        ):
+            self.assertTrue(auth_manager.enroll_espn_keychain(logger))
+        self.assertEqual(
+            store.call_args_list,
+            [
+                call(auth_manager.ESPN_USERNAME_SERVICE, username),
+                call(auth_manager.ESPN_PASSWORD_SERVICE, credential_value),
+            ],
+        )
+        rendered = " ".join(str(item) for item in logger.method_calls)
+        self.assertNotIn(username, rendered)
+        self.assertNotIn(credential_value, rendered)
+
+    def test_netmix_enrollment_atomically_stores_both_values(self):
+        logger = Mock()
+        username = "private-netmix-user"
+        credential_value = "private-netmix-" + "value"
+        prompts = iter((username, credential_value))
+        with (
+            patch.object(auth_manager.sys.stdin, "isatty", return_value=True),
+            patch.object(
+                auth_manager,
+                "_prompt_hidden_secret",
+                side_effect=lambda _description: next(prompts),
+            ),
+            patch.object(
+                auth_manager, "_read_native_keychain_secret", return_value=None
+            ),
+            patch.object(
+                auth_manager, "_store_native_keychain_secret", return_value=True
+            ) as store,
+            patch.object(
+                auth_manager,
+                "load_netmix_credentials",
+                return_value=(username, credential_value),
+            ),
+        ):
+            self.assertTrue(auth_manager.enroll_netmix_keychain(logger))
+        self.assertEqual(
+            store.call_args_list,
+            [
+                call(auth_manager.NETMIX_USERNAME_SERVICE, username),
+                call(auth_manager.NETMIX_PASSWORD_SERVICE, credential_value),
+            ],
+        )
+        rendered = " ".join(str(item) for item in logger.method_calls)
+        self.assertNotIn(username, rendered)
+        self.assertNotIn(credential_value, rendered)
+
+    def test_soundexchange_enrollment_restores_previous_pair_on_failure(self):
+        logger = Mock()
+        prompts = iter(("replacement-user", "replacement-value"))
+        previous = {
+            auth_manager.SOUNDEXCHANGE_USERNAME_SERVICE: "previous-user",
+            auth_manager.SOUNDEXCHANGE_PASSWORD_SERVICE: "previous-value",
+        }
+        with (
+            patch.object(auth_manager.sys.stdin, "isatty", return_value=True),
+            patch.object(
+                auth_manager,
+                "_prompt_hidden_secret",
+                side_effect=lambda _description: next(prompts),
+            ),
+            patch.object(
+                auth_manager,
+                "_read_native_keychain_secret",
+                side_effect=lambda service: previous.get(service),
+            ),
+            patch.object(
+                auth_manager,
+                "_store_native_keychain_secret",
+                side_effect=(True, False),
+            ),
+            patch.object(auth_manager, "_restore_native_keychain_secret") as restore,
+        ):
+            self.assertFalse(auth_manager.enroll_soundexchange_keychain(logger))
+        self.assertEqual(
+            restore.call_args_list,
+            [
+                call(
+                    auth_manager.SOUNDEXCHANGE_USERNAME_SERVICE,
+                    "previous-user",
+                ),
+                call(
+                    auth_manager.SOUNDEXCHANGE_PASSWORD_SERVICE,
+                    "previous-value",
+                ),
+            ],
+        )
+
+    def test_soundmouse_enrollment_atomically_stores_both_values(self):
+        logger = Mock()
+        username = "private-soundmouse-user"
+        credential_value = "private-soundmouse-" + "value"
+        prompts = iter((username, credential_value))
+        with (
+            patch.object(auth_manager.sys.stdin, "isatty", return_value=True),
+            patch.object(
+                auth_manager,
+                "_prompt_hidden_secret",
+                side_effect=lambda _description: next(prompts),
+            ),
+            patch.object(
+                auth_manager, "_read_native_keychain_secret", return_value=None
+            ),
+            patch.object(
+                auth_manager, "_store_native_keychain_secret", return_value=True
+            ) as store,
+            patch.object(
+                auth_manager,
+                "load_soundmouse_credentials",
+                return_value=(username, credential_value),
+            ),
+        ):
+            self.assertTrue(auth_manager.enroll_soundmouse_keychain(logger))
+        self.assertEqual(
+            store.call_args_list,
+            [
+                call(auth_manager.SOUNDMOUSE_USERNAME_SERVICE, username),
+                call(auth_manager.SOUNDMOUSE_PASSWORD_SERVICE, credential_value),
+            ],
+        )
+        rendered = " ".join(str(item) for item in logger.method_calls)
+        self.assertNotIn(username, rendered)
+        self.assertNotIn(credential_value, rendered)
+
     def test_domo_log_url_drops_auth_query_and_fragment(self):
         safe = domo_exports._safe_url_for_log(
             "https://login.example.invalid/path?code=sensitive#session"

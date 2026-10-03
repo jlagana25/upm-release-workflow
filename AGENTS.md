@@ -32,7 +32,8 @@ units or valid selector tokens.
   package labels, album lists, and message subjects. Internal IDs and audit
   date values retain their canonical forms.
 - Everything is date-driven from `--start-date/--end-date`, legacy
-  `--year/--month/--part`, or `--previous-month`;
+  `--year/--month/--part`, `--previous-month`, or the standalone monthly
+  workflow's `--delivery-date`;
   **no month/year is ever hardcoded**. Naming tokens and destination paths are all
   derived in `config.py`.
 
@@ -49,6 +50,15 @@ apps**. A cloud sandbox (Codex) has none of that. **Do not try to run the
 pipeline here — it will fail, and that failure means nothing about your code.**
 
 ### Authorized local scheduled execution
+
+Completed, validated packages for endpoints the operator has already approved
+carry standing delivery authorization. Proceed as soon as their package and
+endpoint-specific gates pass; do not pause for another approval. The exact
+release-ID confirmation remains a machine safety interlock, not a request for
+human confirmation. This standing authorization does not cover a new or
+changed endpoint, changed destination, failed/ambiguous validation, changed
+host key, credential/MFA challenge, deletion, or any package that is still
+being built or uploaded by another process.
 
 The `upm-overnight-workflow` Codex heartbeat is explicitly authorized to run
 the live orchestrator on **USMPSMDHDF2** when it has the machine's real login
@@ -67,6 +77,16 @@ exposing credentials, inventing a different batch, or using unrelated commands.
 It does not apply in a cloud/headless sandbox or on a machine without the real
 GUI login session and mounted delivery storage.
 
+The `upm-monthly-metadata-delivery` heartbeat is likewise authorized to run
+`python3 monthly_delivery_workflow.py --delivery-date YYYY-MM-01` on the first
+day of the delivery month when those same host, login-session, mounted-volume,
+and private-authentication requirements are satisfied. That run owns only NTT
+DATA, JMD/TSS, Qwire, and Scripps, and its content window is exactly the
+previous calendar month. It may build and verify the standalone monthly root
+and synchronize its Monday item, but it may not send email, notify a MediaBox,
+or perform another final external submission without explicit authorization
+for that exact monthly release ID.
+
 Specifically, these **cannot run in the sandbox** and must not be used as a
 validation signal:
 
@@ -77,8 +97,10 @@ validation signal:
 - **Mounted storage** — every real input/output path is on two Thunderbolt
   volumes, `/Volumes/Pegasus32 R8 - 1` (Specials) and `/Volumes/Pegasus32 R8 - 2`
   (Hard Drive Updates). They are not present in the sandbox.
-- **Domo exports** — Steps 1, 16, and 17 drive an authenticated Domo browser session via
-  Playwright. Needs credentials and interactive login.
+- **Domo exports** — Step 1, Step 16, and BMAT use explicit public Data API
+  projections with the separate workflow-owned API Keychain pair and fail
+  closed on API errors. The retained authenticated browser is used only for
+  DataFlow lineage/run recovery, never as an export fallback.
 - **SoundMouse CSV→XLSX normalization** — Step 16 exports metadata cards as CSV,
   builds clean XLSX workbooks with an OOXML shared-string table, then requires
   native Microsoft Excel to Clear Formats and save the installed copy because
@@ -159,7 +181,7 @@ with the three tools above.
 
 | Step | Name | Module | Runs in sandbox? |
 |------|------|--------|------------------|
-| 1 | Domo metadata exports | `domo_exports.py` | No (browser/auth) |
+| 1 | Domo metadata exports | `domo_exports.py` | Logic testable; live API needs Keychain/network |
 | 2 & 3 | Folder setup (Specials + HD Updates) | `folder_setup.py` | No (volumes) |
 | 4 | Album list DOCX + PDF | `album_list_doc.py` | Partial (PDF needs LibreOffice) |
 | 5 | UniSync music export | `unisync_automation.py` | No (GUI) |
@@ -171,8 +193,8 @@ with the three tools above.
 | 13 | Non-main-track cleanup | `cleanup.py` | Logic testable |
 | 14 | **Retired — NBCUniversal** | — | Not an active workflow unit |
 | 15 | Final metadata cross-check | `final_metadata_verification.py` | Logic testable |
-| 16 | SoundMouse delivery | `soundmouse.py` | Data/filesystem logic testable; Domo + UniSync cannot run |
-| 17 | BMAT custom-content delivery | `bmat_delivery.py` | Selection/package logic testable; Domo, DAMS, and SFTP need real services |
+| 16 | SoundMouse delivery | `soundmouse.py` | Data/filesystem logic testable; live Domo API + UniSync cannot run |
+| 17 | BMAT custom-content delivery | `bmat_delivery.py` | Selection/package logic testable; live Domo API, DAMS, and SFTP need real services |
 | 18 | Monday status synchronization | `monday_sync.py` | Planning testable; live API needs per-user token/network |
 
 Steps **10–15 are gated behind Step 9 and Step 1**: if verification or a Domo
@@ -306,6 +328,15 @@ inline or are submitted to HDF1's login-session agent.
 - **The Pegasus volumes** (`/Volumes/Pegasus32 R8 - 1` and `- 2`) — all real
   release data. Paths are defined in `config.py`; the volumes themselves are not
   in git and not in the sandbox.
+- **Known-volume recovery is automatic.** `volume_mounts.py` runs before the
+  main workflow, standalone folder setup, and every HDF1 Soundminer job. HDF2
+  reconnects only the exact HDF1 SMB shares for the two Pegasus roots plus the
+  optional `Documents` compatibility share; HDF1 uses `diskutil` only for an
+  exact, uniquely discovered attached volume name. No credential is stored or
+  passed by the workflow. An intentional unmount must use
+  `--no-auto-mount`, `UPM_DISABLE_AUTO_MOUNT=1`, or the private
+  `~/.upm_release_workflow/disable_auto_mount` sentinel. Required Pegasus
+  failures remain fail-closed; optional Documents/UPM Builds failures warn.
 - **Release CSVs/tracklists** — the Domo exports live under
   `~/Documents/UPM Tracklists/Release Lists/` **per machine**, not in git.
 - **Reference screenshots** — GUI matching reads crops from
@@ -353,6 +384,16 @@ inline or are submitted to HDF1's login-session agent.
   callback and can open its CSV picker. Never read, copy, log, or expose the
   password. Close only the UniSync-created `DAMS SSO` and Microsoft
   `Working...` tabs after the callback; preserve all pre-existing browser tabs.
+- **Clean up agent-created working artifacts when they are no longer needed.**
+  Close browser tabs, app windows, and terminal sessions created for the task
+  once they are idle. Remove temporary staging folders, caches, partial files,
+  diagnostic captures, and downloaded installers or code copies after the
+  result is verified. Periodically include retained worktrees, Downloads, and
+  the user's private temporary directory in this audit, not only the current
+  checkout. Prefer moving obsolete user-visible downloads to Trash so they are
+  recoverable. Preserve pre-existing sessions and files, active processes,
+  unfinished work (including SourceAudio checkpoints and review outputs),
+  delivery packages, receipts, audit evidence, logs, and structured reports.
 - **MTV-Viacom and NBCUniversal are retired.** The shared Specials baseline may
   still contain their historical folders, so both fresh `copytree` and additive baseline merges must
   filter names through `config.is_retired_partner_name()`. Do not delete old
@@ -377,11 +418,12 @@ inline or are submitted to HDF1's login-session agent.
   Missing/ambiguous masters fail closed and preserve the existing local media.
 - **Catalog refresh behavior is explicit, not inferred from folder contents.**
   `delivery_state.py` stores per-partner pending/uploaded/delivered state in the
-  release's `_WORKFLOW/delivery_status.json`. ``uploaded`` is the correction
-  boundary for SourceAudio US/Ex-US, Netmix, and SoundMouse; those partners use
-  audited `Missing` packages because metadata has already been mapped to media
-  in the remote service. All other uploaded partners still exact-sync their
-  original folders. Delivered ordinary partners are skipped. Step 15 validates
+  release's `_WORKFLOW/delivery_status.json`. A fully verified upload is marked
+  `delivered` immediately. Both `uploaded` (legacy/intermediate) and `delivered`
+  are correction boundaries for SourceAudio US/Ex-US, Netmix, and SoundMouse;
+  those partners use audited `Missing` packages because metadata has already
+  been mapped to media in the remote service. Delivered ordinary partners are
+  skipped. Step 15 validates
   SourceAudio and Netmix against original media plus `Missing`; Step 16 applies
   the same union to SoundMouse. A refresh that includes removals should also use
   recoverable `--prune-music --prune-mode archive` so canonical sources match the new
@@ -423,14 +465,25 @@ inline or are submitted to HDF1's login-session agent.
   An incremental refresh may proceed only when the destination is a strict
   subset of the expected manifest (missing only); unexpected, duplicate, or
   wrong-format outputs still fail before GUI mutation.
+- **SoundMouse Domo reads are API-only.** Query the owning SoundMouse catalog
+  DataSet for the exact release dates, project the tracklist, bucket, and
+  metadata card schemas locally, and fail closed on API errors. Never use card
+  download as an automatic fallback or put API credentials or tokens in argv,
+  environment variables, URLs, logs, reports, or repository files.
 - **Soundmouse Uploader must target UPPM/Music.** The post-Step-16 native-app
   delivery always explicitly selects and re-verifies workspace `UPPM` and
   module `Music` before submitting the complete SoundMouse release directory.
   Require the newest real Step 16 result to be completed, refuse an existing
   active queue, compare every newly inserted queue file URL with the exact
   local `MEDIA`/`Covers`/`Metadata` manifest, and require every row to reach the
-  app's completed state. Do not trust a generic completion dialog or count,
-  read credentials, or accept a different workspace/module.
+  app's completed state. Native-uploader completion marks SoundMouse only
+  `uploaded`; it is not delivered until every metadata workbook has also been
+  processed successfully in the SoundMouse website. Do not trust a generic
+  completion dialog or count, read credentials, or accept a different
+  workspace/module.
+  A metadata-only correction uploads only nonempty `Metadata`; do not require
+  or resend MEDIA/Covers. Keep correction audits outside the selected package,
+  because the native app recursively queues every file beneath that folder.
 - **Agent requests are atomic JSON.** HDF2 sends control JSON over SSH into
   HDF1's local `pending/`; HDF1 claims by rename, updates heartbeats/status,
   and archives the request. SSH never owns or drives the GUI. Keep
@@ -463,6 +516,14 @@ inline or are submitted to HDF1's login-session agent.
   verifies both stored values exactly, and restores the prior pair after any
   partial write. API credentials and short-lived tokens must never enter argv,
   URLs, environment variables, logs, reports, screenshots, or repository files.
+- **SoundMouse web processing has separate unattended credentials.** The
+  native Soundmouse Uploader continues to own its remembered app session. The
+  SoundMouse website pair lives only in workflow-owned Keychain items and
+  `soundmouse_web_auth.py` uses it to recover a fresh retained web session
+  before metadata processing. Require the protected UPPM Music page after
+  login and fail closed on ambiguous controls, rejection, CAPTCHA, or MFA.
+  Never log, screenshot, persist, or pass either credential through argv or
+  environment variables.
 - **BMAT is date-scoped and ledger-gated.** Step 17 uses the resolved workflow
   range for the custom-releases Domo card and keeps the submission card as a
   full inventory. Accepted and ingestion-pending catalogues in the local
@@ -471,20 +532,23 @@ inline or are submitted to HDF1's login-session agent.
   Audio pages. Exact manifests are validated before SFTP; remote sizes are
   checked and `delivery.complete` is always the final upload. The first-seen
   host key is persisted privately and later changes fail closed.
-- **SynchTank S3 is a direct-root triggered inbox.** Upload the contents of the
-  final SynchTank package directly to the configured bucket root, never under a
-  batch prefix. Reject unexpected remote objects, verify every expected key by
-  exact byte size, and upload the empty lower-case `delivery.complete` object
+- **SynchTank S3 retains batch-scoped deliveries.** Upload each complete final
+  SynchTank package beneath a prefix exactly matching its package-folder name.
+  Historical prefixes at the bucket root are expected and must never be
+  removed or treated as part of the active manifest. Reject unexpected objects
+  inside the active prefix, verify every expected key by exact byte size, and
+  upload the empty lower-case `delivery.complete` object inside that prefix
   only as the final mutation. AWS access-key values live only in the current
   user's Keychain and memory; never place either value in repository data,
   argv, environment variables, logs, or reports.
-- **TuneSat SFTP receives the complete partner package.** Preserve the final
-  package's `Music/` and `Metadata/` directories directly beneath
-  `/AudioFiles`; do not add a batch prefix or completion marker. Pin the
-  first-seen host key, reject later changes and unexpected remote files, use
-  `.part` temporary siblings plus atomic renames, and verify exact remote byte
-  sizes before marking the partner uploaded. TuneSat credentials live only in
-  the current user's Keychain and memory.
+- **TuneSat SFTP retains complete package folders.** Upload each final package
+  beneath `/AudioFiles/<exact package-folder name>/`, preserving its `Music/`
+  and `Metadata/` directories. Historical package folders alongside it are
+  expected and must remain untouched. Do not add a completion marker. Pin the
+  first-seen host key, reject later changes and unexpected files inside the
+  active package folder, use `.part` temporary siblings plus atomic renames,
+  and verify exact remote byte sizes before marking the partner delivered.
+  TuneSat credentials live only in the current user's Keychain and memory.
   Routine authentication and connection requests from the configured
   SynchTank and TuneSat endpoints are pre-authorized for an otherwise
   authorized delivery. This does not authorize accepting a changed pinned
@@ -494,12 +558,27 @@ inline or are submitted to HDF1's login-session agent.
   non-mutating unless live execution is explicitly selected and the supplied
   confirmation equals `ctx.release_id`. It skips partners already marked
   delivered, preserves content-addressed restart checkpoints, and does not
-  treat a prepared Outlook connector handoff as a sent message. ESPN remains
-  uploaded until downstream acknowledgement; Qwire/Scripps require an exact
-  Sent Items match, and SoundExchange requires both registrants in Upload
-  History before those endpoints become delivered. A send/submit intent whose
+  treat a prepared Outlook connector handoff as a sent message. Once the user
+  has approved a partner endpoint, that approval is standing authorization for
+  routine future deliveries to the same configured endpoint as soon as the
+  exact package passes every readiness and correctness gate; do not pause for a
+  redundant approval. Complete the delivery, verify the endpoint result, record
+  the receipt and delivery state, and synchronize Monday. This standing
+  authorization does not cover an unapproved or manual-only endpoint, a changed
+  destination or pinned host key, an uncertain prior submission, or bypassing a
+  failed gate. A fully verified upload is delivered without a separate partner
+  acknowledgement; Qwire/Scripps
+  require an exact Sent Items match, and SoundExchange requires both registrants
+  in Upload History before those endpoints become delivered. A send/submit intent whose
   result cannot yet be verified is uncertain state and must never be retried as
   a fresh submission.
+- **Netmix transport is API-first.** `netmix_portal_delivery.py` is the guarded
+  interim browser route and eventual fallback. A configured API gateway always
+  runs first; browser fallback is permitted only after an explicit safe,
+  pre-mutation API result. The portal uploads the complete canonical master
+  folder and may mark Netmix delivered only after exact metadata/audio parity,
+  one cover per album, and exact accepted filenames in View Uploads. Retained
+  browser authentication is private per-user state and never repository data.
 - **The Outlook Email app cannot send.** It creates and reads drafts and Sent
   Items, so Qwire/Scripps use a repository skill plus
   `outlook_connector_bridge.py`. Require one attachment below 3 MiB, verify the
@@ -532,6 +611,23 @@ inline or are submitted to HDF1's login-session agent.
   labels, re-reads both batches to verify writes, and never downgrades final
   subitem or main-item statuses. Prepared
   packages become `Clear to Send`; explicit delivered state becomes `Complete`.
+  NTT DATA, JMD/TSS, Qwire, and Scripps are built only by
+  `monthly_delivery_workflow.py` on the 1st for the complete previous calendar
+  month. Its root is `UPM-YYYY-MM-MONTHLY` and Monday batch is `UPMYYYYMM01`.
+  Rolling Content Updates items exclude those four monthly-only subitems; the
+  source preflight removes any copies created by the external Monday template
+  through the API before validating the destination. The standalone monthly
+  item uses `Working On It` while building and `Clear to Send` when verified. Never carry
+  monthly NTT audio or metadata forward from a rolling release.
+  After the monthly NTT DATA and JMD/TSS MediaBoxes are verified, prepare two
+  Outlook drafts only. Resolve the approved Japan delivery recipient and CC
+  from private operator configuration; never store either identity here. Use
+  the package's content-month label in the
+  subjects (`UPM Japan JMD / TSS Data <month year> Delivery` and
+  `NTT DATA <month year>`), never the following month's execution date or a
+  Part suffix. Insert the link and newly generated password from the exact
+  current MediaBox; never reuse, persist, or log historical credentials. The
+  canonical bodies and paragraph spacing live in `DELIVERY_ENDPOINTS.md`.
   During a full run, live checkpoints advance Hard Drive after Step 10,
   Digital Fulfillment after Step 15, and the three preparation subitems inside
   SoundMouse as their Step 16 phases complete. These checkpoints must pass

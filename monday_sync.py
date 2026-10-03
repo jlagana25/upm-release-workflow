@@ -21,7 +21,12 @@ from typing import Any, Iterable, Mapping, Protocol
 
 import requests
 
-from config import LOGS_DIR, ReleaseContext, context_from_cli_args
+from config import (
+    LOGS_DIR,
+    ReleaseContext,
+    context_from_cli_args,
+    monthly_metadata_delivery_ready,
+)
 from delivery_state import partner_status
 
 
@@ -70,7 +75,10 @@ REQUIRED_MAIN_LABELS = {
     "Delivered": 10,
 }
 REQUIRED_SUBITEM_LABELS = {
+    "Working On It": 0,
+    "Scheduled Monthly": 101,
     "Clear to Send": 3,
+    "Not Needed": 13,
     "Complete": 18,
     "Stuck": 2,
 }
@@ -128,6 +136,18 @@ PARTNER_STATE_KEYS = {
     "qwire": "qwire",
     "soundexchange": "soundexchange",
 }
+
+MONTHLY_METADATA_PARTNERS = frozenset({
+    "japan_ntt",
+    "japan_jmdtss",
+    "qwire",
+    "scripps",
+})
+MONTHLY_PENDING_STATUS = "Scheduled Monthly"
+RETIRED_CONTENT_SUBITEMS = frozenset({
+    "NBC",
+    "MTV/Viacom (Metadata only)",
+})
 
 
 class MondayError(RuntimeError):
@@ -206,11 +226,18 @@ class MondayGateway(Protocol):
     ) -> list[SourceItem]: ...
     def create_source_group(self, schema: SourceBoardSchema, title: str) -> str: ...
     def create_source_item(
-        self, schema: SourceBoardSchema, group_id: str, row: SourceRow
+        self, schema: SourceBoardSchema, group_id: str, row: SourceRow, *,
+        include_master: bool = False,
     ) -> int: ...
     def set_source_item_values(
         self, schema: SourceBoardSchema, item_id: int, row: SourceRow, *, include_master: bool
     ) -> None: ...
+    def repair_soundmouse_destination(
+        self, batch: str, items: list[BoardItem]
+    ) -> bool: ...
+    def remove_rolling_monthly_subitems(
+        self, batch: str, items: list[BoardItem]
+    ) -> int: ...
 
 
 def _column_text(values: Iterable[Mapping[str, Any]], column_id: str) -> str:
@@ -464,7 +491,8 @@ class MondayClient:
         return str(group["id"])
 
     def create_source_item(
-        self, schema: SourceBoardSchema, group_id: str, row: SourceRow
+        self, schema: SourceBoardSchema, group_id: str, row: SourceRow, *,
+        include_master: bool = False,
     ) -> int:
         data = self._request(
             """
@@ -481,7 +509,9 @@ class MondayClient:
                 "board": schema.board_id,
                 "group": group_id,
                 "name": row.work_grouping_id,
-                "values": self._source_values(schema, row, include_master=False),
+                "values": self._source_values(
+                    schema, row, include_master=include_master
+                ),
             },
         )
         item = data.get("create_item") or {}
@@ -600,6 +630,266 @@ class MondayClient:
         if str(changed.get("id")) != str(change.item_id):
             raise MondayError(f"Monday did not confirm status update for {change.item_name}")
 
+    def repair_soundmouse_destination(
+        self, batch: str, items: list[BoardItem]
+    ) -> bool:
+        """Repair only the automation's uniquely identifiable misplaced item.
+
+        The source-board recipe currently creates the SoundMouse-typed parent
+        in Reports.  Monday's public API cannot edit the recipe itself, so move
+        that exact generated item and ensure its fixed five-child shape.  Never
+        invent a missing parent or choose among ambiguous candidates.
+        """
+        expected_children = {
+            "Download Media from UniSync", "Export Metadata",
+            "Export Album Covers", "Upload to SoundMouse",
+            "Process Metadata in SoundMouse",
+        }
+        in_group = [item for item in items if item.group == GROUP_SOUNDMOUSE]
+        candidates = [
+            item for item in items
+            if item.delivery_type == "SoundMouse (SM)"
+        ]
+        changed = False
+        if not in_group:
+            if len(candidates) != 1:
+                return False
+            candidate = candidates[0]
+            data = self._request(
+                """
+                query DestinationGroups($board: [ID!]!) {
+                  boards(ids: $board) { groups { id title } }
+                }
+                """,
+                {"board": [MONDAY_BOARD_ID]},
+            )
+            groups = [
+                group
+                for group in (data.get("boards") or [{}])[0].get("groups", [])
+                if str(group.get("title") or "") == GROUP_SOUNDMOUSE
+            ]
+            if len(groups) != 1:
+                raise MondayError(
+                    f"Expected exactly one Monday group named {GROUP_SOUNDMOUSE!r}"
+                )
+            moved = self._request(
+                """
+                mutation MoveSoundMouse($item: ID!, $group: String!) {
+                  move_item_to_group(item_id: $item, group_id: $group) { id }
+                }
+                """,
+                {"item": candidate.id, "group": str(groups[0]["id"])},
+            )
+            if str((moved.get("move_item_to_group") or {}).get("id")) != str(candidate.id):
+                raise MondayError("Monday did not confirm the SoundMouse group repair")
+            changed = True
+            items = self.fetch_batch(batch)
+            in_group = [item for item in items if item.group == GROUP_SOUNDMOUSE]
+
+        if len(in_group) != 1:
+            return changed
+        parent = in_group[0]
+        if parent.delivery_type != "SoundMouse (SM)":
+            raise MondayError("SoundMouse group item has the wrong delivery type")
+        existing = {child.name for child in parent.subitems}
+        for name in sorted(expected_children - existing):
+            created = self._request(
+                """
+                mutation CreateSoundMouseSubitem(
+                  $parent: ID!, $name: String!, $values: JSON!
+                ) {
+                  create_subitem(
+                    parent_item_id: $parent, item_name: $name,
+                    column_values: $values
+                  ) { id }
+                }
+                """,
+                {
+                    "parent": parent.id,
+                    "name": name,
+                    "values": json.dumps({
+                        SUBITEM_STATUS_COLUMN: {
+                            "index": REQUIRED_SUBITEM_LABELS["Working On It"]
+                        }
+                    }),
+                },
+            )
+            if not (created.get("create_subitem") or {}).get("id"):
+                raise MondayError(f"Monday did not create SoundMouse subitem {name!r}")
+            changed = True
+        return changed
+
+    def remove_rolling_monthly_subitems(
+        self, batch: str, items: list[BoardItem]
+    ) -> int:
+        """Remove monthly-only partners from an automation-created rolling item."""
+        content = _require_single(items, GROUP_CONTENT, batch)
+        monthly_names = {
+            name
+            for name, partner in CONTENT_PARTNERS.items()
+            if partner in MONTHLY_METADATA_PARTNERS
+        }
+        matches = [
+            child for child in content.subitems if child.name in monthly_names
+        ]
+        duplicate_names = sorted({
+            child.name for child in matches
+            if sum(candidate.name == child.name for candidate in matches) > 1
+        })
+        if duplicate_names:
+            raise MondayError(
+                "Rolling Content Updates item has duplicate monthly subitems: "
+                + ", ".join(duplicate_names)
+            )
+        for child in matches:
+            data = self._request(
+                """
+                mutation DeleteMonthlySubitem($item: ID!) {
+                  delete_item(item_id: $item) { id }
+                }
+                """,
+                {"item": child.id},
+            )
+            deleted = data.get("delete_item") or {}
+            if str(deleted.get("id")) != str(child.id):
+                raise MondayError(
+                    f"Monday did not confirm removal of monthly subitem {child.name!r}"
+                )
+        if matches:
+            confirmed = _require_single(
+                self.fetch_batch(batch), GROUP_CONTENT, batch
+            )
+            remaining = sorted(
+                child.name
+                for child in confirmed.subitems
+                if child.name in monthly_names
+            )
+            if remaining:
+                raise MondayError(
+                    "Monday still contains rolling monthly subitems: "
+                    + ", ".join(remaining)
+                )
+        return len(matches)
+
+    def ensure_monthly_batch(self, ctx: ReleaseContext) -> BoardItem:
+        """Create or resume the standalone monthly Content Updates item."""
+        if not ctx.is_monthly_delivery:
+            raise MondayError("Refusing to create a monthly batch for a release context")
+        batch = monday_batch_key(ctx)
+        existing = self.fetch_batch(batch)
+        content = [item for item in existing if item.group == GROUP_CONTENT]
+        if len(content) > 1:
+            raise MondayError(
+                f"Expected at most one monthly Content Updates item for {batch}; "
+                f"found {len(content)}"
+            )
+        if content:
+            item = content[0]
+        else:
+            data = self._request(
+                """
+                query MonthlyGroup($board: [ID!]!) {
+                  boards(ids: $board) { groups { id title } }
+                }
+                """,
+                {"board": [MONDAY_BOARD_ID]},
+            )
+            groups = [
+                group
+                for group in (data.get("boards") or [{}])[0].get("groups", [])
+                if str(group.get("title") or "") == GROUP_CONTENT
+            ]
+            if len(groups) != 1:
+                raise MondayError(
+                    f"Expected exactly one Monday group named {GROUP_CONTENT!r}"
+                )
+            values = json.dumps({
+                "batch": batch,
+                MAIN_STATUS_COLUMN: {"index": REQUIRED_MAIN_LABELS["Prepping Content"]},
+            })
+            created = self._request(
+                """
+                mutation CreateMonthlyItem(
+                  $board: ID!, $group: String!, $name: String!, $values: JSON!
+                ) {
+                  create_item(
+                    board_id: $board, group_id: $group,
+                    item_name: $name, column_values: $values
+                  ) { id }
+                }
+                """,
+                {
+                    "board": MONDAY_BOARD_ID,
+                    "group": str(groups[0]["id"]),
+                    "name": f"{batch} - Monthly Delivery",
+                    "values": values,
+                },
+            )
+            item_id = int((created.get("create_item") or {}).get("id") or 0)
+            if not item_id:
+                raise MondayError("Monday did not confirm monthly item creation")
+            item = BoardItem(
+                item_id,
+                f"{batch} - Monthly Delivery",
+                GROUP_CONTENT,
+                batch,
+                "",
+                "Prepping Content",
+                (),
+            )
+
+        required = {
+            name
+            for name, partner in CONTENT_PARTNERS.items()
+            if partner in MONTHLY_METADATA_PARTNERS
+        }
+        children = {child.name: child for child in item.subitems}
+        duplicate_names = [
+            name for name in required
+            if sum(child.name == name for child in item.subitems) > 1
+        ]
+        if duplicate_names:
+            raise MondayError(
+                "Monthly item has duplicate subitems: " + ", ".join(duplicate_names)
+            )
+        for name in sorted(required - set(children)):
+            created = self._request(
+                """
+                mutation CreateMonthlySubitem(
+                  $parent: ID!, $name: String!, $values: JSON!
+                ) {
+                  create_subitem(
+                    parent_item_id: $parent,
+                    item_name: $name,
+                    column_values: $values
+                  ) { id }
+                }
+                """,
+                {
+                    "parent": item.id,
+                    "name": name,
+                    "values": json.dumps({
+                        SUBITEM_STATUS_COLUMN: {
+                            "index": REQUIRED_SUBITEM_LABELS["Working On It"]
+                        }
+                    }),
+                },
+            )
+            if not (created.get("create_subitem") or {}).get("id"):
+                raise MondayError(f"Monday did not confirm monthly subitem {name!r}")
+
+        confirmed = [
+            candidate
+            for candidate in self.fetch_batch(batch)
+            if candidate.group == GROUP_CONTENT
+        ]
+        if len(confirmed) != 1:
+            raise MondayError("Monday did not confirm the monthly Content Updates item")
+        confirmed_names = {child.name for child in confirmed[0].subitems}
+        if not required.issubset(confirmed_names):
+            raise MondayError("Monday did not confirm every monthly delivery subitem")
+        return confirmed[0]
+
 
 def monday_batch_key(ctx: ReleaseContext, override: str | None = None) -> str:
     """Return the exact destination-board batch key for this workflow run.
@@ -615,6 +905,8 @@ def monday_batch_key(ctx: ReleaseContext, override: str | None = None) -> str:
                 "--monday-batch must be YYYYMM (legacy) or UPMYYYYMMDD"
             )
         return override
+    if ctx.is_monthly_delivery:
+        return ctx.monthly_monday_batch
     if re.fullmatch(r"UPM\d{8}", ctx.release_id):
         return ctx.release_id
     match = re.search(
@@ -715,11 +1007,29 @@ def _desired_package_status(
 ) -> str | None:
     state_key = PARTNER_STATE_KEYS.get(partner)
     state = partner_status(ctx.specials_dir, state_key) if state_key else "pending"
-    if state == "delivered":
+    if state in {"uploaded", "delivered"}:
         return "Complete"
+    if partner in MONTHLY_METADATA_PARTNERS:
+        if ctx.is_monthly_delivery:
+            if gate == "failed":
+                return "Stuck"
+            if gate == "ready":
+                return "Clear to Send"
+            return "Working On It"
+        if not getattr(ctx, "monthly_metadata_due", True):
+            return MONTHLY_PENDING_STATUS
+        if (
+            hasattr(ctx, "monthly_metadata_delivery_date")
+            and not monthly_metadata_delivery_ready(ctx)
+        ):
+            if gate == "failed":
+                return "Stuck"
+            if gate == "ready":
+                return MONTHLY_PENDING_STATUS
+            return "Working On It"
     if gate == "failed":
         return "Stuck"
-    if state == "uploaded" or gate == "ready":
+    if gate == "ready":
         return "Clear to Send"
     return None
 
@@ -728,8 +1038,14 @@ def _change_if_allowed(
     changes: list[StatusChange],
     item: BoardSubitem,
     desired: str | None,
+    *,
+    reopen_monthly_not_needed: bool = False,
 ) -> None:
-    if not desired or item.status == desired or item.status in SUBITEM_FINAL_STATUSES:
+    if not desired or item.status == desired:
+        return
+    if item.status in SUBITEM_FINAL_STATUSES and not (
+        reopen_monthly_not_needed and item.status == "Not Needed"
+    ):
         return
     changes.append(StatusChange(
         item_id=item.id,
@@ -780,16 +1096,35 @@ def _require_single(items: list[BoardItem], group: str, batch: str) -> BoardItem
 
 def _content_changes(ctx: ReleaseContext, item: BoardItem, results: Any) -> list[StatusChange]:
     children = {child.name: child for child in item.subitems}
-    missing = sorted(set(CONTENT_PARTNERS) - set(children))
+    managed_partners = {
+        name: partner
+        for name, partner in CONTENT_PARTNERS.items()
+        if (
+            partner in MONTHLY_METADATA_PARTNERS
+            if ctx.is_monthly_delivery
+            else partner not in MONTHLY_METADATA_PARTNERS
+        )
+    }
+    missing = sorted(set(managed_partners) - set(children))
     if missing:
         raise MondayError("Content Updates item is missing subitems: " + ", ".join(missing))
     changes: list[StatusChange] = []
-    for name, partner in CONTENT_PARTNERS.items():
+    if not ctx.is_monthly_delivery:
+        for name in RETIRED_CONTENT_SUBITEMS:
+            retired = children.get(name)
+            if retired is not None:
+                _change_if_allowed(changes, retired, "Not Needed")
+    for name, partner in managed_partners.items():
         gate = _gate_state(results, CONTENT_GATES.get(partner, DEFAULT_CONTENT_GATE))
+        desired = _desired_package_status(ctx, partner, gate)
         _change_if_allowed(
             changes,
             children[name],
-            _desired_package_status(ctx, partner, gate),
+            desired,
+            reopen_monthly_not_needed=(
+                partner in MONTHLY_METADATA_PARTNERS
+                and desired == MONTHLY_PENDING_STATUS
+            ),
         )
     return changes
 
@@ -861,6 +1196,21 @@ def build_status_plan(
     batch_override: str | None = None,
 ) -> list[StatusChange]:
     month = monday_batch_key(ctx, batch_override)
+    if ctx.is_monthly_delivery:
+        content = _require_single(items_by_batch.get(month, []), GROUP_CONTENT, month)
+        item_changes = _content_changes(ctx, content, results)
+        changes = list(item_changes)
+        desired_main = _main_status(content, item_changes)
+        if desired_main and desired_main != content.status:
+            changes.append(StatusChange(
+                item_id=content.id,
+                item_name=content.name,
+                board_id=MONDAY_BOARD_ID,
+                old_status=content.status,
+                new_status=desired_main,
+                is_subitem=False,
+            ))
+        return changes
     sm_batch = soundmouse_batch(ctx, month)
     monthly_items = items_by_batch.get(month, [])
     soundmouse_items = items_by_batch.get(sm_batch, [])
@@ -983,7 +1333,11 @@ def _required_destination_shape(items: list[BoardItem], batch: str) -> None:
     hd = _require_single(items, GROUP_HD, batch)
     soundmouse = _require_single(items, GROUP_SOUNDMOUSE, batch)
     required = {
-        content.id: set(CONTENT_PARTNERS),
+        content.id: {
+            name
+            for name, partner in CONTENT_PARTNERS.items()
+            if partner not in MONTHLY_METADATA_PARTNERS
+        },
         hd.id: {"MP3", "WAV"},
         soundmouse.id: {
             "Download Media from UniSync", "Export Metadata", "Export Album Covers",
@@ -1071,10 +1425,12 @@ def run_monday_source_preflight(
                 "Monday source batch contains unexpected rows: " + ", ".join(unexpected)
             )
         triggered = any(item.row.batch_master for item in existing_items)
-        if triggered and set(existing) != set(expected):
-            raise MondayError(
-                "Monday source batch was already triggered but is incomplete; "
-                "refusing to trigger a second automation run"
+        missing_source_ids = set(expected) - set(existing)
+        if triggered and missing_source_ids:
+            logger.warning(
+                "  ↻ Monday source batch was triggered before the refreshed "
+                f"Domo export was complete; backfilling {len(missing_source_ids)} "
+                "non-master row(s) without retriggering the automation."
             )
 
         if not existing:
@@ -1089,8 +1445,15 @@ def run_monday_source_preflight(
                     "Existing Monday source rows do not belong to one source group"
                 )
             group_id = next(iter(group_ids))
+        master = next(row for row in expected_rows if row.batch_master)
+        # Monday's active recipe is creation-triggered: the one Batch Master
+        # item must be created last with its trigger status already present.
+        # Setting that status in a follow-up mutation does not run the recipe.
+        ordered_rows = tuple(
+            row for row in expected_rows if row.work_grouping_id != master.work_grouping_id
+        ) + (master,)
         item_ids: dict[str, int] = {}
-        for row in expected_rows:
+        for row in ordered_rows:
             current = existing.get(row.work_grouping_id)
             if current:
                 item_id, actual = current.item_id, current.row
@@ -1099,18 +1462,26 @@ def run_monday_source_preflight(
                         schema, item_id, row, include_master=False
                     )
             else:
-                item_id = gateway.create_source_item(schema, group_id, row)
+                item_id = gateway.create_source_item(
+                    schema,
+                    group_id,
+                    row,
+                    include_master=(
+                        not triggered
+                        and row.work_grouping_id == master.work_grouping_id
+                    ),
+                )
             item_ids[row.work_grouping_id] = item_id
 
-        master = next(row for row in expected_rows if row.batch_master)
         if not triggered:
-            gateway.set_source_item_values(
-                schema, item_ids[master.work_grouping_id], master,
-                include_master=True,
-            )
             logger.info(
                 f"  ✓ Loaded {len(expected_rows)} source row(s); Batch Master "
-                "was written last."
+                "was created last with the trigger value."
+            )
+        elif missing_source_ids:
+            logger.info(
+                f"  ✓ Backfilled {len(missing_source_ids)} source row(s); "
+                "the existing Batch Master was left unchanged."
             )
         else:
             logger.info("  ✓ Monday source batch was already loaded and triggered.")
@@ -1118,6 +1489,20 @@ def run_monday_source_preflight(
         deadline = time.monotonic() + timeout_seconds
         while True:
             destination = gateway.fetch_batch(batch)
+            if gateway.repair_soundmouse_destination(batch, destination):
+                logger.info(
+                    "  ✓ Repaired the automation-created SoundMouse item "
+                    "through the Monday API."
+                )
+                destination = gateway.fetch_batch(batch)
+            removed = gateway.remove_rolling_monthly_subitems(batch, destination)
+            if removed:
+                logger.info(
+                    "  ✓ Removed %d monthly-only subitem(s) from the rolling "
+                    "Content Updates item through the Monday API.",
+                    removed,
+                )
+                destination = gateway.fetch_batch(batch)
             try:
                 _required_destination_shape(destination, batch)
                 logger.info(
@@ -1162,7 +1547,11 @@ def run_monday_sync(
         gateway.validate_schema()
         part = monday_release_part(ctx)
         compact_batch = bool(re.fullmatch(r"UPM\d{8}", month))
-        requested_batches = list(dict.fromkeys([month, sm_batch]))
+        requested_batches = (
+            [month]
+            if ctx.is_monthly_delivery
+            else list(dict.fromkeys([month, sm_batch]))
+        )
         if not compact_batch and part == 2:
             requested_batches = [sm_batch]
         items_by_batch = {
@@ -1177,7 +1566,9 @@ def run_monday_sync(
         changes = build_status_plan(
             ctx, effective_results, items_by_batch, batch_override=batch_override
         )
-        if compact_batch:
+        if ctx.is_monthly_delivery:
+            logger.info(f"  Monday monthly batch mapping: Content={month}")
+        elif compact_batch:
             logger.info(
                 "  Monday batch mapping: "
                 f"Content/HD/SoundMouse={month} (compact workflow ID)"
@@ -1222,6 +1613,44 @@ def run_monday_sync(
         return True
     except MondayError as exc:
         logger.error(f"  ✗ Monday synchronization failed closed: {exc}")
+        return False
+
+
+def ensure_monday_monthly_batch(
+    ctx: ReleaseContext,
+    *,
+    dry_run: bool,
+    logger: logging.Logger,
+    gateway: MondayClient | None = None,
+) -> bool:
+    """Ensure the independent monthly Content Updates item exists."""
+    if not ctx.is_monthly_delivery:
+        logger.error("  ✗ Refusing monthly Monday setup for a release context")
+        return False
+    batch = monday_batch_key(ctx)
+    if dry_run:
+        logger.info(
+            "  [DRY RUN] Would ensure monthly Monday batch %s with NTT DATA, "
+            "JMD/TSS, Qwire, and Scripps subitems",
+            batch,
+        )
+        return True
+    try:
+        if gateway is None:
+            from auth_manager import load_monday_keychain_token
+            token = load_monday_keychain_token()
+            if not token:
+                raise MondayError(
+                    "Monday API token is not enrolled. Run: python3 "
+                    "auth_manager.py --enroll-monday-keychain"
+                )
+            gateway = MondayClient(token)
+        gateway.validate_schema()
+        item = gateway.ensure_monthly_batch(ctx)
+        logger.info("  ✓ Monthly Monday batch ready: %s", item.batch)
+        return True
+    except MondayError as exc:
+        logger.error("  ✗ Monthly Monday batch setup failed closed: %s", exc)
         return False
 
 

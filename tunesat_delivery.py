@@ -38,7 +38,7 @@ class PackageFile:
 
 
 class TuneSatGateway(Protocol):
-    def list_files(self) -> dict[str, int]: ...
+    def list_files(self, prefix: str = "") -> dict[str, int]: ...
     def upload(self, local_path: Path, relative: str) -> None: ...
     def file_size(self, relative: str) -> int | None: ...
     def close(self) -> None: ...
@@ -50,6 +50,11 @@ def package_root(ctx: ReleaseContext) -> Path:
         / "3-FINAL PACKAGING"
         / ctx.partner_folder_name("Tunesat")
     )
+
+
+def package_prefix(ctx: ReleaseContext) -> str:
+    """Return the exact package-folder path beneath /AudioFiles."""
+    return package_root(ctx).name.rstrip("/") + "/"
 
 
 def collect_package(root: Path) -> tuple[PackageFile, ...]:
@@ -141,7 +146,7 @@ class ParamikoTuneSatGateway:
     def _remote(self, relative: str) -> str:
         return posixpath.join(REMOTE_ROOT, relative)
 
-    def list_files(self) -> dict[str, int]:
+    def list_files(self, prefix: str = "") -> dict[str, int]:
         found: dict[str, int] = {}
 
         def visit(remote_dir: str, prefix: str = "") -> None:
@@ -155,7 +160,12 @@ class ParamikoTuneSatGateway:
                 else:
                     raise TuneSatDeliveryError(f"Unsupported remote item: {relative}")
 
-        visit(REMOTE_ROOT)
+        clean_prefix = prefix.strip("/")
+        start = self._remote(clean_prefix) if clean_prefix else REMOTE_ROOT
+        try:
+            visit(start, clean_prefix)
+        except FileNotFoundError:
+            return {}
         return found
 
     def upload(self, local_path: Path, relative: str) -> None:
@@ -189,7 +199,11 @@ def _receipt_path(ctx: ReleaseContext) -> Path:
     return ctx.specials_dir / "_WORKFLOW" / "tunesat_delivery_receipt.json"
 
 
-def _write_receipt(ctx: ReleaseContext, files: tuple[PackageFile, ...]) -> Path:
+def _write_receipt(
+    ctx: ReleaseContext,
+    files: tuple[PackageFile, ...],
+    prefix: str,
+) -> Path:
     path = _receipt_path(ctx)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = {
@@ -198,6 +212,7 @@ def _write_receipt(ctx: ReleaseContext, files: tuple[PackageFile, ...]) -> Path:
         "release_id": ctx.release_id,
         "host": TUNESAT_HOST,
         "remote_root": REMOTE_ROOT,
+        "remote_prefix": prefix,
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "files": [{"path": item.relative, "size": item.size} for item in files],
     }
@@ -215,20 +230,21 @@ def deliver_tunesat(
     *,
     gateway: TuneSatGateway | None = None,
 ) -> bool:
-    """Upload Music and Metadata directly beneath /AudioFiles."""
+    """Upload one complete package folder beneath /AudioFiles."""
     owned_gateway = False
     credentials = None
     try:
         files = collect_package(package_root(ctx))
-        expected = {item.relative: item.size for item in files}
+        prefix = package_prefix(ctx)
+        expected = {prefix + item.relative: item.size for item in files}
         logger.info(
             "  TuneSat package: %d file(s), %d byte(s)",
             len(files), sum(item.size for item in files),
         )
         if dry_run:
             logger.info(
-                "  [DRY RUN] Would upload Music/ and Metadata/ beneath %s:%s",
-                TUNESAT_HOST, REMOTE_ROOT,
+                "  [DRY RUN] Would upload package beneath %s:%s/%s",
+                TUNESAT_HOST, REMOTE_ROOT, prefix,
             )
             return True
 
@@ -246,7 +262,7 @@ def deliver_tunesat(
             gateway = ParamikoTuneSatGateway(*credentials)
             owned_gateway = True
 
-        remote = gateway.list_files()
+        remote = gateway.list_files(prefix)
         recoverable_parts = {key + ".part" for key in expected}
         unexpected = sorted(set(remote) - set(expected) - recoverable_parts)
         if unexpected:
@@ -255,20 +271,26 @@ def deliver_tunesat(
                 + ", ".join(unexpected[:10])
             )
         for item in files:
-            if remote.get(item.relative) == item.size:
-                logger.info("  ↩ Already verified: %s", item.relative)
+            remote_path = prefix + item.relative
+            if remote.get(remote_path) == item.size:
+                logger.info("  ↩ Already verified: %s", remote_path)
                 continue
-            logger.info("  Uploading: %s", item.relative)
-            gateway.upload(item.path, item.relative)
-            if gateway.file_size(item.relative) != item.size:
+            logger.info("  Uploading: %s", remote_path)
+            gateway.upload(item.path, remote_path)
+            if gateway.file_size(remote_path) != item.size:
                 raise TuneSatDeliveryError(
-                    f"Remote size verification failed for {item.relative}"
+                    f"Remote size verification failed for {remote_path}"
                 )
-        if gateway.list_files() != expected:
+        final = {
+            key: size
+            for key, size in gateway.list_files(prefix).items()
+            if key.startswith(prefix)
+        }
+        if final != expected:
             raise TuneSatDeliveryError("TuneSat remote manifest did not exactly match")
 
-        receipt = _write_receipt(ctx, files)
-        set_partner_status(ctx.specials_dir, "tunesat", "uploaded")
+        receipt = _write_receipt(ctx, files, prefix)
+        set_partner_status(ctx.specials_dir, "tunesat", "delivered")
         logger.info("  ✓ TuneSat package uploaded and verified: %s", receipt)
         return True
     except Exception as exc:

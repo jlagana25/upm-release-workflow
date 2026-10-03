@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from config import (
@@ -48,6 +48,8 @@ from config import (
 def verify_prerequisites(
     ctx: ReleaseContext,
     logger: logging.Logger,
+    *,
+    skip_auto_mount: bool = False,
 ) -> bool:
     """
     Confirm required volumes are mounted and all three baseline folders exist.
@@ -57,6 +59,10 @@ def verify_prerequisites(
     ok = True
 
     # Volumes
+    from volume_mounts import ensure_workflow_volumes
+
+    if not ensure_workflow_volumes(logger, skip_auto_mount=skip_auto_mount):
+        ok = False
     for key, vol in VOLUMES.items():
         if vol.exists():
             logger.info(f"  ✓  Volume {key}: {vol}")
@@ -168,10 +174,26 @@ def _has_unresolved_placeholder_names(dst: Path) -> bool:
     return any(PLACEHOLDER in path.name for path in dst.rglob("*"))
 
 
+def _is_monthly_metadata_partner_template(name: str) -> bool:
+    """Identify the four baseline trees omitted from non-monthly runs."""
+    normalized = name.casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "japan ntt data",
+            "jmd and tss",
+            " - qwire",
+            " - scripps",
+        )
+    )
+
+
 def _merge_baseline_additive(
     src: Path,
     dst: Path,
     logger: logging.Logger,
+    *,
+    exclude_monthly_metadata: bool = False,
 ) -> int:
     """
     Copy every file from `src` into `dst` that does NOT already exist there,
@@ -185,7 +207,12 @@ def _merge_baseline_additive(
         # baseline. Mutating `directories` is the documented os.walk pruning
         # mechanism and also protects additive/skeleton-resume copies.
         directories[:] = [
-            name for name in directories if not is_retired_partner_name(name)
+            name for name in directories
+            if not is_retired_partner_name(name)
+            and not (
+                exclude_monthly_metadata
+                and _is_monthly_metadata_partner_template(name)
+            )
         ]
         rel = os.path.relpath(root, str(src))
         target_dir = dst if rel == "." else dst / rel
@@ -201,8 +228,6 @@ def _merge_baseline_additive(
     return copied
 
 
-# ---------------------------------------------------------------------------
-
 def _safe_copytree(
     src: Path,
     dst: Path,
@@ -210,6 +235,8 @@ def _safe_copytree(
     overwrite: bool,
     label: str,
     logger: logging.Logger,
+    *,
+    exclude_monthly_metadata: bool = False,
 ) -> bool:
     """
     Copy src → dst, respecting dry_run and overwrite flags.
@@ -271,7 +298,12 @@ def _safe_copytree(
             f"    → {dst}"
         )
         try:
-            n = _merge_baseline_additive(src, dst, logger)
+            n = _merge_baseline_additive(
+                src,
+                dst,
+                logger,
+                exclude_monthly_metadata=exclude_monthly_metadata,
+            )
         except Exception as exc:
             logger.error(
                 f"  ✗ Merge failed [{label}]: {type(exc).__name__}: {exc}"
@@ -291,6 +323,10 @@ def _safe_copytree(
                     for name in names
                     if name.lower().endswith((".bat", ".exe"))
                     or is_retired_partner_name(name)
+                    or (
+                        exclude_monthly_metadata
+                        and _is_monthly_metadata_partner_template(name)
+                    )
                 }
 
             shutil.copytree(src, dst, ignore=_ignore)
@@ -550,15 +586,20 @@ def _normalize_delivery_folder_names(
         f"UPM Japan NTT DATA {old}": ctx.partner_folder_name("Japan NTT DATA"),
         f"UPM Japan JMD and TSS {old}": ctx.partner_folder_name("Japan JMD and TSS"),
     }
+    monthly_names = {
+        f"Universal Production Music {old} - Qwire": ctx.partner_folder_name("Qwire"),
+        f"Universal Production Music {old} - Scripps": ctx.partner_folder_name("Scripps"),
+    }
+    special_names = japan_names | monthly_names
     matches = [] if old == new else [
         p for p in root.rglob("*")
-        if old in p.name and p.name not in japan_names
+        if old in p.name and p.name not in special_names
     ]
-    japan_matches = [p for p in root.rglob("*") if p.name in japan_names]
+    special_matches = [p for p in root.rglob("*") if p.name in special_names]
     if dry_run:
         logger.info(
             f"  [DRY RUN] Would normalize "
-            f"{len(matches) + len(japan_matches)} delivery path name(s)"
+            f"{len(matches) + len(special_matches)} delivery path name(s)"
         )
         return
     for path in sorted(matches, key=lambda p: len(p.parts), reverse=True):
@@ -570,11 +611,43 @@ def _normalize_delivery_folder_names(
 
     # Japan templates historically used a different prefix. All client
     # deliveries now begin with the same full Universal Production Music name.
-    for path in sorted(japan_matches, key=lambda p: len(p.parts), reverse=True):
-        target = path.with_name(japan_names[path.name])
+    for path in sorted(special_matches, key=lambda p: len(p.parts), reverse=True):
+        target = path.with_name(special_names[path.name])
         if target.exists():
             raise FileExistsError(f"delivery naming target already exists: {target}")
         path.rename(target)
+
+    if ctx.monthly_metadata_due:
+        # Placeholder replacement initially uses the rolling-range label for
+        # the whole baseline. Correct filenames inside the four monthly trees
+        # after their folders have been moved to the calendar-month name.
+        for partner in (
+            "Japan NTT DATA",
+            "Japan JMD and TSS",
+            "Qwire",
+            "Scripps",
+        ):
+            partner_root = (
+                root / "3-FINAL PACKAGING" / ctx.partner_folder_name(partner)
+            )
+            if not partner_root.is_dir():
+                continue
+            for path in sorted(
+                partner_root.rglob("*"), key=lambda item: len(item.parts), reverse=True
+            ):
+                if ctx.delivery_display_folder not in path.name:
+                    continue
+                target = path.with_name(
+                    path.name.replace(
+                        ctx.delivery_display_folder,
+                        ctx.monthly_partner_display(partner),
+                    )
+                )
+                if target.exists():
+                    raise FileExistsError(
+                        f"monthly metadata naming target already exists: {target}"
+                    )
+                path.rename(target)
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +673,7 @@ def create_specials_folder(
     ok = _safe_copytree(
         BASELINE_SPECIALS, ctx.specials_dir, dry_run, overwrite,
         "Specials", logger,
+        exclude_monthly_metadata=not ctx.monthly_metadata_due,
     )
     if not ok:
         return False
@@ -612,6 +686,40 @@ def create_specials_folder(
     if not dry_run:
         logger.info(f"  ✓  Specials folder ready: {ctx.specials_dir}")
 
+    return True
+
+
+def create_monthly_delivery_folder(
+    ctx: ReleaseContext,
+    dry_run: bool,
+    logger: logging.Logger,
+) -> bool:
+    """Create the minimal restartable tree for a standalone monthly run."""
+    if not ctx.is_monthly_delivery:
+        logger.error("  ✗ Refusing monthly folder setup for a non-monthly context")
+        return False
+
+    directories = {
+        ctx.specials_dir / "1-ORIGINAL" / "Music" / "Japan" / "MEDIA",
+        ctx.partner_dirs["japan_final_media"],
+        ctx.japan_metadata_csv.parent,
+        ctx.partner_metadata["japan_jmdtss"].parent,
+        ctx.partner_metadata["qwire"].parent,
+        ctx.partner_metadata["scripps"].parent,
+        ctx.specials_dir / "_WORKFLOW",
+    }
+    logger.info("  Monthly root: %s", ctx.specials_dir)
+    if dry_run:
+        for path in sorted(directories):
+            logger.info("  [DRY RUN] Would ensure directory: %s", path)
+        return True
+    try:
+        for path in sorted(directories):
+            path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error("  ✗ Could not create monthly delivery tree: %s", exc)
+        return False
+    logger.info("  ✓ Monthly delivery tree ready: %s", ctx.specials_dir)
     return True
 
 
@@ -754,7 +862,9 @@ def _run_test(args) -> None:
     )
 
     # Preflight
-    if not verify_prerequisites(ctx, logger):
+    if not verify_prerequisites(
+        ctx, logger, skip_auto_mount=getattr(args, "no_auto_mount", False)
+    ):
         sys.exit(1)
 
     step = args.step.lower()
@@ -791,6 +901,8 @@ if __name__ == "__main__":
     p.add_argument("--overwrite", action="store_true",
                    help="If destination exists, archive it (rename with "
                         "timestamp suffix, non-destructive) before copying.")
+    p.add_argument("--no-auto-mount", action="store_true",
+                   help="Respect intentionally unmounted workflow volumes.")
     p.add_argument("--debug",    action="store_true",
                    help="Show DEBUG-level logs (individual file operations).")
 

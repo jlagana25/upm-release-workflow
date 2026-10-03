@@ -126,7 +126,12 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
         # Partner delivery root = the folder that holds Music/Covers/etc.
         return media_dir.parent
 
-    return [
+    if ctx.is_monthly_delivery:
+        return [
+            Check("NTT Data", ctx.japan_metadata_csv, pd["japan_final_media"]),
+        ]
+
+    checks = [
         # ---- Partners with their own metadata sheet ----
         # Netmix covers must sit in each album folder (built from WAV w COVERS).
         Check("Netmix",    pm["netmix"],    pd["netmix_music"],
@@ -137,7 +142,6 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
               check_covers=True, cover_source=us, cover_root=root_of(pd["synchtank_wav"]),
               cover_mode="tree"),
         Check("Tunesat",   ctx.cleanup_metadata_csv, pd["tunesat_mp3"]),
-        Check("NTT Data",  ctx.japan_metadata_csv,   pd["japan_final_media"]),
         Check(
             "SourceAudio", pm["sourceaudio"], pd["sourceaudio_music"],
             additional_media_dirs=sourceaudio_extra,
@@ -160,6 +164,14 @@ def _build_checks(ctx: ReleaseContext) -> list[Check]:
               check_covers=True, cover_source=exus, cover_root=pd["exus_staging_media"],
               cover_mode="album"),
     ]
+    if ctx.monthly_metadata_due:
+        # Keep NTT alongside the partners with their own source metadata while
+        # omitting it entirely from off-cycle rolling packages.
+        checks.insert(
+            3,
+            Check("NTT Data", ctx.japan_metadata_csv, pd["japan_final_media"]),
+        )
+    return checks
 
 
 # ---------------------------------------------------------------------------

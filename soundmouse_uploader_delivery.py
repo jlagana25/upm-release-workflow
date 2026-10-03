@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sqlite3
 import subprocess
 import time
@@ -35,7 +36,13 @@ QUEUE_DB = Path.home() / (
     "com.soundmouse.uploader/data.sqlite"
 )
 COMPLETED_STATUS = 3
-ACTIVE_STATUSES = frozenset({0, 1, 2})
+UPLOADED_STATUS = 2
+# The native app displays both 2 and 3 as Complete and excludes both from its
+# Pending and Failed views.  These statuses prove only that the package bytes
+# reached SoundMouse.  The partner remains ``uploaded`` until the metadata
+# workbooks are processed in the SoundMouse website.
+SUCCESS_STATUSES = frozenset({UPLOADED_STATUS, COMPLETED_STATUS})
+ACTIVE_STATUSES = frozenset({0, 1})
 IGNORED_NAMES = frozenset({".DS_Store", "delivery.complete"})
 
 
@@ -74,21 +81,42 @@ def collect_package(
         delivery_root = root / top_level
         if not delivery_root.is_dir():
             continue
-        for path in sorted(delivery_root.rglob("*")):
-            if path.is_symlink():
+        pending = [delivery_root]
+        while pending:
+            current = pending.pop()
+            try:
+                with os.scandir(current) as scan:
+                    entries = sorted(scan, key=lambda entry: entry.name)
+            except OSError as exc:
                 raise SoundMouseUploaderError(
-                    f"SoundMouse package contains a symlink: {path}"
+                    f"Could not enumerate SoundMouse package directory {current}: {exc}"
+                ) from exc
+            directories: list[Path] = []
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink():
+                    raise SoundMouseUploaderError(
+                        f"SoundMouse package contains a symlink: {path}"
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    directories.append(path)
+                    continue
+                if not entry.is_file(follow_symlinks=False) or path.name in IGNORED_NAMES:
+                    continue
+                size = entry.stat(follow_symlinks=False).st_size
+                if size <= 0:
+                    raise SoundMouseUploaderError(
+                        f"SoundMouse package contains an empty file: {path}"
+                    )
+                absolute_path = Path(os.path.abspath(path))
+                files.append(
+                    PackageFile(
+                        absolute_path,
+                        absolute_path.relative_to(root).as_posix(),
+                        size,
+                    )
                 )
-            if not path.is_file() or path.name in IGNORED_NAMES:
-                continue
-            size = path.stat().st_size
-            if size <= 0:
-                raise SoundMouseUploaderError(
-                    f"SoundMouse package contains an empty file: {path}"
-                )
-            files.append(
-                PackageFile(path.resolve(), path.relative_to(root).as_posix(), size)
-            )
+            pending.extend(reversed(directories))
     if not files:
         raise SoundMouseUploaderError(f"SoundMouse package contains no files: {root}")
     top_levels = {Path(item.relative).parts[0] for item in files}
@@ -154,7 +182,7 @@ def _url_path(value: str) -> Path:
     parsed = urlparse(value)
     if parsed.scheme != "file":
         raise SoundMouseUploaderError("Uploader queue contains a non-file source URL")
-    return Path(unquote(parsed.path)).resolve()
+    return Path(os.path.abspath(unquote(parsed.path)))
 
 
 def validate_queue_rows(
@@ -177,6 +205,17 @@ def validate_queue_rows(
     workspace_ids = {row.workspace_id for row in rows}
     if len(workspace_ids) != 1 or not next(iter(workspace_ids), ""):
         raise SoundMouseUploaderError("Uploader queue did not resolve one workspace ID")
+
+
+def queue_rows_successful(rows: tuple[QueueRow, ...]) -> bool:
+    """Return true once every row is uploaded/complete.
+
+    Soundmouse Uploader retains the prior ``failure_reason`` after Retry All
+    succeeds.  The row's terminal status is authoritative: statuses 2 and 3
+    are visibly Uploaded/Complete, while a real current failure remains in a
+    non-success status.
+    """
+    return bool(rows) and all(row.status in SUCCESS_STATUSES for row in rows)
 
 
 def _ui_script(package: Path) -> str:
@@ -343,6 +382,30 @@ def deliver_soundmouse_uploader(
         while not QUEUE_DB.is_file() and time.monotonic() < deadline:
             time.sleep(0.5)
         before_id, existing = queue_snapshot()
+
+        # A prior supervised attempt may have finished in the native app before
+        # this runner wrote its receipt.  Recover only when the newest exact-size
+        # queue slice matches every local URL and every row is already in one of
+        # the app's successful terminal states.  This never queues a duplicate.
+        prior_rows = tuple(existing[-len(files):])
+        if len(prior_rows) == len(files) and queue_rows_successful(prior_rows):
+            try:
+                validate_queue_rows(files, prior_rows)
+            except SoundMouseUploaderError:
+                pass
+            else:
+                receipt = _write_receipt(
+                    ctx, files, prior_rows, correction=correction
+                )
+                if not correction:
+                    set_partner_status(ctx.specials_dir, "soundmouse", "uploaded")
+                logger.info(
+                    "  ✓ Recovered completed SoundMouse %s without requeueing: %s",
+                    "correction" if correction else "package",
+                    receipt,
+                )
+                return True
+
         active = [row for row in existing if row.status in ACTIVE_STATUSES]
         if active:
             raise SoundMouseUploaderError(
@@ -360,16 +423,19 @@ def deliver_soundmouse_uploader(
                 raise SoundMouseUploaderError("Uploader queued more files than the package contains")
             if len(new_rows) == len(files):
                 validate_queue_rows(files, new_rows)
-                failed = [row for row in new_rows if row.failure_reason or row.status not in ACTIVE_STATUSES | {COMPLETED_STATUS}]
+                failed = [
+                    row for row in new_rows
+                    if row.status not in ACTIVE_STATUSES | SUCCESS_STATUSES
+                ]
                 if failed:
                     raise SoundMouseUploaderError(
                         f"Uploader reported {len(failed)} failed file(s)"
                     )
-                if all(row.status == COMPLETED_STATUS for row in new_rows):
+                if queue_rows_successful(new_rows):
                     break
             now = time.monotonic()
             if now - last_report >= 60:
-                complete = sum(row.status == COMPLETED_STATUS for row in new_rows)
+                complete = sum(row.status in SUCCESS_STATUSES for row in new_rows)
                 logger.info("  Uploader progress: %d/%d completed", complete, len(files))
                 last_report = now
             time.sleep(5)
@@ -380,7 +446,7 @@ def deliver_soundmouse_uploader(
             ctx, files, new_rows, correction=correction
         )
         if not correction:
-            set_partner_status(ctx.specials_dir, "soundmouse", "delivered")
+            set_partner_status(ctx.specials_dir, "soundmouse", "uploaded")
         logger.info(
             "  ✓ SoundMouse %s uploaded to UPPM/Music: %s",
             "correction" if correction else "package",

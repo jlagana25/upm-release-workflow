@@ -575,6 +575,9 @@ def _verify_exus(
 def _verify_japan(
     ctx: ReleaseContext, logger: logging.Logger
 ) -> list[dict[str, str]]:
+    if not ctx.monthly_metadata_due:
+        logger.info("  → Japan Metadata: monthly NTT DATA delivery not due — skipped")
+        return []
     csv_label = "Japan Metadata"
     csv_path = ctx.japan_metadata_csv
     logger.info(f"  → {csv_label}: {csv_path}")

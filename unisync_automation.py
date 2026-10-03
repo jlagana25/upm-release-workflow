@@ -46,6 +46,7 @@ Prerequisites:
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -586,7 +587,12 @@ def _run_single_job(
     import os
 
     ext = ".mp3" if "MP3" in job["name"].upper() else ".wav"
-    expected = _expected_output_filenames(job["csv"], ext, logger)
+    expected = _expected_output_filenames(
+        job["csv"],
+        ext,
+        logger,
+        territory_code=job.get("eligible_territory_code"),
+    )
     total = len(expected)
     if total == 0:
         logger.warning("  Tracklist has no usable rows for this job; nothing to do.")
@@ -627,7 +633,7 @@ def _run_single_job(
 
     def _request_csv(missing_set: set[str], n: int) -> str:
         # Whole list missing → just load the original (no temp copy needed).
-        if missing_set == expected:
+        if missing_set == expected and not job.get("eligible_territory_code"):
             return job["csv"]
         red = _write_reduced_csv(job["csv"], ext, missing_set, n, logger)
         if red:
@@ -764,7 +770,10 @@ def _run_single_job(
                 )
                 if source_refresh(job):
                     refreshed = _expected_output_filenames(
-                        job["csv"], ext, logger
+                        job["csv"],
+                        ext,
+                        logger,
+                        territory_code=job.get("eligible_territory_code"),
                     )
                     if not refreshed:
                         logger.error(
@@ -819,7 +828,12 @@ def _run_single_job(
                 "to the next step",
                 logger,
             ):
-                refreshed = _expected_output_filenames(job["csv"], ext, logger)
+                refreshed = _expected_output_filenames(
+                    job["csv"],
+                    ext,
+                    logger,
+                    territory_code=job.get("eligible_territory_code"),
+                )
                 if refreshed:
                     if len(refreshed) != total:
                         logger.info(
@@ -845,6 +859,13 @@ def _run_single_job(
                 prev_missing_count = len(missing)   # zero-delivery next = no progress
                 force_setup = True                  # clean reload after the pause
                 continue
+
+            if job.get("allow_unresolved"):
+                logger.warning(
+                    f"  ↪ Deferring {len(missing)} unresolved {ext} file(s) "
+                    "until the remaining row-authorized territory passes finish."
+                )
+                return STATUS_OK
 
             report = _write_unisync_missing_report(job, missing, ext, logger)
             logger.error(
@@ -1868,7 +1889,11 @@ def _report_not_found(
 
 
 def _expected_output_filenames(
-    csv_path: str, ext: str, logger: logging.Logger
+    csv_path: str,
+    ext: str,
+    logger: logging.Logger,
+    *,
+    territory_code: str | None = None,
 ) -> set[str]:
     """
     Read the job's CSV and return the set of output leaf filenames it
@@ -1888,17 +1913,31 @@ def _expected_output_filenames(
             reader = _csv.DictReader(f)
             fields = reader.fieldnames or []
             fn_col = None
+            territory_col = None
             for c in fields:
-                if c.strip().lower().replace(" ", "") in ("filename", "file"):
+                normalized = c.strip().lower().replace(" ", "").replace("_", "")
+                if normalized in ("filename", "file"):
                     fn_col = c
-                    break
+                elif normalized in ("territorylist", "territories", "territory"):
+                    territory_col = c
             if not fn_col:
                 logger.warning(
                     f"    No 'Filename' column in {Path(csv_path).name}; "
                     f"cannot track delivery by filename."
                 )
                 return expected
+            if territory_code and not territory_col:
+                logger.warning(
+                    f"    No Territory List column in {Path(csv_path).name}; "
+                    "cannot build a country-specific UniSync request."
+                )
+                return expected
             for row in reader:
+                if territory_code:
+                    raw = str(row.get(territory_col, "") or "").strip().upper()
+                    codes = set(re.findall(r"\b[A-Z]{2}\b", raw))
+                    if raw != "ALL" and territory_code.upper() not in codes:
+                        continue
                 name = (row.get(fn_col) or "").strip()
                 if not name:
                     continue

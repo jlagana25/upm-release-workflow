@@ -30,6 +30,7 @@ from soundmouse import (
     normalize_soundmouse_xlsx_with_excel,
     validate_soundmouse_delivery,
 )
+from unisync_automation import _expected_output_filenames
 
 
 class SoundMouseTests(unittest.TestCase):
@@ -137,47 +138,48 @@ class SoundMouseTests(unittest.TestCase):
         self.assertFalse(pre_october.monthly_metadata_due)
         self.assertFalse(crossing.monthly_metadata_due)
         self.assertTrue(october_monthly.monthly_metadata_due)
-        self.assertEqual(october_monthly.release_id, "UPM-2026-10-MONTHLY")
-        self.assertEqual(october_monthly.specials_root, "UPM-2026-10-MONTHLY")
+        self.assertEqual(october_monthly.release_id, "UPM-2026-09-MONTHLY")
+        self.assertEqual(october_monthly.specials_root, "UPM-2026-09-MONTHLY")
         self.assertEqual(
-            october_monthly.monthly_metadata_display_folder, "October 2026"
+            october_monthly.monthly_metadata_display_folder, "September 2026"
         )
         self.assertEqual(october_monthly.monthly_metadata_start, "2026-09-01")
         self.assertEqual(october_monthly.monthly_metadata_end, "2026-09-30")
         self.assertEqual(
             october_monthly.monthly_metadata_delivery_date, "2026-10-01"
         )
+        self.assertEqual(october_monthly.monthly_monday_batch, "UPM20261001")
         self.assertEqual(
             october_monthly.partner_folder_name("Qwire"),
-            "Universal Production Music October 2026 - Qwire",
+            "Universal Production Music September 2026 - Qwire",
         )
         self.assertEqual(
             october_monthly.partner_folder_name("Scripps"),
-            "Universal Production Music October 2026 - Scripps",
+            "Universal Production Music September 2026 - Scripps",
         )
         self.assertEqual(
             october_monthly.partner_folder_name("Japan NTT DATA"),
-            "Universal Production Music October 2026 - Japan NTT DATA",
+            "Universal Production Music September 2026 - Japan NTT DATA",
         )
         self.assertEqual(
             october_monthly.partner_folder_name("Japan JMD and TSS"),
-            "Universal Production Music October 2026 - Japan JMD and TSS",
+            "Universal Production Music September 2026 - Japan JMD and TSS",
         )
         self.assertEqual(
             october_monthly.japan_metadata_csv.name,
-            "October 2026 NTT Data Metadata.csv",
+            "September 2026 NTT Data Metadata.csv",
         )
         self.assertEqual(
             october_monthly.partner_metadata["qwire"].name,
-            "Qwire Library Submission Template – October 2026.csv",
+            "Qwire Library Submission Template – September 2026.csv",
         )
         self.assertEqual(
             october_monthly.partner_metadata["scripps"].name,
-            "UPM October 2026 Metadata.csv",
+            "UPM September 2026 Metadata.csv",
         )
         self.assertEqual(
             october_monthly.partner_metadata["japan_jmdtss"].name,
-            "October 2026 UPM Japan JMD TSS Metadata.xlsx",
+            "September 2026 UPM Japan JMD TSS Metadata.xlsx",
         )
         self.assertEqual(
             october_monthly.pinned_cli_args(),
@@ -185,7 +187,7 @@ class SoundMouseTests(unittest.TestCase):
         )
         self.assertEqual(january_monthly.release_start, "2026-12-01")
         self.assertEqual(january_monthly.release_end, "2026-12-31")
-        self.assertEqual(january_monthly.release_id, "UPM-2027-01-MONTHLY")
+        self.assertEqual(january_monthly.release_id, "UPM-2026-12-MONTHLY")
         self.assertEqual(
             crossing_year.partner_folder_name("SynchTank"),
             "Universal Production Music Dec 29 2026–Jan 11 2027 Releases - SynchTank",
@@ -230,7 +232,10 @@ class SoundMouseTests(unittest.TestCase):
                 ],
             )
             territories = _soundmouse_unisync_territories(tracklist)
-            self.assertEqual(territories, ["Australia", "United States", "Sweden"])
+            self.assertEqual(
+                territories,
+                ["Australia", "United States", "United Kingdom", "Germany", "Sweden"],
+            )
 
             ctx = ReleaseContext(2026, 6, 1, previous_month=True)
             jobs = _soundmouse_unisync_jobs(
@@ -245,11 +250,34 @@ class SoundMouseTests(unittest.TestCase):
                     "2026-06-01_to_2026-06-30/MEDIA"
                 )
             )
-            self.assertEqual(jobs[0]["fallback_territory"], "United States")
-            self.assertEqual(jobs[1]["fallback_territory"], "Sweden")
+            self.assertEqual(
+                [job["eligible_territory_code"] for job in jobs],
+                ["OZ", "US", "UK", "DE", "SE"],
+            )
+            self.assertTrue(all(job["allow_unresolved"] for job in jobs))
             self.assertTrue(all(job["zero_progress_retries"] == 0 for job in jobs))
             # A derived correction CSV is not replaced by a full-card refresh.
             self.assertNotIn("domo_card_config", jobs[-1])
+
+            logger = logging.getLogger("soundmouse-territory-test")
+            self.assertEqual(
+                _expected_output_filenames(
+                    str(tracklist), ".wav", logger, territory_code="OZ"
+                ),
+                {"all.wav", "oz.wav"},
+            )
+            self.assertEqual(
+                _expected_output_filenames(
+                    str(tracklist), ".wav", logger, territory_code="US"
+                ),
+                {"all.wav", "us.wav"},
+            )
+            self.assertEqual(
+                _expected_output_filenames(
+                    str(tracklist), ".wav", logger, territory_code="SE"
+                ),
+                {"all.wav", "se.wav"},
+            )
 
     def test_soundmouse_rows_are_partitioned_by_us_tracklist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

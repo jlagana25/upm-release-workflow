@@ -519,6 +519,10 @@ def _process_request(request_path: Path, root: Path, logger: logging.Logger) -> 
             raise RuntimeError(
                 f"Agent must run on {SOUNDMINER_HOSTNAME}, not {current_hostname()}"
             )
+        from volume_mounts import ensure_workflow_volumes
+
+        if not ensure_workflow_volumes(logger):
+            raise RuntimeError("required HDF1 workflow volumes could not be recovered")
         command = _build_command(request)
         _status_update(
             status_path, request, "running", "launching Soundminer workflow",

@@ -1,10 +1,11 @@
 """Explicit per-release partner delivery state.
 
-A populated delivery folder does not reveal whether it is still being built,
-has been uploaded into a partner system, or has been officially delivered.
-Refresh behavior therefore uses this small release-local state file instead of
-guessing.  ``uploaded`` is the correction-package boundary for partner systems
-whose ingest maps metadata to media (SourceAudio, Netmix, and SoundMouse).
+A populated delivery folder does not reveal whether it is still being built or
+has been successfully delivered. Refresh behavior therefore uses this small
+release-local state file instead of guessing. Most endpoint-verified uploads are
+recorded as ``delivered``. ``uploaded`` is the active intermediate SoundMouse
+state between native transfer and zero-error website metadata processing, and
+also remains a legacy/correction-package boundary for mapped partner systems.
 """
 
 from __future__ import annotations
@@ -144,6 +145,10 @@ def _main() -> int:
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--full-month-content", action="store_true")
+    parser.add_argument(
+        "--delivery-date",
+        help="first day of the standalone monthly delivery month (YYYY-MM-01)",
+    )
     args = parser.parse_args()
     ctx = context_from_cli_args(args)
     if args.show:
