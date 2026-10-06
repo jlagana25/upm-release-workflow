@@ -138,8 +138,8 @@ class SoundMouseTests(unittest.TestCase):
         self.assertFalse(pre_october.monthly_metadata_due)
         self.assertFalse(crossing.monthly_metadata_due)
         self.assertTrue(october_monthly.monthly_metadata_due)
-        self.assertEqual(october_monthly.release_id, "UPM-2026-09-MONTHLY")
-        self.assertEqual(october_monthly.specials_root, "UPM-2026-09-MONTHLY")
+        self.assertEqual(october_monthly.release_id, "UPM20260926")
+        self.assertEqual(october_monthly.specials_root, "UPM-2026-09-26")
         self.assertEqual(
             october_monthly.monthly_metadata_display_folder, "September 2026"
         )
@@ -148,7 +148,7 @@ class SoundMouseTests(unittest.TestCase):
         self.assertEqual(
             october_monthly.monthly_metadata_delivery_date, "2026-10-01"
         )
-        self.assertEqual(october_monthly.monthly_monday_batch, "UPM20261001")
+        self.assertEqual(october_monthly.monthly_monday_batch, "UPM20260926")
         self.assertEqual(
             october_monthly.partner_folder_name("Qwire"),
             "Universal Production Music September 2026 - Qwire",

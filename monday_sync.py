@@ -1693,30 +1693,30 @@ def run_monday_source_preflight(
 
         deadline = time.monotonic() + timeout_seconds
         while True:
-            destination = gateway.fetch_batch(batch)
-            if gateway.repair_soundmouse_destination(batch, destination):
-                logger.info(
-                    "  ✓ Repaired the automation-created SoundMouse item "
-                    "through the Monday API."
-                )
-                destination = gateway.fetch_batch(batch)
-            include_monthly = rolling_monthly_delivery_date(ctx) is not None
-            removed = gateway.remove_rolling_monthly_subitems(
-                batch, destination, keep_monthly=include_monthly
-            )
-            if removed:
-                logger.info(
-                    "  ✓ Removed %d monthly-only subitem(s) from the rolling "
-                    "Content Updates item through the Monday API.",
-                    removed,
-                )
-                destination = gateway.fetch_batch(batch)
-            if gateway.ensure_rolling_bmat_subitem(batch, destination):
-                logger.info(
-                    "  ✓ Added the BMAT delivery subitem through the Monday API."
-                )
-                destination = gateway.fetch_batch(batch)
             try:
+                destination = gateway.fetch_batch(batch)
+                if gateway.repair_soundmouse_destination(batch, destination):
+                    logger.info(
+                        "  ✓ Repaired the automation-created SoundMouse item "
+                        "through the Monday API."
+                    )
+                    destination = gateway.fetch_batch(batch)
+                include_monthly = rolling_monthly_delivery_date(ctx) is not None
+                removed = gateway.remove_rolling_monthly_subitems(
+                    batch, destination, keep_monthly=include_monthly
+                )
+                if removed:
+                    logger.info(
+                        "  ✓ Removed %d monthly-only subitem(s) from the rolling "
+                        "Content Updates item through the Monday API.",
+                        removed,
+                    )
+                    destination = gateway.fetch_batch(batch)
+                if gateway.ensure_rolling_bmat_subitem(batch, destination):
+                    logger.info(
+                        "  ✓ Added the BMAT delivery subitem through the Monday API."
+                    )
+                    destination = gateway.fetch_batch(batch)
                 _required_destination_shape(
                     destination, batch, include_monthly=include_monthly
                 )
@@ -1916,6 +1916,98 @@ def ensure_monday_monthly_batch(
         return False
 
 
+def adopt_completed_monthly_statuses(
+    ctx: ReleaseContext,
+    source_batch: str,
+    *,
+    dry_run: bool,
+    logger: logging.Logger,
+    gateway: MondayClient | None = None,
+) -> bool:
+    """Copy four completed monthly subitems into their rolling owner.
+
+    The historical item is intentionally retained as audit history. This only
+    updates the rolling batch's subitems and never marks its parent Delivered.
+    """
+    if not ctx.is_monthly_delivery or not ctx.monthly_rolls_into_batch:
+        logger.error("  ✗ Monthly status adoption requires a rolling-owned context")
+        return False
+    target_batch = monday_batch_key(ctx)
+    if source_batch == target_batch:
+        logger.error("  ✗ Monthly source and target batches are identical")
+        return False
+    required = {
+        name
+        for name, partner in CONTENT_PARTNERS.items()
+        if partner in MONTHLY_METADATA_PARTNERS
+    }
+    if dry_run:
+        logger.info(
+            "  [DRY RUN] Would copy four completed monthly statuses from %s to %s",
+            source_batch,
+            target_batch,
+        )
+        return True
+    try:
+        if gateway is None:
+            from auth_manager import load_monday_keychain_token
+            token = load_monday_keychain_token()
+            if not token:
+                raise MondayError("Monday API token is not enrolled")
+            gateway = MondayClient(token)
+        gateway.validate_schema()
+        source = _require_single(gateway.fetch_batch(source_batch), GROUP_CONTENT, source_batch)
+        target = _require_single(gateway.fetch_batch(target_batch), GROUP_CONTENT, target_batch)
+        source_children = {child.name: child for child in source.subitems if child.name in required}
+        target_children = {child.name: child for child in target.subitems if child.name in required}
+        if set(source_children) != required or set(target_children) != required:
+            raise MondayError("Monthly source or rolling target is missing required subitems")
+        incomplete = sorted(
+            name for name, child in source_children.items()
+            if child.status not in SUBITEM_FINAL_STATUSES
+        )
+        if incomplete:
+            raise MondayError(
+                "Historical monthly subitems are not complete: " + ", ".join(incomplete)
+            )
+        for name in sorted(required):
+            child = target_children[name]
+            if child.status not in SUBITEM_FINAL_STATUSES:
+                gateway.set_status(StatusChange(
+                    child.id, child.name, MONDAY_SUBITEM_BOARD_ID,
+                    child.status, "Complete", True,
+                ))
+            if child.next_action != "No Action Needed":
+                gateway.set_next_action(NextActionChange(
+                    child.id, child.name, child.next_action, "No Action Needed"
+                ))
+        confirmed = _require_single(
+            gateway.fetch_batch(target_batch), GROUP_CONTENT, target_batch
+        )
+        confirmed_children = {
+            child.name: child for child in confirmed.subitems if child.name in required
+        }
+        failed = sorted(
+            name for name in required
+            if name not in confirmed_children
+            or confirmed_children[name].status not in SUBITEM_FINAL_STATUSES
+            or confirmed_children[name].next_action != "No Action Needed"
+        )
+        if failed:
+            raise MondayError(
+                "Monday did not confirm adopted monthly statuses: " + ", ".join(failed)
+            )
+        logger.info(
+            "  ✓ Adopted four completed monthly statuses into %s; historical %s retained",
+            target_batch,
+            source_batch,
+        )
+        return True
+    except MondayError as exc:
+        logger.error("  ✗ Monthly status adoption failed closed: %s", exc)
+        return False
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description="Synchronize workflow state to Monday")
     parser.add_argument("--year", type=int)
@@ -1924,17 +2016,41 @@ def _main() -> int:
     parser.add_argument("--previous-month", action="store_true")
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
+    parser.add_argument("--delivery-date")
     parser.add_argument("--full-month-content", action="store_true")
     parser.add_argument(
         "--monday-batch",
         help="Override derived batch (legacy YYYYMM or compact UPMYYYYMMDD)",
+    )
+    parser.add_argument(
+        "--source-preflight",
+        action="store_true",
+        help="Load/repair the exact rolling source batch before status sync",
+    )
+    parser.add_argument(
+        "--adopt-completed-monthly-from",
+        metavar="BATCH",
+        help="copy completed monthly subitems from a historical batch",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     ctx = context_from_cli_args(args)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger = logging.getLogger("monday_sync")
-    # Standalone mode intentionally uses delivery_state only; prep gates remain
+    if args.source_preflight:
+        ok = run_monday_source_preflight(
+            ctx, dry_run=args.dry_run, logger=logger
+        )
+        return 0 if ok else 1
+    if args.adopt_completed_monthly_from:
+        ok = adopt_completed_monthly_statuses(
+            ctx,
+            args.adopt_completed_monthly_from,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if ok else 1
+    # Standalone status mode intentionally uses delivery_state only; prep gates remain
     # unchanged unless a structured orchestrator result is supplied in-process.
     ok = run_monday_sync(
         ctx, {}, dry_run=args.dry_run, logger=logger,

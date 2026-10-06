@@ -99,7 +99,7 @@ class PostPackagingDeliveryTests(unittest.TestCase):
         )
         ctx = context_from_cli_args(args)
         self.assertTrue(ctx.is_monthly_delivery)
-        self.assertEqual(ctx.release_id, "UPM-2026-09-MONTHLY")
+        self.assertEqual(ctx.release_id, "UPM20260926")
 
         logs = self.root / "logs"
         report_dir = logs / "reports" / ctx.release_id

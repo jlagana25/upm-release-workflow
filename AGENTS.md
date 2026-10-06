@@ -82,7 +82,7 @@ The `upm-monthly-metadata-delivery` heartbeat is likewise authorized to run
 day of the delivery month when those same host, login-session, mounted-volume,
 and private-authentication requirements are satisfied. That run owns only NTT
 DATA, JMD/TSS, Qwire, and Scripps, and its content window is exactly the
-previous calendar month. Beginning with the November 1, 2026 run, it opens the
+previous calendar month. Beginning with the October 1, 2026 run, it opens the
 14-day rolling batch containing that first day, builds only those four partner
 packages inside that batch, and leaves every other partner for the normal
 post-cutoff run. It may synchronize that rolling Monday item, but it may not send email, notify a MediaBox,
@@ -248,6 +248,8 @@ helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 `soundmouse_uploader_delivery.py` (standalone native-app SoundMouse upload),
 `soundmouse_web_delivery.py` (UPPM website workbook processing and final receipt),
 `post_packaging_delivery.py` (unified guarded endpoint runner),
+`monthly_release_migration.py` (one-time fail-closed adoption of completed
+standalone monthly artifacts and receipts into their rolling owner),
 `delivery_common.py` (manifest/checkpoint/receipt safety primitives),
 `espn_delivery.py` (Media Shuttle folder delivery),
 `soundexchange_delivery.py` (two-registrant portal submission),
@@ -632,9 +634,9 @@ inline or are submitted to HDF1's login-session agent.
   no-op is `Complete` with `No Action Needed`.
   NTT DATA, JMD/TSS, Qwire, and Scripps are built only by
   `monthly_delivery_workflow.py` on the 1st for the complete previous calendar
-  month. Beginning November 1, 2026, its root and Monday batch are the rolling
-  window containing the delivery date (for example, November 1 belongs to
-  `UPM20261024`, covering October 24–November 6). Source preflight preserves
+  month. Beginning October 1, 2026, its root and Monday batch are the rolling
+  window containing the delivery date (for example, October 1 belongs to
+  `UPM20260926`, covering September 26–October 9). Source preflight preserves
   those four subitems only in the month-owning rolling batch and removes them
   from every other rolling batch. The early phase uses `In Progress` while
   building and `Ready to Deliver` when verified; the later full run resumes the

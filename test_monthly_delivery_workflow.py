@@ -21,10 +21,11 @@ class MonthlyDeliveryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.ctx.monthly_rolling_owner_start, "2026-10-24")
         self.assertEqual(self.ctx.monthly_rolling_owner_end, "2026-11-06")
 
-    def test_october_delivery_remains_historical_standalone(self):
-        historical = ReleaseContext.for_monthly_delivery("2026-10-01")
-        self.assertFalse(historical.monthly_rolls_into_batch)
-        self.assertEqual(historical.release_id, "UPM-2026-09-MONTHLY")
+    def test_october_delivery_uses_sep_26_rolling_batch(self):
+        october = ReleaseContext.for_monthly_delivery("2026-10-01")
+        self.assertTrue(october.monthly_rolls_into_batch)
+        self.assertEqual(october.release_id, "UPM20260926")
+        self.assertEqual(october.monthly_rolling_owner_end, "2026-10-09")
 
     def test_context_refuses_a_non_first_delivery_date(self):
         with self.assertRaisesRegex(ValueError, "scheduled for the 1st"):

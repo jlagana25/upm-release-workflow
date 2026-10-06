@@ -21,6 +21,7 @@ from monday_sync import (
     SourceRow,
     build_status_plan,
     build_next_action_plan,
+    adopt_completed_monthly_statuses,
     load_source_rows,
     monday_batch_key,
     monday_batch_month,
@@ -275,7 +276,7 @@ class MondaySyncTests(unittest.TestCase):
         )
 
         monthly = ReleaseContext.for_monthly_delivery("2026-10-01")
-        self.assertEqual(monday_batch_key(monthly), "UPM20261001")
+        self.assertEqual(monday_batch_key(monthly), "UPM20260926")
         rolled_monthly = ReleaseContext.for_monthly_delivery("2026-11-01")
         self.assertEqual(monday_batch_key(rolled_monthly), "UPM20261024")
 
@@ -470,7 +471,7 @@ class MondaySyncTests(unittest.TestCase):
     @patch("monday_sync.partner_status", return_value="pending")
     def test_monthly_run_uses_working_only_while_building(self, _status):
         ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
-        batch = "UPM20261001"
+        batch = "UPM20260926"
         content = _content(batch=batch)
         monthly_names = {
             "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
@@ -703,6 +704,37 @@ class MondaySyncTests(unittest.TestCase):
         self.assertEqual("2026-09-12", rows[0].release_date)
         self.assertEqual("Batch Master", rows[0].batch_master)
 
+    def test_adopts_completed_monthly_statuses_into_rolling_batch(self):
+        ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        source = _content(batch="UPM20261001", child_status="Complete")
+        target = _content(batch="UPM20260926", child_status="In Progress")
+        gateway = FakeGateway({
+            "UPM20261001": [source],
+            "UPM20260926": [target],
+        })
+        self.assertTrue(adopt_completed_monthly_statuses(
+            ctx,
+            "UPM20261001",
+            dry_run=False,
+            logger=logging.getLogger("monthly-status-adoption"),
+            gateway=gateway,
+        ))
+        monthly = {
+            "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
+            "UPM Japan - NTT DATA",
+            "Scripps (Metadata only)",
+            "QWire (Metadata only)",
+        }
+        self.assertEqual(
+            monthly,
+            {change.item_name for change in gateway.changes},
+        )
+        self.assertTrue(all(
+            change.new_action == "No Action Needed"
+            for change in gateway.next_action_changes
+            if change.item_name in monthly
+        ))
+
     def test_source_preflight_loads_master_last_and_verifies_destination(self):
         ctx = ReleaseContext(
             2026, 9, 1,
@@ -731,6 +763,54 @@ class MondaySyncTests(unittest.TestCase):
         self.assertEqual(1, len(gateway.source_items))
         self.assertEqual("Batch Master", gateway.source_items[0].row.batch_master)
         self.assertEqual(4, len(gateway.removed_monthly))
+
+    def test_source_preflight_retries_destination_reconciliation_delay(self):
+        ctx = ReleaseContext(
+            2026, 9, 1,
+            range_start=date(2026, 9, 26), range_end=date(2026, 10, 9),
+        )
+
+        class DelayedGateway(FakeGateway):
+            attempts = 0
+
+            def remove_rolling_monthly_subitems(
+                self, batch, items, *, keep_monthly=False
+            ):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise MondayError("destination automation is still creating items")
+                return super().remove_rolling_monthly_subitems(
+                    batch, items, keep_monthly=keep_monthly
+                )
+
+        gateway = DelayedGateway({
+            "UPM20260926": [
+                _content(batch="UPM20260926"),
+                _hd(batch="UPM20260926"),
+                _soundmouse(batch="UPM20260926"),
+            ],
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx.monday_audio_batch_csv = Path(tmp) / "batch.csv"
+            ctx.monday_audio_batch_csv.write_text(
+                "WorkGroupingId,Batch,Catalog,Release Date,LabelId,Album Code,"
+                "Album Title,Digital Fulfillment,Batch Master\n"
+                "42,UPM20260926,UPM-US,2026-09-26,7,ABC1,Album,Create NEW,\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "domo_exports.run_domo_exports",
+                return_value={"monday_audio_batch": "ok"},
+            ):
+                self.assertTrue(run_monday_source_preflight(
+                    ctx,
+                    dry_run=False,
+                    logger=logging.getLogger("source-delay"),
+                    gateway=gateway,
+                    timeout_seconds=1,
+                    poll_seconds=0,
+                ))
+        self.assertEqual(2, gateway.attempts)
 
     def test_source_preflight_backfills_after_trigger_without_second_master(self):
         ctx = ReleaseContext(

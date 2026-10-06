@@ -333,10 +333,9 @@ DOCX_TO_PDF_METHODS: list[str] = ["libreoffice", "soffice"]
 # rolling cadence. All later exact-date deliveries remain exactly 14 days.
 _INITIAL_ROLLING_RANGE = (date(2026, 9, 1), date(2026, 9, 11))
 _ROLLING_CADENCE_START = date(2026, 9, 12)
-# October's already-delivered standalone packages remain historical. Beginning
-# November 1, the first-of-month phase is owned by the rolling range containing
-# that date instead of creating another standalone batch/root.
-_ROLLING_MONTHLY_OWNERSHIP_START = date(2026, 11, 1)
+# First-of-month phases are owned by the rolling range containing that date.
+# October's already-completed release is migrated into its Sep 26–Oct 9 owner.
+_ROLLING_MONTHLY_OWNERSHIP_START = date(2026, 10, 1)
 
 
 def rolling_range_for_date(value: date) -> tuple[date, date]:

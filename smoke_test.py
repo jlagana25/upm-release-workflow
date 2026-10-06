@@ -39,6 +39,7 @@ MODULES = [
     "monday_sync", "bmat_delivery", "synchtank_delivery", "tunesat_delivery",
     "soundmouse_uploader_delivery", "netmix_portal_delivery",
     "monthly_delivery_workflow",
+    "monthly_release_migration",
     "upm_release_workflow", "ai_team_demo",
 ]
 

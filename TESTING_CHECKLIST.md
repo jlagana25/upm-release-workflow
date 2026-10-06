@@ -70,7 +70,7 @@ setting up a new machine, work through Part 2 top to bottom.
 | August transition Part 1 refresh (July full-month content) | `python3 upm_release_workflow.py --previous-month` (while run date is August 2026; targets the existing August 2026 Part 1 client folders) |
 | Initial rolling transition | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-11` |
 | Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-12 --end-date 2026-09-25` |
-| First-of-month NTT/JMD-TSS/Qwire/Scripps build | `python3 monthly_delivery_workflow.py --delivery-date 2026-11-01 --dry-run` |
+| First-of-month NTT/JMD-TSS/Qwire/Scripps build | `python3 monthly_delivery_workflow.py --delivery-date 2026-10-01 --dry-run` |
 | Previous month (full month), auto from today | `python3 upm_release_workflow.py --previous-month` |
 | Previous month relative to a given month | `python3 upm_release_workflow.py --previous-month --year 2026 --month 6` |
 | Preview the whole run incl. non-maintrack deletions | add `--dry-run` |
@@ -78,11 +78,11 @@ setting up a new machine, work through Part 2 top to bottom.
 | Resume after a failure, skipping finished steps | add the matching `--skip-*` flags |
 
 NTT DATA, JMD/TSS, Qwire, and Scripps use the first-of-month command:
-`python3 monthly_delivery_workflow.py --delivery-date 2026-11-01 --dry-run`.
-Confirm it uses rolling root `UPM-2026-10-24`, Monday batch `UPM20261024`, and
-content dates October 1–31. It must export only the four monthly cards, run only
+`python3 monthly_delivery_workflow.py --delivery-date 2026-10-01 --dry-run`.
+Confirm it uses rolling root `UPM-2026-09-26`, Monday batch `UPM20260926`, and
+content dates September 1–30. It must export only the four monthly cards, run only
 Japan UniSync, and leave every ordinary rolling partner unbuilt. The later
-October 24–November 6 full run must merge the baseline around these packages,
+September 26–October 9 full run must merge the baseline around these packages,
 clear the early-phase marker, and preserve their exact files and statuses.
 
 ## What runs, and in what order
