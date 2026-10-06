@@ -112,12 +112,14 @@ CONTENT_PARTNERS = {
     "Scripps (Metadata only)": "scripps",
     "QWire (Metadata only)": "qwire",
     "SoundExchange (Metadata only)": "soundexchange",
+    "BMAT": "bmat",
 }
 
 CONTENT_GATES = {
     "sourceaudio": ("11 SourceAudio", "15 Final metadata check"),
     "sourceaudio_exus": ("11 SourceAudio", "15 Final metadata check"),
     "soundexchange": ("10 SoundExchange forms", "15 Final metadata check"),
+    "bmat": ("17 BMAT",),
 }
 DEFAULT_CONTENT_GATE = ("10 Final packaging", "15 Final metadata check")
 HD_GATE = ("9 Verification", "10 Final packaging")
@@ -130,6 +132,7 @@ GATE_RESULT_KEYS = frozenset({
     "16 SoundMouse media",
     "16 SoundMouse metadata",
     "16 SoundMouse covers",
+    "17 BMAT",
 })
 
 SOUNDMOUSE_PROGRESS_GATES = {
@@ -264,6 +267,9 @@ class MondayGateway(Protocol):
     def remove_rolling_monthly_subitems(
         self, batch: str, items: list[BoardItem]
     ) -> int: ...
+    def ensure_rolling_bmat_subitem(
+        self, batch: str, items: list[BoardItem]
+    ) -> bool: ...
 
 
 def _column_text(values: Iterable[Mapping[str, Any]], column_id: str) -> str:
@@ -840,6 +846,42 @@ class MondayClient:
                 )
         return len(matches)
 
+    def ensure_rolling_bmat_subitem(
+        self, batch: str, items: list[BoardItem]
+    ) -> bool:
+        """Add BMAT to a rolling Content item when the source recipe omits it."""
+        content = _require_single(items, GROUP_CONTENT, batch)
+        matches = [child for child in content.subitems if child.name == "BMAT"]
+        if len(matches) > 1:
+            raise MondayError("Rolling Content Updates item has duplicate BMAT subitems")
+        if matches:
+            return False
+        created = self._request(
+            """
+            mutation CreateBmatSubitem($parent: ID!, $values: JSON!) {
+              create_subitem(
+                parent_item_id: $parent,
+                item_name: "BMAT",
+                column_values: $values
+              ) { id }
+            }
+            """,
+            {
+                "parent": content.id,
+                "values": json.dumps({
+                    SUBITEM_STATUS_COLUMN: {
+                        "index": REQUIRED_SUBITEM_LABELS["In Progress"]
+                    },
+                    SUBITEM_NEXT_ACTION_COLUMN: {
+                        "index": REQUIRED_NEXT_ACTION_LABELS["Automation Running"]
+                    },
+                }),
+            },
+        )
+        if not (created.get("create_subitem") or {}).get("id"):
+            raise MondayError("Monday did not confirm BMAT subitem creation")
+        return True
+
     def ensure_monthly_batch(self, ctx: ReleaseContext) -> BoardItem:
         """Create or resume the standalone monthly Content Updates item."""
         if not ctx.is_monthly_delivery:
@@ -1074,6 +1116,14 @@ def _desired_package_status(
     partner: str,
     gate: str,
 ) -> str | None:
+    if partner == "bmat":
+        if gate == "failed":
+            return "Blocked"
+        if gate == "ready":
+            # Step 17 owns BMAT packaging and SFTP submission end to end;
+            # completed includes the valid no-new-releases no-op.
+            return "Complete"
+        return "In Progress"
     state_key = PARTNER_STATE_KEYS.get(partner)
     state = partner_status(ctx.specials_dir, state_key) if state_key else "pending"
     if state in {"uploaded", "delivered"}:
@@ -1638,6 +1688,11 @@ def run_monday_source_preflight(
                     "  ✓ Removed %d monthly-only subitem(s) from the rolling "
                     "Content Updates item through the Monday API.",
                     removed,
+                )
+                destination = gateway.fetch_batch(batch)
+            if gateway.ensure_rolling_bmat_subitem(batch, destination):
+                logger.info(
+                    "  ✓ Added the BMAT delivery subitem through the Monday API."
                 )
                 destination = gateway.fetch_batch(batch)
             try:

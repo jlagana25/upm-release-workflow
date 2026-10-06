@@ -954,6 +954,9 @@ than browser UI automation.
   and verifies every write; completed or excluded rows say `No Action Needed`.
   Rolling batches must not contain NTT DATA, JMD/TSS, Qwire, or Scripps
   subitems; source preflight removes template-created copies through the API.
+  Source preflight also adds the missing rolling `BMAT` subitem. Step 17 failure
+  must produce `Blocked`; successful delivery or a valid empty export must
+  produce `Complete` plus `No Action Needed`.
   The standalone `UPMYYYYMM01` monthly item contains only those four subitems;
   they show `In Progress` while building and `Ready to Deliver` after all
   previous-month metadata/audio and final-package gates pass.

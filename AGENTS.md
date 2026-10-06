@@ -624,6 +624,10 @@ inline or are submitted to HDF1's login-session agent.
   Keep it action-oriented and synchronized with the planned lifecycle status;
   terminal statuses use `No Action Needed`. Do not collapse those instructions
   back into the primary Status column.
+  Rolling Content Updates also require a `BMAT` subitem. Source preflight adds
+  it through the Monday API because the external recipe omits it. Step 17 owns
+  its full delivery: failure is `Blocked`; successful upload or the valid empty
+  no-op is `Complete` with `No Action Needed`.
   NTT DATA, JMD/TSS, Qwire, and Scripps are built only by
   `monthly_delivery_workflow.py` on the 1st for the complete previous calendar
   month. Its root is `UPM-YYYY-MM-MONTHLY` and Monday batch is `UPMYYYYMM01`.

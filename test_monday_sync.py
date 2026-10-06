@@ -37,6 +37,7 @@ def _content(batch="202609", status="", child_status="Not Started"):
         "Netmix", "TuneSat (+Bruton & Kosinus)", "ESPN",
         "SynchTank", "Discovery", "Scripps (Metadata only)",
         "QWire (Metadata only)", "SoundExchange (Metadata only)",
+        "BMAT",
     ]
     children = [
         BoardSubitem(1000 + index, name, child_status)
@@ -73,6 +74,7 @@ READY_RESULTS = {
     "11 SourceAudio": "completed",
     "15 Final metadata check": "completed",
     "16 SoundMouse": "completed",
+    "17 BMAT": "completed",
 }
 
 
@@ -179,6 +181,23 @@ class FakeGateway:
             for item in self.items_by_batch[batch]
         ]
         return len(removed)
+
+    def ensure_rolling_bmat_subitem(self, batch, items):
+        content = next(item for item in items if item.group == GROUP_CONTENT)
+        if any(child.name == "BMAT" for child in content.subitems):
+            return False
+        created = BoardSubitem(
+            1199, "BMAT", "In Progress", "Automation Running"
+        )
+        replacement = BoardItem(
+            content.id, content.name, content.group, content.batch,
+            content.delivery_type, content.status, content.subitems + (created,),
+        )
+        self.items_by_batch[batch] = [
+            replacement if item.id == content.id else item
+            for item in self.items_by_batch[batch]
+        ]
+        return True
 
 
 class NonPersistingGateway(FakeGateway):
@@ -290,6 +309,26 @@ class MondaySyncTests(unittest.TestCase):
         self.assertEqual(result, confirmed)
         self.assertEqual(request.call_count, 6)
 
+    def test_client_adds_missing_bmat_to_rolling_content_item(self):
+        content = _content(batch="UPM20260912")
+        content = BoardItem(
+            content.id, content.name, content.group, content.batch,
+            content.delivery_type, content.status,
+            tuple(child for child in content.subitems if child.name != "BMAT"),
+        )
+        client = MondayClient("sample-value")
+        with patch.object(
+            client, "_request", return_value={"create_subitem": {"id": "1199"}}
+        ) as request:
+            changed = client.ensure_rolling_bmat_subitem(
+                "UPM20260912", [content]
+            )
+        self.assertTrue(changed)
+        variables = request.call_args.args[1]
+        values = json.loads(variables["values"])
+        self.assertEqual(values["status"]["index"], 0)
+        self.assertEqual(values["status3"]["index"], 0)
+
     @patch("monday_sync.partner_status", return_value="pending")
     def test_ready_plan_sets_packages_clear_to_send(self, _status):
         ctx = ReleaseContext(
@@ -314,6 +353,7 @@ class MondaySyncTests(unittest.TestCase):
         self.assertEqual(by_name["WAV"], "Ready to Deliver")
         self.assertEqual(by_name["Upload to SoundMouse"], "Ready to Deliver")
         self.assertEqual(by_name["Download Media from UniSync"], "Complete")
+        self.assertEqual(by_name["BMAT"], "Complete")
         main_changes = [change for change in plan if not change.is_subitem]
         self.assertEqual(
             {(change.item_id, change.new_status) for change in main_changes},
@@ -333,6 +373,7 @@ class MondaySyncTests(unittest.TestCase):
         }
         self.assertEqual(by_action_name["SourceAudio"], "Upload Audio Manually")
         self.assertEqual(by_action_name["ESPN"], "Run Automated Delivery")
+        self.assertEqual(by_action_name["BMAT"], "No Action Needed")
         self.assertEqual(by_action_name["MP3"], "Ship / Dispatch")
         self.assertEqual(
             by_action_name["Process Metadata in SoundMouse"], "Prepare Package"
@@ -554,7 +595,7 @@ class MondaySyncTests(unittest.TestCase):
             tuple(child for child in content.subitems if child.name not in monthly_names),
         )
         plan = build_status_plan(
-            ctx, {},
+            ctx, {"17 BMAT": "completed"},
             {"UPM20260901": [
                 content,
                 _hd(batch="UPM20260901"),
