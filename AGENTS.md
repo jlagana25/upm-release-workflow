@@ -620,6 +620,10 @@ inline or are submitted to HDF1's login-session agent.
   labels, re-reads both batches to verify writes, and never downgrades final
   subitem or main-item statuses. Prepared
   packages become `Ready to Deliver`; explicit delivered state becomes `Complete`.
+  Every fetched subitem also has a separate `Next Action` (`status3`) value.
+  Keep it action-oriented and synchronized with the planned lifecycle status;
+  terminal statuses use `No Action Needed`. Do not collapse those instructions
+  back into the primary Status column.
   NTT DATA, JMD/TSS, Qwire, and Scripps are built only by
   `monthly_delivery_workflow.py` on the 1st for the complete previous calendar
   month. Its root is `UPM-YYYY-MM-MONTHLY` and Monday batch is `UPMYYYYMM01`.

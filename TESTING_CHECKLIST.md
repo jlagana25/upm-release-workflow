@@ -950,6 +950,8 @@ than browser UI automation.
 - A real full run advances successfully prepared package subitems to
   `Ready to Deliver`. It derives each main-item status from its subitems and never
   downgrades `Complete`, `Done`, `Not Required`, or `Managed by API`.
+  It also writes the separate `Next Action` column with the concrete handoff
+  and verifies every write; completed or excluded rows say `No Action Needed`.
   Rolling batches must not contain NTT DATA, JMD/TSS, Qwire, or Scripps
   subitems; source preflight removes template-created copies through the API.
   The standalone `UPMYYYYMM01` monthly item contains only those four subitems;

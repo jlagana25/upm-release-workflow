@@ -455,7 +455,11 @@ Then the other machine installs with `pip install -r requirements.lock`.
   SoundMouse under one compact `UPMYYYYMMDD` batch. It validates
   the expected groups, columns, and stable status-label IDs, then advances only
   matching subitems. Prepared packages become `Ready to Deliver`; verified local
-  uploaded or delivered states become `Complete`. Rolling rows keep NTT DATA,
+  uploaded or delivered states become `Complete`. The companion `Next Action`
+  column states the concrete handoff without overloading lifecycle status:
+  automated delivery, manual SourceAudio audio upload, SoundMouse metadata
+  processing, client notification, physical dispatch, schedule wait, or
+  blocker remediation. Terminal subitems read `No Action Needed`. Rolling rows keep NTT DATA,
   JMD/TSS, Qwire, and Scripps out of rolling Content Updates items. The source
   automation may initially create those template subitems, but source preflight
   removes them through the Monday API before validating the rolling item. The

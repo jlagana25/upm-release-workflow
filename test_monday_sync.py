@@ -10,6 +10,7 @@ from config import ReleaseContext
 from monday_sync import (
     BoardItem,
     BoardSubitem,
+    NextActionChange,
     GROUP_CONTENT,
     GROUP_HD,
     GROUP_SOUNDMOUSE,
@@ -19,6 +20,7 @@ from monday_sync import (
     SourceItem,
     SourceRow,
     build_status_plan,
+    build_next_action_plan,
     load_source_rows,
     monday_batch_key,
     monday_batch_month,
@@ -79,6 +81,7 @@ class FakeGateway:
         self.items_by_batch = items_by_batch
         self.validated = False
         self.changes = []
+        self.next_action_changes = []
         self.source_items = []
         self.removed_monthly = []
         self.source_schema = SourceBoardSchema(999, {
@@ -94,13 +97,22 @@ class FakeGateway:
 
     def fetch_batch(self, batch):
         overlay = {change.item_id: change.new_status for change in self.changes}
+        action_overlay = {
+            change.item_id: change.new_action
+            for change in self.next_action_changes
+        }
         result = []
         for item in self.items_by_batch.get(batch, []):
             result.append(BoardItem(
                 item.id, item.name, item.group, item.batch, item.delivery_type,
                 overlay.get(item.id, item.status),
                 tuple(
-                    BoardSubitem(child.id, child.name, overlay.get(child.id, child.status))
+                    BoardSubitem(
+                        child.id,
+                        child.name,
+                        overlay.get(child.id, child.status),
+                        action_overlay.get(child.id, child.next_action),
+                    )
                     for child in item.subitems
                 ),
             ))
@@ -108,6 +120,9 @@ class FakeGateway:
 
     def set_status(self, change):
         self.changes.append(change)
+
+    def set_next_action(self, change: NextActionChange):
+        self.next_action_changes.append(change)
 
     def validate_source_schema(self):
         return self.source_schema
@@ -303,6 +318,40 @@ class MondaySyncTests(unittest.TestCase):
         self.assertEqual(
             {(change.item_id, change.new_status) for change in main_changes},
             {(100, "Preparing Content"), (200, "Ready to Deliver"), (300, "Preparing Content")},
+        )
+
+        actions = build_next_action_plan(
+            {"UPM20260901": [
+                _content(batch="UPM20260901"),
+                _hd(batch="UPM20260901"),
+                _soundmouse(batch="UPM20260901"),
+            ]},
+            plan,
+        )
+        by_action_name = {
+            change.item_name: change.new_action for change in actions
+        }
+        self.assertEqual(by_action_name["SourceAudio"], "Upload Audio Manually")
+        self.assertEqual(by_action_name["ESPN"], "Run Automated Delivery")
+        self.assertEqual(by_action_name["MP3"], "Ship / Dispatch")
+        self.assertEqual(
+            by_action_name["Process Metadata in SoundMouse"], "Prepare Package"
+        )
+        self.assertEqual(by_action_name["NBC"], "No Action Needed")
+
+    def test_next_action_preserves_terminal_history_as_no_action_needed(self):
+        item = _soundmouse(child_status="Complete")
+        item = BoardItem(
+            item.id, item.name, item.group, item.batch, item.delivery_type,
+            item.status,
+            tuple(
+                BoardSubitem(child.id, child.name, child.status, "Delivered")
+                for child in item.subitems
+            ),
+        )
+        actions = build_next_action_plan({item.batch: [item]}, [])
+        self.assertEqual(
+            {change.new_action for change in actions}, {"No Action Needed"}
         )
 
     @patch("monday_sync.partner_status", return_value="pending")

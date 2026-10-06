@@ -58,6 +58,7 @@ GROUP_HD = "Hard Drive Updates"
 
 MAIN_STATUS_COLUMN = "status"
 SUBITEM_STATUS_COLUMN = "status"
+SUBITEM_NEXT_ACTION_COLUMN = "status3"
 
 MAIN_FINAL_STATUSES = frozenset({"Done", "Delivered"})
 SUBITEM_FINAL_STATUSES = frozenset({
@@ -81,6 +82,21 @@ REQUIRED_SUBITEM_LABELS = {
     "Not Required": 13,
     "Complete": 18,
     "Blocked": 2,
+}
+REQUIRED_NEXT_ACTION_LABELS = {
+    "Automation Running": 0,
+    "Resolve Blocker": 2,
+    "Revise Package": 3,
+    "Prepare Package": 4,
+    "Ship / Dispatch": 6,
+    "Wait for Schedule": 7,
+    "Run Automated Delivery": 8,
+    "Upload Audio Manually": 9,
+    "No Action Needed": 10,
+    "Send / Notify Client": 11,
+    "Manual Delivery Required": 12,
+    "Process Metadata": 13,
+    "Awaiting External Processing": 14,
 }
 
 CONTENT_PARTNERS = {
@@ -167,6 +183,7 @@ class BoardSubitem:
     id: int
     name: str
     status: str
+    next_action: str = ""
 
 
 @dataclass(frozen=True)
@@ -188,6 +205,14 @@ class StatusChange:
     old_status: str
     new_status: str
     is_subitem: bool
+
+
+@dataclass(frozen=True)
+class NextActionChange:
+    item_id: int
+    item_name: str
+    old_action: str
+    new_action: str
 
 
 @dataclass(frozen=True)
@@ -220,6 +245,7 @@ class MondayGateway(Protocol):
     def validate_schema(self) -> None: ...
     def fetch_batch(self, batch: str) -> list[BoardItem]: ...
     def set_status(self, change: StatusChange) -> None: ...
+    def set_next_action(self, change: NextActionChange) -> None: ...
     def validate_source_schema(self) -> SourceBoardSchema: ...
     def fetch_source_batch(
         self, schema: SourceBoardSchema, batch: str
@@ -336,7 +362,7 @@ class MondayClient:
           }
           children: boards(ids: $subitems) {
             id
-            columns(ids: ["status"]) { id title type settings_str }
+            columns(ids: ["status", "status3"]) { id title type settings_str }
           }
         }
         """
@@ -361,9 +387,16 @@ class MondayClient:
         child_columns = {column["id"]: column for column in children[0].get("columns", [])}
         if "status" not in child_columns:
             raise MondayError("Monday subitem board is missing its Status column")
+        if "status3" not in child_columns:
+            raise MondayError("Monday subitem board is missing its Next Action column")
+        if str(child_columns["status3"].get("title") or "") != "Next Action":
+            raise MondayError("Monday subitem column status3 must be named 'Next Action'")
 
         self._validate_status_labels(parent_columns["status"], REQUIRED_MAIN_LABELS)
         self._validate_status_labels(child_columns["status"], REQUIRED_SUBITEM_LABELS)
+        self._validate_status_labels(
+            child_columns["status3"], REQUIRED_NEXT_ACTION_LABELS
+        )
 
     def validate_source_schema(self) -> SourceBoardSchema:
         """Validate the exact source board and its stable column IDs."""
@@ -578,7 +611,7 @@ class MondayClient:
               column_values(ids: ["status", "batch", "status_1"]) { id text }
               subitems {
                 id name
-                column_values(ids: ["status"]) { id text }
+                column_values(ids: ["status", "status3"]) { id text }
               }
             }
           }
@@ -594,6 +627,9 @@ class MondayClient:
                     id=int(child["id"]),
                     name=str(child.get("name") or ""),
                     status=_column_text(child.get("column_values") or [], "status"),
+                    next_action=_column_text(
+                        child.get("column_values") or [], "status3"
+                    ),
                 )
                 for child in item.get("subitems") or []
             )
@@ -629,6 +665,39 @@ class MondayClient:
         changed = data.get("change_multiple_column_values") or {}
         if str(changed.get("id")) != str(change.item_id):
             raise MondayError(f"Monday did not confirm status update for {change.item_name}")
+
+    def set_next_action(self, change: NextActionChange) -> None:
+        if change.new_action not in REQUIRED_NEXT_ACTION_LABELS:
+            raise MondayError(
+                f"Refusing unknown Monday next action {change.new_action!r}"
+            )
+        query = """
+        mutation SetNextAction($board: ID!, $item: ID!, $values: JSON!) {
+          change_multiple_column_values(
+            board_id: $board,
+            item_id: $item,
+            column_values: $values
+          ) { id }
+        }
+        """
+        values = json.dumps({
+            SUBITEM_NEXT_ACTION_COLUMN: {
+                "index": REQUIRED_NEXT_ACTION_LABELS[change.new_action]
+            }
+        })
+        data = self._request(
+            query,
+            {
+                "board": MONDAY_SUBITEM_BOARD_ID,
+                "item": change.item_id,
+                "values": values,
+            },
+        )
+        changed = data.get("change_multiple_column_values") or {}
+        if str(changed.get("id")) != str(change.item_id):
+            raise MondayError(
+                f"Monday did not confirm next action update for {change.item_name}"
+            )
 
     def repair_soundmouse_destination(
         self, batch: str, items: list[BoardItem]
@@ -1062,6 +1131,74 @@ def _planned_status(item: BoardSubitem, changes: Iterable[StatusChange]) -> str:
         if change.item_id == item.id:
             return change.new_status
     return item.status
+
+
+def _next_action_for(item_name: str, status: str) -> str:
+    """Translate lifecycle state into the next concrete operator action."""
+    if status in SUBITEM_FINAL_STATUSES:
+        return "No Action Needed"
+    if status == "Blocked":
+        return "Resolve Blocker"
+    if status == "Needs Revision":
+        return "Revise Package"
+    if status == "Scheduled Monthly":
+        return "Wait for Schedule"
+    if status in {"In Progress", "Delivering"}:
+        return (
+            "Automation Running"
+            if status == "In Progress"
+            else "Awaiting External Processing"
+        )
+    if status != "Ready to Deliver":
+        return "Prepare Package"
+
+    if item_name.startswith("SourceAudio"):
+        return "Upload Audio Manually"
+    if item_name == "Discovery":
+        return "Wait for Schedule"
+    if item_name in {"MP3", "WAV"}:
+        return "Ship / Dispatch"
+    if item_name == "Process Metadata in SoundMouse":
+        return "Process Metadata"
+    if item_name in {
+        "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
+        "UPM Japan - NTT DATA",
+        "Scripps (Metadata only)",
+        "QWire (Metadata only)",
+    }:
+        return "Send / Notify Client"
+    return "Run Automated Delivery"
+
+
+def build_next_action_plan(
+    items_by_batch: Mapping[str, list[BoardItem]],
+    status_changes: Iterable[StatusChange],
+) -> list[NextActionChange]:
+    """Plan the companion Next Action value for every fetched subitem."""
+    planned = {
+        change.item_id: change.new_status
+        for change in status_changes
+        if change.is_subitem
+    }
+    changes: list[NextActionChange] = []
+    seen: set[int] = set()
+    for items in items_by_batch.values():
+        for parent in items:
+            for child in parent.subitems:
+                if child.id in seen:
+                    continue
+                seen.add(child.id)
+                desired = _next_action_for(
+                    child.name, planned.get(child.id, child.status)
+                )
+                if desired != child.next_action:
+                    changes.append(NextActionChange(
+                        item_id=child.id,
+                        item_name=child.name,
+                        old_action=child.next_action,
+                        new_action=desired,
+                    ))
+    return changes
 
 
 def _main_status(item: BoardItem, changes: list[StatusChange]) -> str | None:
@@ -1566,6 +1703,7 @@ def run_monday_sync(
         changes = build_status_plan(
             ctx, effective_results, items_by_batch, batch_override=batch_override
         )
+        next_actions = build_next_action_plan(items_by_batch, changes)
         if ctx.is_monthly_delivery:
             logger.info(f"  Monday monthly batch mapping: Content={month}")
         elif compact_batch:
@@ -1582,8 +1720,10 @@ def run_monday_sync(
                 "  Monday batch mapping: Content/HD=not created by source "
                 f"automation for Part 2; SoundMouse={sm_batch}"
             )
-        if not changes:
-            logger.info("  ✓ Monday statuses already match the workflow state.")
+        if not changes and not next_actions:
+            logger.info(
+                "  ✓ Monday statuses and next actions already match the workflow state."
+            )
             return True
         for change in changes:
             prefix = "subitem" if change.is_subitem else "main item"
@@ -1591,15 +1731,24 @@ def run_monday_sync(
                 f"  {'[DRY RUN] ' if dry_run else ''}{prefix} {change.item_name}: "
                 f"{change.old_status or '(blank)'} → {change.new_status}"
             )
+        for change in next_actions:
+            logger.info(
+                f"  {'[DRY RUN] ' if dry_run else ''}next action "
+                f"{change.item_name}: "
+                f"{change.old_action or '(blank)'} → {change.new_action}"
+            )
         if dry_run:
             return True
         for change in changes:
             gateway.set_status(change)
-        confirmed = _status_index([
+        for change in next_actions:
+            gateway.set_next_action(change)
+        confirmed_items = [
             item
             for batch in requested_batches
             for item in gateway.fetch_batch(batch)
-        ])
+        ]
+        confirmed = _status_index(confirmed_items)
         unconfirmed = [
             change for change in changes
             if confirmed.get(change.item_id) != change.new_status
@@ -1609,7 +1758,25 @@ def run_monday_sync(
             raise MondayError(
                 "Monday post-write verification did not confirm: " + names
             )
-        logger.info(f"  ✓ Updated {len(changes)} Monday status value(s).")
+        confirmed_actions = {
+            child.id: child.next_action
+            for item in confirmed_items
+            for child in item.subitems
+        }
+        unconfirmed_actions = [
+            change for change in next_actions
+            if confirmed_actions.get(change.item_id) != change.new_action
+        ]
+        if unconfirmed_actions:
+            names = ", ".join(change.item_name for change in unconfirmed_actions)
+            raise MondayError(
+                "Monday next-action verification did not confirm: " + names
+            )
+        logger.info(
+            "  ✓ Updated "
+            f"{len(changes)} Monday status value(s) and "
+            f"{len(next_actions)} next-action value(s)."
+        )
         return True
     except MondayError as exc:
         logger.error(f"  ✗ Monday synchronization failed closed: {exc}")
