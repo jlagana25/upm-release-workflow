@@ -162,6 +162,7 @@ def run_monthly_delivery(
     if not skip_monday:
         from monday_sync import (
             ensure_monday_monthly_batch,
+            prepare_early_monthly_batch,
             run_monday_source_preflight,
             run_monday_sync,
         )
@@ -176,6 +177,11 @@ def run_monthly_delivery(
                 ctx, dry_run=dry_run, logger=logger
             )
         if not monday_ready:
+            steps["monday_start"] = "failed"
+            return steps
+        if ctx.monthly_rolls_into_batch and not prepare_early_monthly_batch(
+            ctx, dry_run=dry_run, logger=logger
+        ):
             steps["monday_start"] = "failed"
             return steps
         steps["monday_start"] = "completed"

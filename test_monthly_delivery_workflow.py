@@ -38,6 +38,7 @@ class MonthlyDeliveryWorkflowTests(unittest.TestCase):
             patch(
                 "monday_sync.run_monday_source_preflight", return_value=True
             ) as monday_source,
+            patch("monday_sync.prepare_early_monthly_batch", return_value=True),
             patch("monday_sync.run_monday_sync") as monday,
             patch(
                 "domo_exports.run_domo_exports",
@@ -69,6 +70,7 @@ class MonthlyDeliveryWorkflowTests(unittest.TestCase):
             patch("monthly_delivery_workflow._preflight", return_value=True),
             patch("folder_setup.create_monthly_delivery_folder", return_value=True),
             patch("monday_sync.run_monday_source_preflight", return_value=True),
+            patch("monday_sync.prepare_early_monthly_batch", return_value=True),
             patch("monday_sync.run_monday_sync", return_value=True) as monday,
             patch(
                 "domo_exports.run_domo_exports",

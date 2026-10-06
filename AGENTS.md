@@ -639,8 +639,13 @@ inline or are submitted to HDF1's login-session agent.
   `UPM20260926`, covering September 26–October 9). Source preflight preserves
   those four subitems only in the month-owning rolling batch and removes them
   from every other rolling batch. The early phase uses `In Progress` while
-  building and `Ready to Deliver` when verified; the later full run resumes the
-  same root and leaves completed monthly packages untouched. Never carry
+  building and `Ready to Deliver` when verified. While the batch is open early,
+  all ordinary rolling, SoundMouse,
+  BMAT, and hard-drive work must remain `Not Started` with `Wait for Schedule`,
+  and all three parent items must read `Preparing Content`; do not let Monday's
+  automation defaults make unstarted work appear active or complete. The
+  later full run resumes the same batch/root and leaves completed monthly
+  packages untouched. Never carry
   monthly NTT audio or metadata forward from a rolling release.
   After the monthly NTT DATA and JMD/TSS MediaBoxes are verified, prepare two
   Outlook drafts only. Resolve the approved Japan delivery recipient and CC

@@ -78,6 +78,7 @@ REQUIRED_MAIN_LABELS = {
 }
 REQUIRED_SUBITEM_LABELS = {
     "In Progress": 0,
+    "Not Started": 5,
     "Scheduled Monthly": 101,
     "Ready to Deliver": 3,
     "Not Required": 13,
@@ -2008,6 +2009,135 @@ def adopt_completed_monthly_statuses(
         return False
 
 
+def prepare_early_monthly_batch(
+    ctx: ReleaseContext,
+    *,
+    dry_run: bool,
+    logger: logging.Logger,
+    gateway: MondayClient | None = None,
+) -> bool:
+    """Keep non-monthly work visibly idle in an early-opened rolling batch."""
+    if not ctx.is_monthly_delivery or not ctx.monthly_rolls_into_batch:
+        logger.error("  ✗ Early monthly preparation requires a rolling-owned context")
+        return False
+    batch = monday_batch_key(ctx)
+    monthly_names = {
+        name
+        for name, partner in CONTENT_PARTNERS.items()
+        if partner in MONTHLY_METADATA_PARTNERS
+    }
+    try:
+        if gateway is None:
+            from auth_manager import load_monday_keychain_token
+            token = load_monday_keychain_token()
+            if not token:
+                raise MondayError("Monday API token is not enrolled")
+            gateway = MondayClient(token)
+        gateway.validate_schema()
+        items = gateway.fetch_batch(batch)
+        changes: list[StatusChange] = []
+        actions: list[NextActionChange] = []
+        for group in (GROUP_CONTENT, GROUP_HD, GROUP_SOUNDMOUSE):
+            parent = _require_single(items, group, batch)
+            if parent.status not in MAIN_FINAL_STATUSES and parent.status != "Preparing Content":
+                changes.append(StatusChange(
+                    parent.id,
+                    parent.name,
+                    MONDAY_BOARD_ID,
+                    parent.status,
+                    "Preparing Content",
+                    False,
+                ))
+            for child in parent.subitems:
+                if child.name in monthly_names:
+                    continue
+                if child.name in RETIRED_CONTENT_SUBITEMS:
+                    if child.status not in SUBITEM_FINAL_STATUSES:
+                        changes.append(StatusChange(
+                            child.id,
+                            child.name,
+                            MONDAY_SUBITEM_BOARD_ID,
+                            child.status,
+                            "Not Required",
+                            True,
+                        ))
+                    desired_action = "No Action Needed"
+                elif child.status in SUBITEM_FINAL_STATUSES:
+                    desired_action = "No Action Needed"
+                else:
+                    if child.status == "In Progress":
+                        changes.append(StatusChange(
+                            child.id,
+                            child.name,
+                            MONDAY_SUBITEM_BOARD_ID,
+                            child.status,
+                            "Not Started",
+                            True,
+                        ))
+                    desired_action = "Wait for Schedule"
+                if child.next_action != desired_action:
+                    actions.append(NextActionChange(
+                        child.id,
+                        child.name,
+                        child.next_action,
+                        desired_action,
+                    ))
+        for change in changes:
+            logger.info(
+                "  %s%s: %s → %s",
+                "[DRY RUN] " if dry_run else "",
+                change.item_name,
+                change.old_status or "(blank)",
+                change.new_status,
+            )
+        for change in actions:
+            logger.info(
+                "  %snext action %s: %s → %s",
+                "[DRY RUN] " if dry_run else "",
+                change.item_name,
+                change.old_action or "(blank)",
+                change.new_action,
+            )
+        if dry_run:
+            return True
+        for change in changes:
+            gateway.set_status(change)
+        for change in actions:
+            gateway.set_next_action(change)
+        confirmed = [
+            item
+            for group in (GROUP_CONTENT, GROUP_HD, GROUP_SOUNDMOUSE)
+            for item in [_require_single(gateway.fetch_batch(batch), group, batch)]
+        ]
+        status_index = _status_index(confirmed)
+        action_index = {
+            child.id: child.next_action
+            for item in confirmed
+            for child in item.subitems
+        }
+        unconfirmed_status = [
+            change.item_name for change in changes
+            if status_index.get(change.item_id) != change.new_status
+        ]
+        unconfirmed_action = [
+            change.item_name for change in actions
+            if action_index.get(change.item_id) != change.new_action
+        ]
+        if unconfirmed_status or unconfirmed_action:
+            raise MondayError(
+                "Monday did not confirm early-batch normalization: "
+                + ", ".join(unconfirmed_status + unconfirmed_action)
+            )
+        logger.info(
+            "  ✓ Rolling batch %s shows only monthly work as active/completed",
+            batch,
+        )
+        return True
+    except MondayError as exc:
+        logger.error("  ✗ Early monthly Monday normalization failed closed: %s", exc)
+        return False
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description="Synchronize workflow state to Monday")
     parser.add_argument("--year", type=int)
@@ -2032,6 +2162,11 @@ def _main() -> int:
         metavar="BATCH",
         help="copy completed monthly subitems from a historical batch",
     )
+    parser.add_argument(
+        "--prepare-early-monthly",
+        action="store_true",
+        help="show non-monthly work as idle in an early-opened rolling batch",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     ctx = context_from_cli_args(args)
@@ -2046,6 +2181,13 @@ def _main() -> int:
         ok = adopt_completed_monthly_statuses(
             ctx,
             args.adopt_completed_monthly_from,
+            dry_run=args.dry_run,
+            logger=logger,
+        )
+        return 0 if ok else 1
+    if args.prepare_early_monthly:
+        ok = prepare_early_monthly_batch(
+            ctx,
             dry_run=args.dry_run,
             logger=logger,
         )

@@ -22,6 +22,7 @@ from monday_sync import (
     build_status_plan,
     build_next_action_plan,
     adopt_completed_monthly_statuses,
+    prepare_early_monthly_batch,
     load_source_rows,
     monday_batch_key,
     monday_batch_month,
@@ -734,6 +735,37 @@ class MondaySyncTests(unittest.TestCase):
             for change in gateway.next_action_changes
             if change.item_name in monthly
         ))
+
+    def test_early_monthly_batch_keeps_ordinary_work_idle(self):
+        ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        content = _content(
+            batch="UPM20260926", status="Legacy Unused", child_status="Not Started"
+        )
+        soundmouse = _soundmouse(
+            batch="UPM20260926", status="Legacy Unused", child_status="In Progress"
+        )
+        hd = _hd(
+            batch="UPM20260926", status="Legacy Unused", child_status="Not Started"
+        )
+        gateway = FakeGateway({"UPM20260926": [content, soundmouse, hd]})
+        self.assertTrue(prepare_early_monthly_batch(
+            ctx,
+            dry_run=False,
+            logger=logging.getLogger("early-monthly"),
+            gateway=gateway,
+        ))
+        status_by_name = {change.item_name: change.new_status for change in gateway.changes}
+        self.assertEqual("Preparing Content", status_by_name[content.name])
+        self.assertEqual("Preparing Content", status_by_name[soundmouse.name])
+        self.assertEqual("Preparing Content", status_by_name[hd.name])
+        self.assertEqual("Not Started", status_by_name["Upload to SoundMouse"])
+        self.assertEqual("Not Required", status_by_name["NBC"])
+        actions = {
+            change.item_name: change.new_action
+            for change in gateway.next_action_changes
+        }
+        self.assertEqual("Wait for Schedule", actions["Upload to SoundMouse"])
+        self.assertEqual("No Action Needed", actions["NBC"])
 
     def test_source_preflight_loads_master_last_and_verifies_destination(self):
         ctx = ReleaseContext(
