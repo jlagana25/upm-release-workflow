@@ -434,6 +434,30 @@ class AuthSecurityTests(unittest.TestCase):
         self.assertNotIn(username, rendered)
         self.assertNotIn(credential_value, rendered)
 
+    def test_sourceaudio_uses_shared_keychain_registry(self):
+        expected = {
+            auth_manager.SOURCEAUDIO_API_TOKEN_SERVICE: "api-token",
+            auth_manager.SOURCEAUDIO_NOTIFICATION_EMAIL_SERVICE: "ops@example.test",
+        }
+        with patch.object(
+            auth_manager,
+            "_read_native_keychain_secret",
+            side_effect=lambda service: expected.get(service),
+        ):
+            self.assertEqual(auth_manager.load_sourceaudio_api_token(), "api-token")
+            self.assertEqual(
+                auth_manager.load_sourceaudio_notification_email(),
+                "ops@example.test",
+            )
+            self.assertTrue(auth_manager.sourceaudio_api_keychain_configured())
+        self.assertEqual(
+            auth_manager.KEYCHAIN_SERVICE_REGISTRY["sourceaudio_api"],
+            (
+                auth_manager.SOURCEAUDIO_API_TOKEN_SERVICE,
+                auth_manager.SOURCEAUDIO_NOTIFICATION_EMAIL_SERVICE,
+            ),
+        )
+
     def test_domo_log_url_drops_auth_query_and_fragment(self):
         safe = domo_exports._safe_url_for_log(
             "https://login.example.invalid/path?code=sensitive#session"

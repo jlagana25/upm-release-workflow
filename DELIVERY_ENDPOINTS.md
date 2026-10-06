@@ -561,14 +561,17 @@ always derive `<release label>` from the active context.
   status; this writes the uploader receipt and marks SoundMouse `uploaded`, not
   `delivered`.
 
-  The second phase runs in the SoundMouse website. Process every metadata
+  The second phase is implemented by `soundmouse_web_delivery.py` and runs in
+  the SoundMouse website. Process every metadata
   workbook included in the exact uploaded package, require a terminal result
   for each workbook, and require zero processing errors across all workbooks.
   Missing, duplicate, still-processing, warning-as-error, rejected, or
   unaccounted-for sheets block completion and leave SoundMouse `uploaded`.
   Only a website-processing receipt containing the exact workbook manifest and
   zero-error results may mark SoundMouse `delivered`. An Uploader receipt alone
-  can never be acknowledged or promoted to delivery.
+  can never be acknowledged or promoted to delivery. The unified runner chains
+  both phases and resumes directly at website processing when the native phase
+  is already `uploaded`.
 - SynchTank: deliver each complete package beneath an Amazon S3 prefix exactly
   matching the local package-folder name. Historical package prefixes remain
   in the bucket and are outside the active manifest. Upload

@@ -57,11 +57,70 @@ class NetmixApiGateway(Protocol):
 
 class NetmixPortalGateway(Protocol):
     def require_authenticated(self) -> None: ...
+    def history_statuses(
+        self, folder_name: str, expected_audio: frozenset[str]
+    ) -> dict[str, str]: ...
     def upload_package(self, package: Path) -> None: ...
     def wait_for_completion(
         self, folder_name: str, expected_audio: frozenset[str], timeout_seconds: int
     ) -> dict[str, str]: ...
     def close(self) -> None: ...
+
+
+_COMPLETE_STATUS_WORDS = ("complete", "accepted", "ingested", "success")
+_ACTIVE_STATUS_WORDS = (
+    "active", "pending", "processing", "queued", "received", "uploading"
+)
+_FAILED_STATUS_WORDS = ("error", "failed", "rejected")
+
+
+def history_status_complete(status: str) -> bool:
+    lowered = str(status).casefold()
+    return any(word in lowered for word in _COMPLETE_STATUS_WORDS)
+
+
+def validate_history_statuses(
+    records: dict[str, str], expected_audio: frozenset[str]
+) -> None:
+    unexpected = set(records) - set(expected_audio)
+    if unexpected:
+        raise NetmixDeliveryError(
+            "Netmix upload history contains unexpected audio"
+        )
+    if any(
+        word in status.casefold()
+        for status in records.values()
+        for word in _FAILED_STATUS_WORDS
+    ):
+        raise NetmixDeliveryError("Netmix upload history contains a rejected track")
+
+
+def history_resume_action(
+    records: dict[str, str], expected_audio: frozenset[str]
+) -> str:
+    """Return upload, wait, or complete without permitting duplicate media."""
+    validate_history_statuses(records, expected_audio)
+    if not records:
+        return "upload"
+    if set(records) == set(expected_audio) and all(
+        history_status_complete(status) for status in records.values()
+    ):
+        return "complete"
+    active = any(
+        word in status.casefold()
+        for status in records.values()
+        for word in _ACTIVE_STATUS_WORDS
+    )
+    if active:
+        return "wait"
+    if all(history_status_complete(status) for status in records.values()):
+        raise NetmixDeliveryError(
+            "Netmix history contains a completed partial package; refusing to "
+            "re-upload files that already exist"
+        )
+    raise NetmixDeliveryError(
+        "Netmix history contains an unknown non-terminal status; refusing a retry"
+    )
 
 
 def package_root(ctx: ReleaseContext) -> Path:
@@ -375,10 +434,21 @@ class PlaywrightNetmixPortalGateway:
             # Playwright's 30-second action default even though enumeration is
             # progressing normally.
             inputs.first.set_input_files(str(portal_master), timeout=15 * 60 * 1000)
-        if start.count() == 1 and start.first.is_enabled():
-            start.first.click()
-        elif start.count() > 1:
+        start.wait_for(state="visible", timeout=30 * 60 * 1000)
+        if start.count() != 1:
             raise NetmixDeliveryError("Netmix portal exposed multiple upload actions")
+        if not start.first.is_enabled():
+            raise NetmixDeliveryError(
+                "Netmix upload action is disabled after folder selection"
+            )
+        start.first.click()
+        primary = self._page.locator(".uppy-StatusBar-statusPrimary:visible")
+        primary.wait_for(state="visible", timeout=60_000)
+        initial_status = " ".join(primary.first.inner_text().split()).casefold()
+        if any(word in initial_status for word in _FAILED_STATUS_WORDS):
+            raise NetmixDeliveryError(
+                f"Netmix upload was rejected at initiation: {initial_status}"
+            )
         self._page.locator(
             ".uppy-StatusBar-statusPrimary", has_text="Complete"
         ).wait_for(state="visible", timeout=12 * 60 * 60 * 1000)
@@ -411,35 +481,40 @@ class PlaywrightNetmixPortalGateway:
                 return value.strip()
         return ""
 
+    def _open_history_surface(self) -> None:
+        grid = self._page.locator("#grid_gridviewuploads_body")
+        if not grid.count() or not grid.is_visible():
+            self._page.locator("#buttondivb").click()
+            grid.wait_for(state="visible")
+
+    def history_statuses(
+        self, folder_name: str, expected_audio: frozenset[str]
+    ) -> dict[str, str]:
+        self._open_history_surface()
+        records: dict[str, str] = {}
+        for row in self._history_rows():
+            folder = self._value(row, ("folder", "directory", "path"))
+            filename = Path(self._value(row, ("filename", "file", "name"))).name
+            status = self._value(row, ("status", "state"))
+            if folder_name.casefold() not in folder.casefold() or not filename:
+                continue
+            key = filename.casefold()
+            if key in records:
+                raise NetmixDeliveryError(
+                    f"Netmix upload history duplicated {filename}"
+                )
+            records[key] = status
+        validate_history_statuses(records, expected_audio)
+        return records
+
     def wait_for_completion(
         self, folder_name: str, expected_audio: frozenset[str], timeout_seconds: int
     ) -> dict[str, str]:
-        self._page.locator("#buttondivb").click()
-        self._page.locator("#grid_gridviewuploads_body").wait_for(state="visible")
         deadline = time.monotonic() + timeout_seconds
         while True:
-            records: dict[str, str] = {}
-            for row in self._history_rows():
-                folder = self._value(row, ("folder", "directory", "path"))
-                filename = Path(self._value(row, ("filename", "file", "name"))).name
-                status = self._value(row, ("status", "state"))
-                if folder_name.casefold() not in folder.casefold() or not filename:
-                    continue
-                key = filename.casefold()
-                if key in records:
-                    raise NetmixDeliveryError(f"Netmix upload history duplicated {filename}")
-                records[key] = status
-            if set(records) - set(expected_audio):
-                raise NetmixDeliveryError("Netmix upload history contains unexpected audio")
-            if any(
-                word in status.casefold()
-                for status in records.values()
-                for word in ("error", "failed", "rejected")
-            ):
-                raise NetmixDeliveryError("Netmix upload history contains a rejected track")
+            records = self.history_statuses(folder_name, expected_audio)
             if set(records) == set(expected_audio) and all(
-                any(word in status.casefold() for word in ("complete", "accepted", "ingested", "success"))
-                for status in records.values()
+                history_status_complete(status) for status in records.values()
             ):
                 return records
             if time.monotonic() >= deadline:
@@ -501,10 +576,27 @@ def deliver_netmix(
             )
             owned = True
         portal_gateway.require_authenticated()
-        portal_gateway.upload_package(plan.package)
-        statuses = portal_gateway.wait_for_completion(
-            plan.package.name, plan.audio_names, timeout_seconds
+        statuses = portal_gateway.history_statuses(
+            plan.package.name, plan.audio_names
         )
+        resume_action = history_resume_action(statuses, plan.audio_names)
+        if resume_action == "upload":
+            portal_gateway.upload_package(plan.package)
+            statuses = portal_gateway.wait_for_completion(
+                plan.package.name, plan.audio_names, timeout_seconds
+            )
+        elif resume_action == "wait":
+            logger.info(
+                "  Netmix history contains an active exact-package upload; "
+                "resuming verification without re-uploading"
+            )
+            statuses = portal_gateway.wait_for_completion(
+                plan.package.name, plan.audio_names, timeout_seconds
+            )
+        else:
+            logger.info(
+                "  Netmix exact package was already complete in upload history"
+            )
         receipt_path = receipt(ctx, "netmix", plan.files, {
             "transport": "portal-master-folder",
             "package": plan.package.name,

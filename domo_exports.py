@@ -628,6 +628,27 @@ def _export_api_projection(
                 f"{', '.join(contract.unique_by)}: {len(duplicates)} duplicate value(s)"
             )
 
+    if card.get("sourceaudio_delta"):
+        from sourceaudio_keyword_audit import audit_keyword_refresh, outstanding_keyword_revisions
+
+        audit_directory = (
+            ctx.specials_dir / "_WORKFLOW" / "sourceaudio_keyword_revisions"
+            / card["sourceaudio_delta"]
+        )
+        revision = audit_keyword_refresh(
+            output_path, headers, rows, audit_directory,
+        )
+        if revision:
+            logger.warning(
+                f"     SourceAudio keyword evidence preserved: {revision}; "
+                "remote comparison is required before correction or closure."
+            )
+        outstanding = outstanding_keyword_revisions(audit_directory)
+        if outstanding:
+            logger.warning(
+                f"     SourceAudio has {len(outstanding)} outstanding keyword "
+                f"revision/baseline comparison(s): {audit_directory}"
+            )
     _write_projection(output_path, headers, rows)
     logger.info(
         f"     API contract {contract.dataset_id}: {len(rows):,} row(s), "

@@ -535,7 +535,10 @@ def reconcile_sourceaudio_refresh(
                 )
             else:
                 _archive_existing_missing(missing_dir, logger)
-        logger.info("     ✓ Refreshed metadata matches the existing AIFF delivery.")
+        logger.info(
+            "     ✓ Refreshed IDs and filenames match the existing AIFF delivery. "
+            "Keyword-only revisions are tracked separately under _WORKFLOW."
+        )
         return result
 
     if dry_run:

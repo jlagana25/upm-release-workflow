@@ -191,6 +191,101 @@ class PostPackagingDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(gui.press.call_args_list, [call("enter"), call("enter")])
 
+    def test_espn_launches_installed_signiant_app_by_exact_path(self):
+        app = self.root / "SigniantApp.app"
+        app.mkdir()
+        with (
+            patch.object(espn, "SIGNIANT_APP_CANDIDATES", (app,)),
+            patch.object(
+                espn.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+            ) as run,
+        ):
+            self.assertEqual(espn._launch_signiant_app(), app)
+        run.assert_called_once_with(
+            ["/usr/bin/open", str(app)],
+            check=False,
+            stdout=espn.subprocess.DEVNULL,
+            stderr=espn.subprocess.DEVNULL,
+        )
+
+    def test_espn_waits_for_signiant_handoff_confirmation(self):
+        page = Mock()
+        upload = Mock()
+        upload.count.return_value = 1
+        upload.first.is_enabled.return_value = True
+        confirmation = Mock()
+        confirmation.count.return_value = 1
+        confirmation.first.is_visible.return_value = True
+        add_files = Mock()
+        add_files.count.return_value = 0
+        page.get_by_text.side_effect = (upload, confirmation, add_files)
+        espn._begin_signiant_handoff(page)
+        upload.first.click.assert_called_once_with()
+        confirmation.first.click.assert_called_once_with()
+
+    def test_espn_uses_current_inline_add_files_handoff(self):
+        page = Mock()
+        upload = Mock()
+        upload.count.return_value = 1
+        upload.first.is_enabled.return_value = True
+        confirmation = Mock()
+        confirmation.count.return_value = 0
+        add_files = Mock()
+        add_files.count.return_value = 1
+        add_files.first.is_visible.return_value = True
+        page.get_by_text.side_effect = (upload, confirmation, add_files)
+        espn._begin_signiant_handoff(page)
+        upload.first.click.assert_called_once_with()
+        add_files.first.click.assert_called_once_with()
+
+    def test_espn_refuses_missing_signiant_handoff_confirmation(self):
+        page = Mock()
+        upload = Mock()
+        upload.count.return_value = 1
+        upload.first.is_enabled.return_value = True
+        confirmation = Mock()
+        confirmation.count.return_value = 0
+        add_files = Mock()
+        add_files.count.return_value = 0
+        page.get_by_text.side_effect = (upload, confirmation, add_files)
+        with (
+            patch.object(espn.time, "monotonic", side_effect=(0, 31)),
+            self.assertRaisesRegex(espn.EspnDeliveryError, "did not present"),
+        ):
+            espn._begin_signiant_handoff(page)
+
+    def test_espn_does_not_checkpoint_before_signiant_accepts_folder(self):
+        package = self.ctx.specials_dir / "3-FINAL PACKAGING" / "ESPN Exact"
+        (package / "Music").mkdir(parents=True)
+        (package / "Music" / "track.wav").write_bytes(b"audio")
+        self.ctx.partner_folder_name = lambda name: "ESPN Exact" if name == "ESPN" else name
+        gateway = FakeEspn()
+        gateway.start_folder_upload = Mock(side_effect=espn.EspnDeliveryError("picker failed"))
+        with patch.object(espn, "latest_workflow_gates", return_value=(True, "ok")):
+            self.assertFalse(espn.deliver_espn(
+                self.ctx, False, LOG, gateway=gateway,
+                live_confirmation=self.ctx.release_id,
+            ))
+        self.assertFalse(common.endpoint_state_path(self.ctx, "espn").exists())
+
+    def test_espn_refuses_duplicate_after_signiant_accepted_submission(self):
+        package = self.ctx.specials_dir / "3-FINAL PACKAGING" / "ESPN Exact"
+        (package / "Music").mkdir(parents=True)
+        (package / "Music" / "track.wav").write_bytes(b"audio")
+        self.ctx.partner_folder_name = lambda name: "ESPN Exact" if name == "ESPN" else name
+        files = common.collect_manifest(package, include_root=True)
+        common.checkpoint(
+            self.ctx, "espn", files, "submitted",
+            "folder upload accepted by Signiant",
+        )
+        gateway = FakeEspn(states=(None,), visible=False)
+        with patch.object(espn, "latest_workflow_gates", return_value=(True, "ok")):
+            self.assertFalse(espn.deliver_espn(
+                self.ctx, False, LOG, gateway=gateway,
+                live_confirmation=self.ctx.release_id,
+            ))
+        self.assertEqual(gateway.started, 0)
+
     def _workbook(self, path: Path, isrc: str, title: str):
         path.parent.mkdir(parents=True, exist_ok=True)
         book = Workbook()
@@ -258,6 +353,29 @@ class PostPackagingDeliveryTests(unittest.TestCase):
         self.assertIn("Sep 12–25 2026", gateway.plan.subject)
         self.assertIn("Thanks,\n\n\nJoe", gateway.plan.body)
         state.assert_called_once_with(self.ctx.specials_dir, "qwire", "delivered")
+
+    def test_unified_runner_uses_outlook_gateway_and_reports_delivered(self):
+        source = self.root / "qwire.csv"
+        source.write_text("Trackid,Title\n1,One\n", encoding="utf-8")
+        self.ctx.partner_metadata["qwire"] = source
+        gateway = FakeOutlook()
+        with patch.object(email, "latest_workflow_gates", return_value=(True, "ok")):
+            runners = runner._implemented_runners(
+                live_confirmation=self.ctx.release_id,
+                outlook_gateway=gateway,
+                signature="Joe\nUniversal Production Music",
+            )
+            result = runner.run_deliveries(
+                self.ctx,
+                ("qwire",),
+                LOG,
+                dry_run=False,
+                live_confirmation=self.ctx.release_id,
+                runners=runners,
+                progress_sync=lambda *_: True,
+            )
+        self.assertEqual(result, {"qwire": "delivered", "monday": "completed"})
+        self.assertIsNotNone(gateway.plan)
 
     def test_email_dry_run_does_not_write_workflow_artifacts(self):
         source = self.root / "scripps.csv"
@@ -415,7 +533,7 @@ class PostPackagingDeliveryTests(unittest.TestCase):
         self.assertEqual(result, {"qwire": "already_delivered"})
         self.assertEqual(called, [])
 
-    def test_runner_does_not_requeue_uploaded_soundmouse(self):
+    def test_runner_processes_uploaded_soundmouse_without_requeueing(self):
         self.ctx.specials_dir.mkdir(parents=True)
         from delivery_state import set_partner_status
         set_partner_status(self.ctx.specials_dir, "soundmouse", "uploaded")
@@ -424,13 +542,44 @@ class PostPackagingDeliveryTests(unittest.TestCase):
             self.ctx,
             ("soundmouse",),
             LOG,
-            dry_run=True,
+            dry_run=False,
+            live_confirmation=self.ctx.release_id,
             runners={"soundmouse": lambda *_: called.append(True) or True},
+            progress_sync=lambda *_: True,
         )
-        self.assertEqual(
-            result, {"soundmouse": "awaiting_metadata_processing"}
-        )
-        self.assertEqual(called, [])
+        self.assertEqual(result, {"soundmouse": "delivered", "monday": "completed"})
+        self.assertEqual(called, [True])
+
+    def test_default_soundmouse_runner_skips_uploader_after_uploaded_state(self):
+        self.ctx.specials_dir.mkdir(parents=True)
+        from delivery_state import set_partner_status
+        set_partner_status(self.ctx.specials_dir, "soundmouse", "uploaded")
+        with patch(
+            "soundmouse_uploader_delivery.deliver_soundmouse_uploader"
+        ) as uploader, patch(
+            "soundmouse_web_delivery.deliver_soundmouse_web", return_value=True
+        ) as website:
+            runners = runner._implemented_runners(
+                live_confirmation=self.ctx.release_id
+            )
+            self.assertTrue(runners["soundmouse"](self.ctx, False, LOG))
+        uploader.assert_not_called()
+        website.assert_called_once()
+
+    def test_default_soundmouse_runner_uploads_then_processes_website(self):
+        self.ctx.specials_dir.mkdir(parents=True)
+        with patch(
+            "soundmouse_uploader_delivery.deliver_soundmouse_uploader",
+            return_value=True,
+        ) as uploader, patch(
+            "soundmouse_web_delivery.deliver_soundmouse_web", return_value=True
+        ) as website:
+            runners = runner._implemented_runners(
+                live_confirmation=self.ctx.release_id
+            )
+            self.assertTrue(runners["soundmouse"](self.ctx, False, LOG))
+        uploader.assert_called_once()
+        website.assert_called_once()
 
     def test_uploader_receipt_cannot_acknowledge_soundmouse_delivered(self):
         self.ctx.specials_dir.mkdir(parents=True)

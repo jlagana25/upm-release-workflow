@@ -56,6 +56,29 @@ SOUNDEXCHANGE_USERNAME_SERVICE = "com.upm-release-workflow.soundexchange.usernam
 SOUNDEXCHANGE_PASSWORD_SERVICE = "com.upm-release-workflow.soundexchange.password"
 SOUNDMOUSE_USERNAME_SERVICE = "com.upm-release-workflow.soundmouse.username"
 SOUNDMOUSE_PASSWORD_SERVICE = "com.upm-release-workflow.soundmouse.password"
+SOURCEAUDIO_API_TOKEN_SERVICE = "com.upm-release-workflow.sourceaudio.api-token"
+SOURCEAUDIO_NOTIFICATION_EMAIL_SERVICE = (
+    "com.upm-release-workflow.sourceaudio.notification-email"
+)
+KEYCHAIN_SERVICE_REGISTRY = {
+    "domo_login": (DOMO_KEYCHAIN_USERNAME_SERVICE, DOMO_KEYCHAIN_PASSWORD_SERVICE),
+    "domo_api": (DOMO_API_CLIENT_ID_SERVICE, DOMO_API_CLIENT_SECRET_SERVICE),
+    "monday": (MONDAY_KEYCHAIN_TOKEN_SERVICE,),
+    "bmat_sftp": (BMAT_SFTP_USERNAME_SERVICE, BMAT_SFTP_PASSWORD_SERVICE),
+    "synchtank_s3": (
+        SYNCHTANK_S3_ACCESS_KEY_SERVICE,
+        SYNCHTANK_S3_SECRET_KEY_SERVICE,
+    ),
+    "tunesat_sftp": (TUNESAT_SFTP_USERNAME_SERVICE, TUNESAT_SFTP_PASSWORD_SERVICE),
+    "espn": (ESPN_USERNAME_SERVICE, ESPN_PASSWORD_SERVICE),
+    "netmix": (NETMIX_USERNAME_SERVICE, NETMIX_PASSWORD_SERVICE),
+    "soundexchange": (SOUNDEXCHANGE_USERNAME_SERVICE, SOUNDEXCHANGE_PASSWORD_SERVICE),
+    "soundmouse": (SOUNDMOUSE_USERNAME_SERVICE, SOUNDMOUSE_PASSWORD_SERVICE),
+    "sourceaudio_api": (
+        SOURCEAUDIO_API_TOKEN_SERVICE,
+        SOURCEAUDIO_NOTIFICATION_EMAIL_SERVICE,
+    ),
+}
 DOMO_API_TOKEN_URL = "https://api.domo.com/oauth/token"
 _ERR_SEC_ITEM_NOT_FOUND = -25300
 _SECURITY_FRAMEWORK_PATH = (
@@ -263,6 +286,25 @@ def load_soundmouse_credentials() -> tuple[str, str] | None:
 
 def soundmouse_keychain_configured() -> bool:
     return load_soundmouse_credentials() is not None
+
+
+def load_sourceaudio_api_token() -> str | None:
+    """Load the SourceAudio API token into memory without logging it."""
+    value = _read_native_keychain_secret(SOURCEAUDIO_API_TOKEN_SERVICE)
+    return value.strip() if value and value.strip() else None
+
+
+def load_sourceaudio_notification_email() -> str | None:
+    """Load the SourceAudio publish notification address without logging it."""
+    value = _read_native_keychain_secret(SOURCEAUDIO_NOTIFICATION_EMAIL_SERVICE)
+    return value.strip() if value and value.strip() else None
+
+
+def sourceaudio_api_keychain_configured() -> bool:
+    """Require both SourceAudio values used by unattended publish jobs."""
+    return bool(
+        load_sourceaudio_api_token() and load_sourceaudio_notification_email()
+    )
 
 
 def _keychain_frameworks():
@@ -1057,6 +1099,13 @@ def auth_status() -> dict[str, dict[str, object]]:
         },
         "soundmouse": {
             "state": "configured" if soundmouse_keychain_configured() else "missing",
+            "private_permissions": True,
+            "location": "macOS Keychain",
+        },
+        "sourceaudio_api": {
+            "state": (
+                "configured" if sourceaudio_api_keychain_configured() else "missing"
+            ),
             "private_permissions": True,
             "location": "macOS Keychain",
         },

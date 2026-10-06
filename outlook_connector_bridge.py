@@ -112,9 +112,12 @@ def _current_plan(ctx: ReleaseContext, endpoint: str) -> EmailPlan:
     # result; this catches metadata or signature changes between turns.
     handoff = load_handoff(ctx, endpoint)
     expected_to = "libraries@qwire.com" if endpoint == "qwire" else "patrick.magee@scripps.com"
-    expected_subject = (
-        f"Universal Production Music - {ctx.delivery_display_folder} Metadata Delivery"
+    display = (
+        ctx.monthly_partner_display(endpoint)
+        if getattr(ctx, "is_monthly_delivery", False)
+        else ctx.delivery_display_folder
     )
+    expected_subject = f"Universal Production Music - {display} Metadata Delivery"
     expected_body = compose_body(load_private_signature())
     if handoff.get("to") != [expected_to] or handoff.get("subject") != expected_subject:
         raise OutlookBridgeError("Current Outlook plan no longer matches its handoff")

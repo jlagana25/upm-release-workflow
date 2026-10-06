@@ -244,6 +244,7 @@ helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 `synchtank_delivery.py` (standalone direct-root S3 upload with final trigger),
 `tunesat_delivery.py` (standalone complete-package SFTP delivery),
 `soundmouse_uploader_delivery.py` (standalone native-app SoundMouse upload),
+`soundmouse_web_delivery.py` (UPPM website workbook processing and final receipt),
 `post_packaging_delivery.py` (unified guarded endpoint runner),
 `delivery_common.py` (manifest/checkpoint/receipt safety primitives),
 `espn_delivery.py` (Media Shuttle folder delivery),
@@ -484,6 +485,14 @@ inline or are submitted to HDF1's login-session agent.
   A metadata-only correction uploads only nonempty `Metadata`; do not require
   or resend MEDIA/Covers. Keep correction audits outside the selected package,
   because the native app recursively queues every file beneath that folder.
+- **SoundMouse delivery runs both phases end to end.**
+  `soundmouse_web_delivery.py` opens every exact uploaded Metadata workbook in
+  UPPM/Music, preserves its saved territories and mappings, requires zero
+  blocking errors, signs it off, and rejects a newly generated spreadsheet-
+  error report. Recommended-metadata warnings are recorded but do not block.
+  Manifest-bound per-workbook checkpoints allow safe resume without processing
+  a completed sheet twice. Only this website receipt advances SoundMouse from
+  `uploaded` to `delivered`.
 - **Agent requests are atomic JSON.** HDF2 sends control JSON over SSH into
   HDF1's local `pending/`; HDF1 claims by rename, updates heartbeats/status,
   and archives the request. SSH never owns or drives the GUI. Keep

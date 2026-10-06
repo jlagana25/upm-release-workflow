@@ -40,7 +40,7 @@ ENDPOINTS = {
     "soundexchange": Endpoint("soundexchange", "delivered", "implemented", "two registrant submissions"),
     "qwire": Endpoint("qwire", "connector_handoff_prepared", "implemented", "Outlook connector email"),
     "scripps": Endpoint("scripps", "connector_handoff_prepared", "implemented", "Outlook connector email"),
-    "soundmouse": Endpoint("soundmouse", "uploaded", "implemented", "UPPM/Music native uploader; website metadata processing remains"),
+    "soundmouse": Endpoint("soundmouse", "delivered", "implemented", "UPPM/Music uploader plus zero-error website processing"),
     "synchtank": Endpoint("synchtank", "delivered", "implemented", "S3 inbox with final trigger"),
     "tunesat": Endpoint("tunesat", "delivered", "implemented", "complete-package SFTP"),
     "discovery": Endpoint("discovery", "delivered", "waiting_credentials", "Sony Ci + MediaBox"),
@@ -91,6 +91,7 @@ def _implemented_runners(
     from netmix_portal_delivery import deliver_netmix
     from soundexchange_delivery import deliver_soundexchange
     from soundmouse_uploader_delivery import deliver_soundmouse_uploader
+    from soundmouse_web_delivery import deliver_soundmouse_web
     from synchtank_delivery import deliver_synchtank
     from tunesat_delivery import deliver_tunesat
     from outlook_connector_bridge import prepare_handoff
@@ -99,10 +100,36 @@ def _implemented_runners(
         def run(ctx: ReleaseContext, dry: bool, log: logging.Logger) -> bool:
             if dry:
                 return deliver_email(ctx, endpoint, True, log, signature=signature)
+            if outlook_gateway is not None:
+                resolved_signature = signature or load_private_signature()
+                return deliver_email(
+                    ctx,
+                    endpoint,
+                    False,
+                    log,
+                    gateway=outlook_gateway,
+                    signature=resolved_signature,
+                    live_confirmation=live_confirmation,
+                )
             path, _plan = prepare_handoff(ctx, endpoint)
             log.info("  ✓ %s Outlook connector handoff prepared: %s", endpoint, path)
             return True
         return run
+
+    def soundmouse_runner(
+        ctx: ReleaseContext, dry: bool, log: logging.Logger
+    ) -> bool:
+        current = partner_status(ctx.specials_dir, "soundmouse")
+        if current != "uploaded":
+            if not deliver_soundmouse_uploader(ctx, dry, log):
+                return False
+        return deliver_soundmouse_web(
+            ctx,
+            dry,
+            log,
+            live_confirmation=live_confirmation,
+            interactive_login=interactive_login,
+        )
 
     return {
         "espn": lambda ctx, dry, log: deliver_espn(
@@ -118,7 +145,7 @@ def _implemented_runners(
         "netmix": lambda ctx, dry, log: deliver_netmix(
             ctx, dry, log, live_confirmation=live_confirmation,
         ),
-        "soundmouse": deliver_soundmouse_uploader,
+        "soundmouse": soundmouse_runner,
         "synchtank": deliver_synchtank,
         "tunesat": deliver_tunesat,
     }
@@ -189,20 +216,18 @@ def run_deliveries(
             logger.info("  ↩ %s already delivered; skipping duplicate submission", key)
             results[key] = "already_delivered"
             continue
-        if key == "soundmouse" and current == "uploaded":
-            logger.info(
-                "  ⏸ soundmouse: native upload is complete; website metadata "
-                "processing with zero errors is still required"
-            )
-            results[key] = "awaiting_metadata_processing"
-            continue
         runner = runners.get(key)
         if runner is None:
             logger.info("  ⏸ %s: %s", key, endpoint.availability)
             results[key] = endpoint.availability
             continue
         ok = bool(runner(ctx, dry_run, logger))
-        results[key] = "planned" if dry_run and ok else endpoint.outcome if ok else "failed"
+        if dry_run and ok:
+            results[key] = "planned"
+        elif ok and partner_status(ctx.specials_dir, key) == "delivered":
+            results[key] = "delivered"
+        else:
+            results[key] = endpoint.outcome if ok else "failed"
         if ok and not dry_run:
             monday_ok = progress_sync(ctx, logger)
             results["monday"] = "completed" if monday_ok else "failed"
@@ -270,7 +295,7 @@ def _main() -> int:
     )
     parser.add_argument(
         "--interactive-login", action="store_true",
-        help="allow a bounded one-session SoundExchange sign-in",
+        help="allow bounded SoundExchange or SoundMouse sign-in recovery",
     )
     parser.add_argument(
         "--interactive-native-selection", action="store_true",

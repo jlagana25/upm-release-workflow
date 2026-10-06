@@ -22,6 +22,7 @@ from delivery_common import (
     checkpoint,
     collect_manifest,
     latest_workflow_gates,
+    load_endpoint_state,
     receipt,
     require_live_authorization,
 )
@@ -32,10 +33,32 @@ PORTAL_URL = "https://espn-file-transfers-shr.mediashuttle.com/memberLogin"
 DESTINATION = "from_killer_tracks"
 TRANSFER_PANEL_SELECTOR = ".activity-frame"
 TRANSFER_RECORD_SELECTOR = ".activity-item"
+SIGNIANT_APP_CANDIDATES = (
+    Path.home() / "Applications" / "SigniantApp.app",
+    Path("/Applications/SigniantApp.app"),
+    Path.home() / "Applications" / "Signiant App.app",
+    Path("/Applications/Signiant App.app"),
+)
 
 
 class EspnDeliveryError(DeliverySafetyError):
     pass
+
+
+def _launch_signiant_app() -> Path:
+    """Launch the exact installed Signiant application and verify the request."""
+    app = next((path for path in SIGNIANT_APP_CANDIDATES if path.is_dir()), None)
+    if app is None:
+        raise EspnDeliveryError("The SigniantApp application is not installed")
+    launched = subprocess.run(
+        ["/usr/bin/open", str(app)],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if launched.returncode != 0:
+        raise EspnDeliveryError(f"Could not launch SigniantApp at {app}")
+    return app
 
 
 def _select_native_folder(package: Path) -> None:
@@ -71,6 +94,40 @@ def _select_native_folder(package: Path) -> None:
     time.sleep(1)
     pyautogui.press("enter")
     time.sleep(2)
+
+
+def _begin_signiant_handoff(page) -> None:
+    """Open the native picker through either supported Media Shuttle UI."""
+    upload = page.get_by_text("Upload", exact=True)
+    if upload.count() != 1 or not upload.first.is_enabled():
+        raise EspnDeliveryError("ESPN portal upload action is not uniquely available")
+    upload.first.click()
+
+    # Older Media Shuttle builds show an interstitial before handing off to
+    # Signiant.  The current build opens an inline "Upload to your portal"
+    # panel whose Add Files action launches the native picker directly.
+    continue_link = page.get_by_text("YES, CONTINUE", exact=True)
+    add_files = page.get_by_text("Add Files", exact=True)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if continue_link.count() and continue_link.first.is_visible():
+            if continue_link.count() != 1:
+                raise EspnDeliveryError(
+                    "Media Shuttle Signiant handoff confirmation was not unique"
+                )
+            continue_link.first.click()
+            return
+        if add_files.count() and add_files.first.is_visible():
+            if add_files.count() != 1:
+                raise EspnDeliveryError(
+                    "Media Shuttle Add Files action was not unique"
+                )
+            add_files.first.click()
+            return
+        time.sleep(0.25)
+    raise EspnDeliveryError(
+        "Media Shuttle did not present a supported Signiant handoff action"
+    )
 
 
 class EspnGateway(Protocol):
@@ -110,8 +167,16 @@ class PlaywrightEspnGateway:
                 and self._page.get_by_text(DESTINATION, exact=True).count()
             )
 
-        if ready():
-            return
+        # The authenticated shell renders before its destination list.  Give
+        # that async list time to appear so a healthy retained session is not
+        # mistaken for the (also initially sparse) sign-in page.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if ready():
+                return
+            if self._page.locator("input[type=password]:visible").count():
+                break
+            time.sleep(0.25)
         from auth_manager import load_espn_credentials
         from portal_auth import PortalAuthenticationError, attempt_keychain_login
         try:
@@ -176,14 +241,8 @@ class PlaywrightEspnGateway:
 
     def start_folder_upload(self, package: Path, destination: str) -> None:
         self._open_destination(destination)
-        subprocess.run(
-            ["/usr/bin/open", "-a", "Signiant App"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        self._page.get_by_text("Upload", exact=True).click()
-        continue_link = self._page.get_by_text("YES, CONTINUE", exact=True)
-        if continue_link.count():
-            continue_link.click()
+        _launch_signiant_app()
+        _begin_signiant_handoff(self._page)
         if not self._interactive_native_selection:
             _select_native_folder(package)
         try:
@@ -194,7 +253,9 @@ class PlaywrightEspnGateway:
             raise EspnDeliveryError(
                 "The exact ESPN package was not selected in the Signiant picker"
             ) from exc
-        upload = self._page.get_by_role("button", name="Upload", exact=True)
+        upload = self._page.locator("#teamspace-upload-transfer-button:visible")
+        if not upload.count():
+            upload = self._page.get_by_role("button", name="Upload", exact=True)
         if upload.count() != 1 or not upload.is_enabled():
             raise EspnDeliveryError("ESPN staged upload is not ready")
         upload.click()
@@ -264,6 +325,14 @@ def deliver_espn(
         gateway.require_authenticated()
         status = gateway.transfer_status(package.name)
         visible = gateway.destination_contains(package.name)
+        prior = load_endpoint_state(ctx, "espn")
+        prior_history = list((prior or {}).get("history") or [])
+        accepted_submission = bool(
+            (prior or {}).get("phase") == "submitted"
+            and prior_history
+            and prior_history[-1].get("detail")
+            == "folder upload accepted by Signiant"
+        )
         if status == "uploaded" and visible:
             logger.info("  ESPN folder was already uploaded and verified")
         else:
@@ -272,18 +341,35 @@ def deliver_espn(
                     "Exact ESPN destination folder exists without a verified completed transfer"
                 )
             if status == "interrupted":
-                checkpoint(ctx, "espn", files, "submitted", "resuming interrupted transfer")
                 gateway.resume_transfer(package.name)
+                checkpoint(ctx, "espn", files, "submitted", "interrupted transfer resumed")
             elif status in {None, "failed"}:
-                checkpoint(ctx, "espn", files, "submitted", "folder upload initiated")
+                if status is None and accepted_submission:
+                    raise EspnDeliveryError(
+                        "A Signiant-accepted ESPN submission has no portal history; "
+                        "refusing a duplicate upload"
+                    )
                 gateway.start_folder_upload(package, DESTINATION)
+                checkpoint(
+                    ctx,
+                    "espn",
+                    files,
+                    "submitted",
+                    "folder upload accepted by Signiant",
+                )
             elif status not in {"active"}:
                 raise EspnDeliveryError(f"Unrecognized existing ESPN transfer state: {status}")
             deadline = time.monotonic() + max(timeout_hours, 0.01) * 3600
+            # Signiant V2 can be actively transferring for several minutes
+            # before Media Shuttle publishes the new row in My Transfers.
+            startup_deadline = time.monotonic() + 900
             while time.monotonic() < deadline:
                 status = gateway.transfer_status(package.name)
                 if status == "uploaded":
                     break
+                if status is None and time.monotonic() < startup_deadline:
+                    time.sleep(max(poll_seconds, 0.01))
+                    continue
                 if status in {"failed", "interrupted", "unknown", None}:
                     raise EspnDeliveryError(f"ESPN transfer did not complete: {status}")
                 time.sleep(max(poll_seconds, 0.01))

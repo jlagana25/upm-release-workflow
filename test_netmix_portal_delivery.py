@@ -12,16 +12,22 @@ import netmix_portal_delivery as netmix
 
 
 class FakePortal:
-    def __init__(self):
+    def __init__(self, statuses=None):
         self.uploaded = 0
+        self.statuses = dict(statuses or {})
+        self.waited = 0
 
     def require_authenticated(self):
         pass
+
+    def history_statuses(self, _folder, _expected):
+        return dict(self.statuses)
 
     def upload_package(self, _package):
         self.uploaded += 1
 
     def wait_for_completion(self, _folder, expected, _timeout):
+        self.waited += 1
         return {name: "Complete" for name in expected}
 
     def close(self):
@@ -143,6 +149,61 @@ class NetmixPortalDeliveryTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(portal.uploaded, 1)
         self.assertTrue((self.root / "_WORKFLOW" / "netmix_delivery_receipt.json").is_file())
+
+    def test_completed_portal_history_writes_receipt_without_reupload(self):
+        portal = FakePortal({"one.wav": "Complete", "two.wav": "Accepted"})
+        with (
+            patch.object(netmix, "package_root", return_value=self.package),
+            patch.object(netmix, "latest_workflow_gates", return_value=(True, "ok")),
+        ):
+            result = netmix.deliver_netmix(
+                self.ctx, False, self.log,
+                live_confirmation=self.ctx.release_id,
+                portal_gateway=portal,
+                timeout_seconds=1,
+            )
+        self.assertTrue(result)
+        self.assertEqual(portal.uploaded, 0)
+        self.assertEqual(portal.waited, 0)
+        self.assertTrue((self.root / "_WORKFLOW" / "netmix_delivery_receipt.json").is_file())
+
+    def test_active_portal_history_resumes_verification_without_reupload(self):
+        portal = FakePortal({"one.wav": "Complete", "two.wav": "Processing"})
+        with (
+            patch.object(netmix, "package_root", return_value=self.package),
+            patch.object(netmix, "latest_workflow_gates", return_value=(True, "ok")),
+        ):
+            result = netmix.deliver_netmix(
+                self.ctx, False, self.log,
+                live_confirmation=self.ctx.release_id,
+                portal_gateway=portal,
+                timeout_seconds=1,
+            )
+        self.assertTrue(result)
+        self.assertEqual(portal.uploaded, 0)
+        self.assertEqual(portal.waited, 1)
+
+    def test_completed_partial_history_refuses_duplicate_upload(self):
+        portal = FakePortal({"one.wav": "Complete"})
+        with (
+            patch.object(netmix, "package_root", return_value=self.package),
+            patch.object(netmix, "latest_workflow_gates", return_value=(True, "ok")),
+        ):
+            result = netmix.deliver_netmix(
+                self.ctx, False, self.log,
+                live_confirmation=self.ctx.release_id,
+                portal_gateway=portal,
+                timeout_seconds=1,
+            )
+        self.assertFalse(result)
+        self.assertEqual(portal.uploaded, 0)
+        self.assertEqual(portal.waited, 0)
+
+    def test_history_action_rejects_unknown_status(self):
+        with self.assertRaisesRegex(netmix.NetmixDeliveryError, "unknown"):
+            netmix.history_resume_action(
+                {"one.wav": "Mystery"}, frozenset({"one.wav", "two.wav"})
+            )
 
     def test_expired_history_session_recovers_from_keychain(self):
         gateway = object.__new__(netmix.PlaywrightNetmixPortalGateway)

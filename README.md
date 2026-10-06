@@ -312,7 +312,20 @@ Then the other machine installs with `pip install -r requirements.lock`.
   SourceAudio staging tree. New US album covers derive their `.webp` download
   URL from the current tracklist's `CDNAlbumArt` structure while retaining the
   metadata cover filename locally. Missing source masters fail closed without
-  deleting existing media.
+  deleting existing media. Before either API export replaces its local CSV,
+  `sourceaudio_keyword_audit.py` compares Keywords by External Id and preserves
+  immutable revisions under `_WORKFLOW/sourceaudio_keyword_revisions/us` or
+  `exus`. These keyword-only candidates do not require audio conversion or
+  resend. Description changes are ignored. Repeated exports retain outstanding
+  evidence; a local export is not proof of remote metadata, and missing prior
+  exports are explicitly recorded as unverified baselines. Resolve the remote
+  SourceAudio ID and compare current Keywords before applying a sparse update,
+  then read back the result. Keep correction receipts separate from ordinary
+  release delivery status. A revision remains outstanding until its sibling
+  `<revision>.receipt.json` has `status: remote_verified`, the exact
+  `revision_sha256`, and all changed `verified_external_ids` (every current ID
+  for an unverified baseline). Only create that receipt after remote readback.
+  Blank replacements require explicit clear review.
 - Catalog refreshes are delivery-state aware. A partner is `pending` unless it
   has explicitly been marked `uploaded` or `delivered` in the release-local
   `_WORKFLOW/delivery_status.json`. Re-running Steps 1, 5–8, and 10 replaces its
@@ -371,6 +384,11 @@ Then the other machine installs with `pip install -r requirements.lock`.
   only the transport phase and marks SoundMouse `uploaded`; website processing
   of every metadata workbook with zero errors is still required before
   `delivered`.
+- `soundmouse_web_delivery.py` — the second SoundMouse phase. It resumes the
+  retained UPPM website session, processes the exact uploaded workbook
+  manifest with saved territory/mapping choices, accepts only non-blocking
+  recommended-metadata warnings, verifies that no new spreadsheet-error report
+  appeared, writes the website receipt, and marks the endpoint delivered.
 - `bmat_delivery.py` — Step 17: exports the date-filtered custom-release list
   and full BMAT submission inventory, excludes accepted or ingestion-pending
   catalogues using the Pegasus-local delivery ledger, resumes retryable batches,
@@ -399,8 +417,10 @@ Then the other machine installs with `pip install -r requirements.lock`.
   the exact standalone monthly NTT/JMD-TSS/Qwire/Scripps batch. It dispatches the standalone upload,
   browser, and Outlook-connector endpoints. A fully verified upload is recorded
   as `delivered`; SoundMouse uses `uploaded` as the active boundary between its
-  native transfer and website metadata processing. For other endpoints it
-  remains a legacy/correction-routing state.
+  native transfer and website metadata processing. A single SoundMouse run now
+  performs both phases, while a resume from `uploaded` starts directly at the
+  website phase. For other endpoints it remains a legacy/correction-routing
+  state.
 - `espn_delivery.py` — submits the complete ESPN directory as one Media Shuttle
   folder, resumes only an interrupted matching transfer, and requires both an
   `Uploaded 1 file(s)` history result and the exact destination folder before
