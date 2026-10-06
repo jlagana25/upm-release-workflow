@@ -82,8 +82,10 @@ The `upm-monthly-metadata-delivery` heartbeat is likewise authorized to run
 day of the delivery month when those same host, login-session, mounted-volume,
 and private-authentication requirements are satisfied. That run owns only NTT
 DATA, JMD/TSS, Qwire, and Scripps, and its content window is exactly the
-previous calendar month. It may build and verify the standalone monthly root
-and synchronize its Monday item, but it may not send email, notify a MediaBox,
+previous calendar month. Beginning with the November 1, 2026 run, it opens the
+14-day rolling batch containing that first day, builds only those four partner
+packages inside that batch, and leaves every other partner for the normal
+post-cutoff run. It may synchronize that rolling Monday item, but it may not send email, notify a MediaBox,
 or perform another final external submission without explicit authorization
 for that exact monthly release ID.
 
@@ -630,11 +632,13 @@ inline or are submitted to HDF1's login-session agent.
   no-op is `Complete` with `No Action Needed`.
   NTT DATA, JMD/TSS, Qwire, and Scripps are built only by
   `monthly_delivery_workflow.py` on the 1st for the complete previous calendar
-  month. Its root is `UPM-YYYY-MM-MONTHLY` and Monday batch is `UPMYYYYMM01`.
-  Rolling Content Updates items exclude those four monthly-only subitems; the
-  source preflight removes any copies created by the external Monday template
-  through the API before validating the destination. The standalone monthly
-  item uses `In Progress` while building and `Ready to Deliver` when verified. Never carry
+  month. Beginning November 1, 2026, its root and Monday batch are the rolling
+  window containing the delivery date (for example, November 1 belongs to
+  `UPM20261024`, covering October 24–November 6). Source preflight preserves
+  those four subitems only in the month-owning rolling batch and removes them
+  from every other rolling batch. The early phase uses `In Progress` while
+  building and `Ready to Deliver` when verified; the later full run resumes the
+  same root and leaves completed monthly packages untouched. Never carry
   monthly NTT audio or metadata forward from a rolling release.
   After the monthly NTT DATA and JMD/TSS MediaBoxes are verified, prepare two
   Outlook drafts only. Resolve the approved Japan delivery recipient and CC

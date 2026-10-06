@@ -397,8 +397,8 @@ class PostPackagingDeliveryTests(unittest.TestCase):
 
     def test_november_delivery_uses_october_part_2_for_email_endpoints_only(self):
         ctx = ReleaseContext.for_monthly_delivery("2026-11-01")
-        self.assertEqual(ctx.release_id, "UPM-2026-10-MONTHLY-P2")
-        self.assertEqual(ctx.monthly_monday_batch, "UPM20261101")
+        self.assertEqual(ctx.release_id, "UPM20261024")
+        self.assertEqual(ctx.monthly_monday_batch, "UPM20261024")
         for endpoint in ("qwire", "scripps"):
             source = self.root / f"{endpoint}-monthly.csv"
             source.write_text("Trackid,Title\n1,One\n", encoding="utf-8")

@@ -70,22 +70,20 @@ setting up a new machine, work through Part 2 top to bottom.
 | August transition Part 1 refresh (July full-month content) | `python3 upm_release_workflow.py --previous-month` (while run date is August 2026; targets the existing August 2026 Part 1 client folders) |
 | Initial rolling transition | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-11` |
 | Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-12 --end-date 2026-09-25` |
-| First-of-month NTT/JMD-TSS/Qwire/Scripps build | `python3 monthly_delivery_workflow.py --delivery-date 2026-10-01 --dry-run` |
+| First-of-month NTT/JMD-TSS/Qwire/Scripps build | `python3 monthly_delivery_workflow.py --delivery-date 2026-11-01 --dry-run` |
 | Previous month (full month), auto from today | `python3 upm_release_workflow.py --previous-month` |
 | Previous month relative to a given month | `python3 upm_release_workflow.py --previous-month --year 2026 --month 6` |
 | Preview the whole run incl. non-maintrack deletions | add `--dry-run` |
 | Re-do a step that already produced output | add `--overwrite` |
 | Resume after a failure, skipping finished steps | add the matching `--skip-*` flags |
 
-NTT DATA, JMD/TSS, Qwire, and Scripps use the separate monthly command:
-`python3 monthly_delivery_workflow.py --delivery-date 2026-10-01 --dry-run`.
-Confirm it uses root `UPM-2026-10-MONTHLY`, Monday batch `UPM20261001`, and
-content dates September 1–30 while every client-facing label says
-`October 2026`. It must export only the four monthly cards and run only Japan
-UniSync. Every rolling context must report these endpoints as `not_due`, omit
-Japan UniSync, and leave no monthly partner tree in Final Packaging. Confirm a
-monthly rerun preserves existing exact files and never imports audio or metadata
-from a rolling release.
+NTT DATA, JMD/TSS, Qwire, and Scripps use the first-of-month command:
+`python3 monthly_delivery_workflow.py --delivery-date 2026-11-01 --dry-run`.
+Confirm it uses rolling root `UPM-2026-10-24`, Monday batch `UPM20261024`, and
+content dates October 1–31. It must export only the four monthly cards, run only
+Japan UniSync, and leave every ordinary rolling partner unbuilt. The later
+October 24–November 6 full run must merge the baseline around these packages,
+clear the early-phase marker, and preserve their exact files and statuses.
 
 ## What runs, and in what order
 
@@ -944,22 +942,23 @@ than browser UI automation.
   ```
 - Confirm the log maps Content/HD/SoundMouse to `UPM20260901`,
   lists every proposed old/new status, and performs no mutation.
-- Confirm source preflight removes NTT DATA, JMD/TSS, Qwire, and Scripps from
-  rolling Content Updates through the Monday API; those subitems exist only on
-  the standalone `UPMYYYYMM01` monthly item.
+- Confirm source preflight preserves NTT DATA, JMD/TSS, Qwire, and Scripps only
+  when the rolling range contains the first-of-month delivery date; it removes
+  them from every other rolling Content Updates item.
 - A real full run advances successfully prepared package subitems to
   `Ready to Deliver`. It derives each main-item status from its subitems and never
   downgrades `Complete`, `Done`, `Not Required`, or `Managed by API`.
   It also writes the separate `Next Action` column with the concrete handoff
   and verifies every write; completed or excluded rows say `No Action Needed`.
-  Rolling batches must not contain NTT DATA, JMD/TSS, Qwire, or Scripps
-  subitems; source preflight removes template-created copies through the API.
+  Non-owning rolling batches must not contain NTT DATA, JMD/TSS, Qwire, or
+  Scripps subitems; source preflight removes template-created copies through the API.
   Source preflight also adds the missing rolling `BMAT` subitem. Step 17 failure
   must produce `Blocked`; successful delivery or a valid empty export must
   produce `Complete` plus `No Action Needed`.
-  The standalone `UPMYYYYMM01` monthly item contains only those four subitems;
-  they show `In Progress` while building and `Ready to Deliver` after all
-  previous-month metadata/audio and final-package gates pass.
+  In the month-owning rolling item, those four subitems show `In Progress`
+  during the early phase and `Ready to Deliver` after all previous-month
+  metadata/audio and final-package gates pass; other partner subitems remain
+  untouched until the normal post-cutoff run.
   After mutation it re-reads both batches and fails if any requested status is
   not confirmed.
 - Confirm live checkpoints run after Step 10 (Hard Drive), after Step 15

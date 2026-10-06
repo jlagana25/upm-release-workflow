@@ -22,6 +22,7 @@ Standalone test:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -39,6 +40,9 @@ from config import (
     context_from_cli_args,
     is_retired_partner_name,
 )
+
+
+_EARLY_MONTHLY_MARKER = Path("_WORKFLOW") / "early_monthly_build.json"
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +171,11 @@ def _is_domo_csv_skeleton(dst: Path) -> bool:
     return True
 
 
+def _is_early_monthly_skeleton(dst: Path) -> bool:
+    """True when the first-of-month phase intentionally opened this root."""
+    return (dst / _EARLY_MONTHLY_MARKER).is_file()
+
+
 def _has_unresolved_placeholder_names(dst: Path) -> bool:
     """True when an existing Specials tree is visibly an incomplete copy."""
     if not dst.exists():
@@ -253,8 +262,19 @@ def _safe_copytree(
     #   (b) Step-1 CSV skeleton only → merge baseline in around the CSVs
     #   (c) real prior copy          → require --overwrite (archive) as before
     merge_into_skeleton = False
+    early_monthly_skeleton = False
     if dst.exists():
-        if overwrite:
+        if _is_early_monthly_skeleton(dst):
+            # The early phase is completed work in the same release, not an old
+            # destination. Even --overwrite may not archive it.
+            merge_into_skeleton = True
+            early_monthly_skeleton = True
+            logger.info(
+                f"  Destination contains the completed early monthly phase [{label}] — "
+                f"merging the rolling baseline around it (existing packages kept):\n"
+                f"    {dst}"
+            )
+        elif overwrite:
             logger.warning(
                 f"  Destination exists — archiving (--overwrite) [{label}]:\n"
                 f"    {dst}"
@@ -310,6 +330,10 @@ def _safe_copytree(
             )
             return False
         logger.info(f"  Merge complete [{label}]: {n} file(s) added.")
+        if early_monthly_skeleton:
+            marker = dst / _EARLY_MONTHLY_MARKER
+            marker.unlink(missing_ok=True)
+            logger.info("  Early monthly marker cleared after baseline merge.")
     else:
         logger.info(
             f"  Copying [{label}]:\n"
@@ -716,6 +740,20 @@ def create_monthly_delivery_folder(
     try:
         for path in sorted(directories):
             path.mkdir(parents=True, exist_ok=True)
+        if ctx.monthly_rolls_into_batch:
+            marker = ctx.specials_dir / _EARLY_MONTHLY_MARKER
+            marker.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "delivery_date": ctx.monthly_metadata_delivery_date,
+                    "content_start": ctx.release_start,
+                    "content_end": ctx.release_end,
+                    "rolling_start": ctx.monthly_rolling_owner_start,
+                    "rolling_end": ctx.monthly_rolling_owner_end,
+                }, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            marker.chmod(0o600)
     except OSError as exc:
         logger.error("  ✗ Could not create monthly delivery tree: %s", exc)
         return False

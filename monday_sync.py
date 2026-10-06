@@ -26,6 +26,7 @@ from config import (
     ReleaseContext,
     context_from_cli_args,
     monthly_metadata_delivery_ready,
+    rolling_monthly_delivery_date,
 )
 from delivery_state import partner_status
 
@@ -265,7 +266,7 @@ class MondayGateway(Protocol):
         self, batch: str, items: list[BoardItem]
     ) -> bool: ...
     def remove_rolling_monthly_subitems(
-        self, batch: str, items: list[BoardItem]
+        self, batch: str, items: list[BoardItem], *, keep_monthly: bool = False
     ) -> int: ...
     def ensure_rolling_bmat_subitem(
         self, batch: str, items: list[BoardItem]
@@ -795,7 +796,7 @@ class MondayClient:
         return changed
 
     def remove_rolling_monthly_subitems(
-        self, batch: str, items: list[BoardItem]
+        self, batch: str, items: list[BoardItem], *, keep_monthly: bool = False
     ) -> int:
         """Remove monthly-only partners from an automation-created rolling item."""
         content = _require_single(items, GROUP_CONTENT, batch)
@@ -816,6 +817,14 @@ class MondayClient:
                 "Rolling Content Updates item has duplicate monthly subitems: "
                 + ", ".join(duplicate_names)
             )
+        if keep_monthly:
+            missing = sorted(monthly_names - {child.name for child in matches})
+            if missing:
+                raise MondayError(
+                    "Month-owning rolling item is missing monthly subitems: "
+                    + ", ".join(missing)
+                )
+            return 0
         for child in matches:
             data = self._request(
                 """
@@ -1223,6 +1232,8 @@ def _next_action_for(item_name: str, status: str) -> str:
 def build_next_action_plan(
     items_by_batch: Mapping[str, list[BoardItem]],
     status_changes: Iterable[StatusChange],
+    *,
+    eligible_subitem_ids: set[int] | None = None,
 ) -> list[NextActionChange]:
     """Plan the companion Next Action value for every fetched subitem."""
     planned = {
@@ -1235,6 +1246,11 @@ def build_next_action_plan(
     for items in items_by_batch.values():
         for parent in items:
             for child in parent.subitems:
+                if (
+                    eligible_subitem_ids is not None
+                    and child.id not in eligible_subitem_ids
+                ):
+                    continue
                 if child.id in seen:
                     continue
                 seen.add(child.id)
@@ -1515,7 +1531,9 @@ def load_source_rows(path: Path, batch: str) -> tuple[SourceRow, ...]:
     return tuple(rows)
 
 
-def _required_destination_shape(items: list[BoardItem], batch: str) -> None:
+def _required_destination_shape(
+    items: list[BoardItem], batch: str, *, include_monthly: bool = False
+) -> None:
     content = _require_single(items, GROUP_CONTENT, batch)
     hd = _require_single(items, GROUP_HD, batch)
     soundmouse = _require_single(items, GROUP_SOUNDMOUSE, batch)
@@ -1523,7 +1541,7 @@ def _required_destination_shape(items: list[BoardItem], batch: str) -> None:
         content.id: {
             name
             for name, partner in CONTENT_PARTNERS.items()
-            if partner not in MONTHLY_METADATA_PARTNERS
+            if include_monthly or partner not in MONTHLY_METADATA_PARTNERS
         },
         hd.id: {"MP3", "WAV"},
         soundmouse.id: {
@@ -1682,7 +1700,10 @@ def run_monday_source_preflight(
                     "through the Monday API."
                 )
                 destination = gateway.fetch_batch(batch)
-            removed = gateway.remove_rolling_monthly_subitems(batch, destination)
+            include_monthly = rolling_monthly_delivery_date(ctx) is not None
+            removed = gateway.remove_rolling_monthly_subitems(
+                batch, destination, keep_monthly=include_monthly
+            )
             if removed:
                 logger.info(
                     "  ✓ Removed %d monthly-only subitem(s) from the rolling "
@@ -1696,7 +1717,9 @@ def run_monday_source_preflight(
                 )
                 destination = gateway.fetch_batch(batch)
             try:
-                _required_destination_shape(destination, batch)
+                _required_destination_shape(
+                    destination, batch, include_monthly=include_monthly
+                )
                 logger.info(
                     "  ✓ Monday source automation created Content Updates, Hard "
                     "Drive Updates, and SoundMouse Updates with required subitems."
@@ -1758,7 +1781,24 @@ def run_monday_sync(
         changes = build_status_plan(
             ctx, effective_results, items_by_batch, batch_override=batch_override
         )
-        next_actions = build_next_action_plan(items_by_batch, changes)
+        eligible_action_ids = None
+        if ctx.is_monthly_delivery:
+            monthly_names = {
+                name
+                for name, partner in CONTENT_PARTNERS.items()
+                if partner in MONTHLY_METADATA_PARTNERS
+            }
+            eligible_action_ids = {
+                child.id
+                for item in items_by_batch.get(month, [])
+                for child in item.subitems
+                if child.name in monthly_names
+            }
+        next_actions = build_next_action_plan(
+            items_by_batch,
+            changes,
+            eligible_subitem_ids=eligible_action_ids,
+        )
         if ctx.is_monthly_delivery:
             logger.info(f"  Monday monthly batch mapping: Content={month}")
         elif compact_batch:

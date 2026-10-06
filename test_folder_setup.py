@@ -84,6 +84,27 @@ class RetiredPartnerFolderTests(unittest.TestCase):
             self.assertFalse(any(destination.rglob("*MTV*")))
             self.assertFalse(any(destination.rglob("*NBC*")))
 
+    def test_rolling_baseline_merges_around_early_monthly_packages(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = self._build_source(root)
+            destination = root / "release"
+            monthly = destination / "3-FINAL PACKAGING" / "Monthly Partner"
+            monthly.mkdir(parents=True)
+            (monthly / "delivered.xlsx").write_text("monthly", encoding="utf-8")
+            marker = destination / folder_setup._EARLY_MONTHLY_MARKER
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("{}\n", encoding="utf-8")
+
+            self.assertTrue(folder_setup._safe_copytree(
+                source, destination, False, True, "test", self.logger
+            ))
+            self.assertTrue((monthly / "delivered.xlsx").exists())
+            self.assertTrue((
+                destination / "3-FINAL PACKAGING" / "Current Partner" / "keep.txt"
+            ).exists())
+            self.assertFalse(marker.exists())
+
     def test_non_triggering_run_excludes_monthly_metadata_partner_trees(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

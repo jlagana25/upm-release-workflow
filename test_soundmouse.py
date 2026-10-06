@@ -187,7 +187,7 @@ class SoundMouseTests(unittest.TestCase):
         )
         self.assertEqual(january_monthly.release_start, "2026-12-01")
         self.assertEqual(january_monthly.release_end, "2026-12-31")
-        self.assertEqual(january_monthly.release_id, "UPM-2026-12-MONTHLY")
+        self.assertEqual(january_monthly.release_id, "UPM20261219")
         self.assertEqual(
             crossing_year.partner_folder_name("SynchTank"),
             "Universal Production Music Dec 29 2026–Jan 11 2027 Releases - SynchTank",

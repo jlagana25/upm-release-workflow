@@ -158,7 +158,9 @@ class FakeGateway:
     def repair_soundmouse_destination(self, _batch, _items):
         return False
 
-    def remove_rolling_monthly_subitems(self, batch, items):
+    def remove_rolling_monthly_subitems(
+        self, batch, items, *, keep_monthly=False
+    ):
         monthly_names = {
             "UPM Japan - TSS & JMD Metadata (Album Date Format YYYY/MM/DD)",
             "UPM Japan - NTT DATA", "Scripps (Metadata only)",
@@ -168,6 +170,10 @@ class FakeGateway:
         removed = [
             child for child in content.subitems if child.name in monthly_names
         ]
+        if keep_monthly:
+            if {child.name for child in removed} != monthly_names:
+                raise AssertionError("month-owning batch is missing monthly subitems")
+            return 0
         if not removed:
             return 0
         self.removed_monthly.extend(child.name for child in removed)
@@ -270,6 +276,8 @@ class MondaySyncTests(unittest.TestCase):
 
         monthly = ReleaseContext.for_monthly_delivery("2026-10-01")
         self.assertEqual(monday_batch_key(monthly), "UPM20261001")
+        rolled_monthly = ReleaseContext.for_monthly_delivery("2026-11-01")
+        self.assertEqual(monday_batch_key(rolled_monthly), "UPM20261024")
 
     def test_client_creates_restartable_monthly_content_item(self):
         ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
@@ -760,6 +768,38 @@ class MondaySyncTests(unittest.TestCase):
             item.row.batch_master == "Batch Master"
             for item in gateway.source_items
         ))
+
+    def test_month_owning_source_preflight_keeps_monthly_subitems(self):
+        ctx = ReleaseContext.for_date_range("2026-10-24", "2026-11-06")
+        batch = "UPM20261024"
+        gateway = FakeGateway({
+            batch: [
+                _content(batch=batch),
+                _hd(batch=batch),
+                _soundmouse(batch=batch),
+            ],
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx.monday_audio_batch_csv = Path(tmp) / "batch.csv"
+            ctx.monday_audio_batch_csv.write_text(
+                "WorkGroupingId,Batch,Catalog,Release Date,LabelId,Album Code,"
+                "Album Title,Digital Fulfillment,Batch Master\n"
+                "42,UPM20261024,UPM-US,2026-10-24,7,ABC1,Album,Create NEW,\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "domo_exports.run_domo_exports",
+                return_value={"monday_audio_batch": "ok"},
+            ):
+                self.assertTrue(run_monday_source_preflight(
+                    ctx,
+                    dry_run=False,
+                    logger=logging.getLogger("source-month-owner"),
+                    gateway=gateway,
+                    timeout_seconds=0,
+                    poll_seconds=0,
+                ))
+        self.assertEqual(gateway.removed_monthly, [])
 
     @patch("monday_sync.partner_status", return_value="pending")
     def test_only_step_recovery_uses_latest_real_report(self, _status):

@@ -332,9 +332,43 @@ DOCX_TO_PDF_METHODS: list[str] = ["libreoffice", "soffice"]
 # One-time bridge from the August full-month transition into the Friday-cutoff
 # rolling cadence. All later exact-date deliveries remain exactly 14 days.
 _INITIAL_ROLLING_RANGE = (date(2026, 9, 1), date(2026, 9, 11))
+_ROLLING_CADENCE_START = date(2026, 9, 12)
+# October's already-delivered standalone packages remain historical. Beginning
+# November 1, the first-of-month phase is owned by the rolling range containing
+# that date instead of creating another standalone batch/root.
+_ROLLING_MONTHLY_OWNERSHIP_START = date(2026, 11, 1)
 
-# These partners run in a standalone calendar-month workflow. Japan NTT DATA
-# includes its complete audio package; the other entries are metadata-only.
+
+def rolling_range_for_date(value: date) -> tuple[date, date]:
+    """Return the canonical rolling window that contains ``value``."""
+    if _INITIAL_ROLLING_RANGE[0] <= value <= _INITIAL_ROLLING_RANGE[1]:
+        return _INITIAL_ROLLING_RANGE
+    if value < _ROLLING_CADENCE_START:
+        raise ValueError("date predates the supported rolling release cadence")
+    offset = (value - _ROLLING_CADENCE_START).days
+    start = _ROLLING_CADENCE_START + timedelta(days=(offset // 14) * 14)
+    return start, start + timedelta(days=13)
+
+
+def rolling_monthly_delivery_date(ctx: "ReleaseContext") -> date | None:
+    """Return the first-of-month phase owned by a rolling range, if any."""
+    if not ctx.is_date_range:
+        return None
+    start = date.fromisoformat(ctx.release_start)
+    end = date.fromisoformat(ctx.release_end)
+    cursor = date(start.year, start.month, 1)
+    if cursor < start:
+        if start.month == 12:
+            cursor = date(start.year + 1, 1, 1)
+        else:
+            cursor = date(start.year, start.month + 1, 1)
+    if cursor <= end and cursor >= _ROLLING_MONTHLY_OWNERSHIP_START:
+        return cursor
+    return None
+
+# These partners run in the first-of-month phase using previous-calendar-month
+# content. Japan NTT DATA includes its complete audio package; the other entries
+# are metadata-only. New phases are stored in their owning rolling batch.
 MONTHLY_METADATA_PARTNERS: frozenset[str] = frozenset({
     "Japan NTT DATA",
     "Japan JMD and TSS",
@@ -414,6 +448,7 @@ class ReleaseContext:
         self.full_month_content = full_month_content
         self.is_date_range = range_start is not None
         self.is_monthly_delivery = monthly_delivery
+        monthly_owner_range: tuple[date, date] | None = None
 
         if self.is_monthly_delivery:
             next_year = year + (1 if month == 12 else 0)
@@ -424,6 +459,8 @@ class ReleaseContext:
                 raise ValueError(
                     "monthly delivery date must be the first day after the content month"
                 )
+            if monthly_delivery_date >= _ROLLING_MONTHLY_OWNERSHIP_START:
+                monthly_owner_range = rolling_range_for_date(monthly_delivery_date)
         elif monthly_delivery_date is not None:
             raise ValueError("monthly_delivery_date requires monthly_delivery")
 
@@ -442,13 +479,19 @@ class ReleaseContext:
             year == 2026 and month == 8 and part == 2
         )
         if self.is_monthly_delivery:
-            is_email_relabel_transition = monthly_delivery_date == date(2026, 11, 1)
-            self.release_variant = (
-                "MONTHLY-P2" if is_email_relabel_transition else "MONTHLY"
-            )
-            self.release_id = (
-                f"UPM-{self.year_str}-{self.month_num}-{self.release_variant}"
-            )
+            if monthly_owner_range is not None:
+                self.release_variant = "MONTHLY-IN-ROLLING"
+                self.release_id = (
+                    f"UPM{monthly_owner_range[0].strftime('%Y%m%d')}"
+                )
+            else:
+                is_email_relabel_transition = monthly_delivery_date == date(2026, 11, 1)
+                self.release_variant = (
+                    "MONTHLY-P2" if is_email_relabel_transition else "MONTHLY"
+                )
+                self.release_id = (
+                    f"UPM-{self.year_str}-{self.month_num}-{self.release_variant}"
+                )
         elif self.is_date_range:
             assert range_start is not None and range_end is not None
             self.release_variant = "RANGE"
@@ -559,8 +602,19 @@ class ReleaseContext:
             if self.is_monthly_delivery and monthly_delivery_date is not None
             else ""
         )
+        self.monthly_rolling_owner_start = (
+            monthly_owner_range[0].isoformat() if monthly_owner_range else ""
+        )
+        self.monthly_rolling_owner_end = (
+            monthly_owner_range[1].isoformat() if monthly_owner_range else ""
+        )
+        self.monthly_rolls_into_batch = monthly_owner_range is not None
         self.monthly_monday_batch = (
-            f"UPM{monthly_delivery_date.strftime('%Y%m%d')}"
+            (
+                self.release_id
+                if monthly_owner_range is not None
+                else f"UPM{monthly_delivery_date.strftime('%Y%m%d')}"
+            )
             if self.is_monthly_delivery and monthly_delivery_date is not None
             else ""
         )
@@ -862,6 +916,15 @@ class ReleaseContext:
         ):
             return f"{self.monthly_metadata_display_folder} Part 2"
         return self.monthly_metadata_display_folder
+
+    def monthly_rolling_context(self) -> "ReleaseContext":
+        """Return the rolling owner used for early monthly preparation."""
+        if not self.is_monthly_delivery or not self.monthly_rolls_into_batch:
+            raise ValueError("monthly delivery is not owned by a rolling batch")
+        return ReleaseContext.for_date_range(
+            self.monthly_rolling_owner_start,
+            self.monthly_rolling_owner_end,
+        )
 
     def partner_folder_name(self, partner: str) -> str:
         if partner in MONTHLY_METADATA_PARTNERS and self.monthly_metadata_due:

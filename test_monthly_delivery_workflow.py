@@ -11,7 +11,20 @@ LOG = logging.getLogger("test-monthly-delivery")
 
 class MonthlyDeliveryWorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.ctx = ReleaseContext.for_monthly_delivery("2026-10-01")
+        self.ctx = ReleaseContext.for_monthly_delivery("2026-11-01")
+
+    def test_monthly_context_uses_containing_rolling_batch(self):
+        self.assertEqual(self.ctx.release_start, "2026-10-01")
+        self.assertEqual(self.ctx.release_end, "2026-10-31")
+        self.assertEqual(self.ctx.release_id, "UPM20261024")
+        self.assertEqual(self.ctx.monthly_monday_batch, "UPM20261024")
+        self.assertEqual(self.ctx.monthly_rolling_owner_start, "2026-10-24")
+        self.assertEqual(self.ctx.monthly_rolling_owner_end, "2026-11-06")
+
+    def test_october_delivery_remains_historical_standalone(self):
+        historical = ReleaseContext.for_monthly_delivery("2026-10-01")
+        self.assertFalse(historical.monthly_rolls_into_batch)
+        self.assertEqual(historical.release_id, "UPM-2026-09-MONTHLY")
 
     def test_context_refuses_a_non_first_delivery_date(self):
         with self.assertRaisesRegex(ValueError, "scheduled for the 1st"):
@@ -21,7 +34,9 @@ class MonthlyDeliveryWorkflowTests(unittest.TestCase):
         with (
             patch("monthly_delivery_workflow._preflight", return_value=True),
             patch("folder_setup.create_monthly_delivery_folder", return_value=True),
-            patch("monday_sync.ensure_monday_monthly_batch", return_value=True),
+            patch(
+                "monday_sync.run_monday_source_preflight", return_value=True
+            ) as monday_source,
             patch("monday_sync.run_monday_sync") as monday,
             patch(
                 "domo_exports.run_domo_exports",
@@ -44,12 +59,15 @@ class MonthlyDeliveryWorkflowTests(unittest.TestCase):
         self.assertEqual(domo.call_args.kwargs["only_keys"], list(MONTHLY_DOMO_KEYS))
         packaging.assert_called_once()
         monday.assert_not_called()
+        owner = monday_source.call_args.args[0]
+        self.assertEqual(owner.release_start, "2026-10-24")
+        self.assertEqual(owner.release_end, "2026-11-06")
 
     def test_failed_domo_marks_monthly_monday_item_stuck(self):
         with (
             patch("monthly_delivery_workflow._preflight", return_value=True),
             patch("folder_setup.create_monthly_delivery_folder", return_value=True),
-            patch("monday_sync.ensure_monday_monthly_batch", return_value=True),
+            patch("monday_sync.run_monday_source_preflight", return_value=True),
             patch("monday_sync.run_monday_sync", return_value=True) as monday,
             patch(
                 "domo_exports.run_domo_exports",

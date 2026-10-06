@@ -93,6 +93,8 @@ def _write_report(
         "release": {
             "id": ctx.release_id,
             "monday_batch": ctx.monthly_monday_batch,
+            "rolling_owner_start": ctx.monthly_rolling_owner_start,
+            "rolling_owner_end": ctx.monthly_rolling_owner_end,
             "delivery_month": ctx.monthly_metadata_display_folder,
             "content_start": ctx.release_start,
             "content_end": ctx.release_end,
@@ -158,8 +160,22 @@ def run_monthly_delivery(
     steps["folder_setup"] = "completed"
 
     if not skip_monday:
-        from monday_sync import ensure_monday_monthly_batch, run_monday_sync
-        if not ensure_monday_monthly_batch(ctx, dry_run=dry_run, logger=logger):
+        from monday_sync import (
+            ensure_monday_monthly_batch,
+            run_monday_source_preflight,
+            run_monday_sync,
+        )
+        if ctx.monthly_rolls_into_batch:
+            monday_ready = run_monday_source_preflight(
+                ctx.monthly_rolling_context(), dry_run=dry_run, logger=logger
+            )
+        else:
+            # Historical standalone monthly releases remain restartable under
+            # their original IDs; new first-of-month work uses the rolling owner.
+            monday_ready = ensure_monday_monthly_batch(
+                ctx, dry_run=dry_run, logger=logger
+            )
+        if not monday_ready:
             steps["monday_start"] = "failed"
             return steps
         steps["monday_start"] = "completed"
@@ -230,10 +246,12 @@ def main() -> int:
     )
     started_at = datetime.now().astimezone()
     logger.info(
-        "Monthly delivery %s: content %s through %s",
+        "Monthly delivery %s: content %s through %s; rolling owner %s through %s",
         ctx.monthly_metadata_display_folder,
         ctx.release_start,
         ctx.release_end,
+        ctx.monthly_rolling_owner_start or "historical standalone",
+        ctx.monthly_rolling_owner_end or "historical standalone",
     )
     try:
         steps = run_monthly_delivery(
