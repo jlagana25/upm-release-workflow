@@ -619,14 +619,14 @@ inline or are submitted to HDF1's login-session agent.
   SoundMouse item for `YYYYMM -2`. It never creates
   labels, re-reads both batches to verify writes, and never downgrades final
   subitem or main-item statuses. Prepared
-  packages become `Clear to Send`; explicit delivered state becomes `Complete`.
+  packages become `Ready to Deliver`; explicit delivered state becomes `Complete`.
   NTT DATA, JMD/TSS, Qwire, and Scripps are built only by
   `monthly_delivery_workflow.py` on the 1st for the complete previous calendar
   month. Its root is `UPM-YYYY-MM-MONTHLY` and Monday batch is `UPMYYYYMM01`.
   Rolling Content Updates items exclude those four monthly-only subitems; the
   source preflight removes any copies created by the external Monday template
   through the API before validating the destination. The standalone monthly
-  item uses `Working On It` while building and `Clear to Send` when verified. Never carry
+  item uses `In Progress` while building and `Ready to Deliver` when verified. Never carry
   monthly NTT audio or metadata forward from a rolling release.
   After the monthly NTT DATA and JMD/TSS MediaBoxes are verified, prepare two
   Outlook drafts only. Resolve the approved Japan delivery recipient and CC

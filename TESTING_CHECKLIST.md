@@ -948,12 +948,12 @@ than browser UI automation.
   rolling Content Updates through the Monday API; those subitems exist only on
   the standalone `UPMYYYYMM01` monthly item.
 - A real full run advances successfully prepared package subitems to
-  `Clear to Send`. It derives each main-item status from its subitems and never
-  downgrades `Complete`, `Done`, `Not Needed`, or `API Client - Not Needed`.
+  `Ready to Deliver`. It derives each main-item status from its subitems and never
+  downgrades `Complete`, `Done`, `Not Required`, or `Managed by API`.
   Rolling batches must not contain NTT DATA, JMD/TSS, Qwire, or Scripps
   subitems; source preflight removes template-created copies through the API.
   The standalone `UPMYYYYMM01` monthly item contains only those four subitems;
-  they show `Working On It` while building and `Clear to Send` after all
+  they show `In Progress` while building and `Ready to Deliver` after all
   previous-month metadata/audio and final-package gates pass.
   After mutation it re-reads both batches and fails if any requested status is
   not confirmed.

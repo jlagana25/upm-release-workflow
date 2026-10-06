@@ -454,13 +454,13 @@ Then the other machine installs with `pip install -r requirements.lock`.
   `YYYYMM -2` row. Exact-date runs instead resolve Content, Hard Drive, and
   SoundMouse under one compact `UPMYYYYMMDD` batch. It validates
   the expected groups, columns, and stable status-label IDs, then advances only
-  matching subitems. Prepared packages become `Clear to Send`; verified local
+  matching subitems. Prepared packages become `Ready to Deliver`; verified local
   uploaded or delivered states become `Complete`. Rolling rows keep NTT DATA,
   JMD/TSS, Qwire, and Scripps out of rolling Content Updates items. The source
   automation may initially create those template subitems, but source preflight
   removes them through the Monday API before validating the rolling item. The
-  standalone monthly item uses `Working On It` while building and `Clear to Send` when verified;
-  genuinely retired endpoints become `Not Needed`.
+  standalone monthly item uses `In Progress` while building and `Ready to Deliver` when verified;
+  genuinely retired endpoints become `Not Required`.
   Main items are derived from their subitems.
   It fails closed on missing or duplicate rows and never creates
   labels, and re-reads both batches to verify every write. Full runs also issue

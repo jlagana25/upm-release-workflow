@@ -40,7 +40,7 @@ def _content(batch="202609", status="", child_status="Not Started"):
         BoardSubitem(1000 + index, name, child_status)
         for index, name in enumerate(names)
     ]
-    children.append(BoardSubitem(1099, "Adrev/Fuga (+APM Shared Assets)", "API Client - Not Needed"))
+    children.append(BoardSubitem(1099, "Adrev/Fuga (+APM Shared Assets)", "Managed by API"))
     children.append(BoardSubitem(1100, "NBC", child_status))
     children.append(BoardSubitem(1101, "MTV/Viacom (Metadata only)", child_status))
     return BoardItem(100, f"{batch} - Delivery", GROUP_CONTENT, batch, "Aggregator (AG)", status, tuple(children))
@@ -251,9 +251,9 @@ class MondaySyncTests(unittest.TestCase):
             GROUP_CONTENT,
             "UPM20261001",
             "",
-            "Prepping Content",
+            "Preparing Content",
             tuple(
-                BoardSubitem(600 + index, name, "Working On It")
+                BoardSubitem(600 + index, name, "In Progress")
                 for index, name in enumerate(sorted(required_names))
             ),
         )
@@ -293,16 +293,16 @@ class MondaySyncTests(unittest.TestCase):
             },
         )
         by_name = {change.item_name: change.new_status for change in plan}
-        self.assertEqual(by_name["SourceAudio"], "Clear to Send")
-        self.assertEqual(by_name["SourceAudio (Ex-US)"], "Clear to Send")
-        self.assertEqual(by_name["MP3"], "Clear to Send")
-        self.assertEqual(by_name["WAV"], "Clear to Send")
-        self.assertEqual(by_name["Upload to SoundMouse"], "Clear to Send")
+        self.assertEqual(by_name["SourceAudio"], "Ready to Deliver")
+        self.assertEqual(by_name["SourceAudio (Ex-US)"], "Ready to Deliver")
+        self.assertEqual(by_name["MP3"], "Ready to Deliver")
+        self.assertEqual(by_name["WAV"], "Ready to Deliver")
+        self.assertEqual(by_name["Upload to SoundMouse"], "Ready to Deliver")
         self.assertEqual(by_name["Download Media from UniSync"], "Complete")
         main_changes = [change for change in plan if not change.is_subitem]
         self.assertEqual(
             {(change.item_id, change.new_status) for change in main_changes},
-            {(100, "Prepping Content"), (200, "Ready to Close"), (300, "Prepping Content")},
+            {(100, "Preparing Content"), (200, "Ready to Deliver"), (300, "Preparing Content")},
         )
 
     @patch("monday_sync.partner_status", return_value="pending")
@@ -327,9 +327,9 @@ class MondaySyncTests(unittest.TestCase):
         self.assertNotIn("UPM Japan - NTT DATA", desired)
         self.assertNotIn("Scripps (Metadata only)", desired)
         self.assertNotIn("QWire (Metadata only)", desired)
-        self.assertEqual(desired["NBC"], "Not Needed")
-        self.assertEqual(desired["MTV/Viacom (Metadata only)"], "Not Needed")
-        self.assertEqual(desired["ESPN"], "Clear to Send")
+        self.assertEqual(desired["NBC"], "Not Required")
+        self.assertEqual(desired["MTV/Viacom (Metadata only)"], "Not Required")
+        self.assertEqual(desired["ESPN"], "Ready to Deliver")
 
     @patch("monday_sync.partner_status", return_value="pending")
     def test_rolling_plan_leaves_legacy_monthly_subitems_unchanged(self, _status):
@@ -350,7 +350,7 @@ class MondaySyncTests(unittest.TestCase):
             content.delivery_type,
             content.status,
             tuple(
-                BoardSubitem(child.id, child.name, "Not Needed")
+                BoardSubitem(child.id, child.name, "Not Required")
                 if child.name in monthly_names else child
                 for child in content.subitems
             ),
@@ -394,13 +394,13 @@ class MondaySyncTests(unittest.TestCase):
             change.item_name: change.new_status for change in building
         }
         self.assertEqual(
-            building_by_name["UPM Japan - NTT DATA"], "Working On It"
+            building_by_name["UPM Japan - NTT DATA"], "In Progress"
         )
 
         built = build_status_plan(ctx, READY_RESULTS, items)
         built_by_name = {change.item_name: change.new_status for change in built}
         self.assertEqual(
-            built_by_name["UPM Japan - NTT DATA"], "Clear to Send"
+            built_by_name["UPM Japan - NTT DATA"], "Ready to Deliver"
         )
 
     @patch("monday_sync.partner_status")
@@ -485,7 +485,7 @@ class MondaySyncTests(unittest.TestCase):
         )
         desired = {change.item_name: change.new_status for change in plan}
         self.assertEqual(desired["Upload to SoundMouse"], "Complete")
-        self.assertEqual(desired["Process Metadata in SoundMouse"], "Clear to Send")
+        self.assertEqual(desired["Process Metadata in SoundMouse"], "Ready to Deliver")
 
     @patch("monday_sync.partner_status", return_value="delivered")
     def test_all_individual_delivery_states_complete_packages(self, _status):
@@ -549,7 +549,7 @@ class MondaySyncTests(unittest.TestCase):
             {"202606 -2": [_soundmouse(batch="202606 -2")]},
         )
         desired = {change.item_name: change.new_status for change in plan}
-        self.assertEqual(desired["Upload to SoundMouse"], "Clear to Send")
+        self.assertEqual(desired["Upload to SoundMouse"], "Ready to Deliver")
         self.assertNotIn("MP3", desired)
         self.assertNotIn("SourceAudio", desired)
 
@@ -566,9 +566,9 @@ class MondaySyncTests(unittest.TestCase):
             ]},
         )
         desired = {change.item_name: change.new_status for change in plan}
-        self.assertEqual(desired["SourceAudio"], "Clear to Send")
-        self.assertEqual(desired["MP3"], "Clear to Send")
-        self.assertEqual(desired["Upload to SoundMouse"], "Clear to Send")
+        self.assertEqual(desired["SourceAudio"], "Ready to Deliver")
+        self.assertEqual(desired["MP3"], "Ready to Deliver")
+        self.assertEqual(desired["Upload to SoundMouse"], "Ready to Deliver")
 
     @patch("monday_sync.partner_status", return_value="pending")
     def test_dry_run_validates_and_never_mutates(self, _status):
@@ -700,9 +700,9 @@ class MondaySyncTests(unittest.TestCase):
                     logger=logging.getLogger("test_monday_recovery"), gateway=gateway,
                 ))
         desired = {change.item_name: change.new_status for change in gateway.changes}
-        self.assertEqual(desired["SourceAudio"], "Clear to Send")
-        self.assertEqual(desired["MP3"], "Clear to Send")
-        self.assertEqual(desired["Upload to SoundMouse"], "Clear to Send")
+        self.assertEqual(desired["SourceAudio"], "Ready to Deliver")
+        self.assertEqual(desired["MP3"], "Ready to Deliver")
+        self.assertEqual(desired["Upload to SoundMouse"], "Ready to Deliver")
 
     @patch("monday_sync.partner_status", return_value="pending")
     def test_live_checkpoint_does_not_reuse_old_report(self, _status):
@@ -740,8 +740,8 @@ class MondaySyncTests(unittest.TestCase):
                     include_history=False,
                 ))
         desired = {change.item_name: change.new_status for change in gateway.changes}
-        self.assertEqual(desired["MP3"], "Clear to Send")
-        self.assertEqual(desired["WAV"], "Clear to Send")
+        self.assertEqual(desired["MP3"], "Ready to Deliver")
+        self.assertEqual(desired["WAV"], "Ready to Deliver")
         self.assertNotIn("SourceAudio", desired)
         self.assertNotIn("Upload to SoundMouse", desired)
 
@@ -777,8 +777,8 @@ class MondaySyncTests(unittest.TestCase):
                     logger=logging.getLogger("test_monday_failure"), gateway=gateway,
                 ))
         desired = {change.item_name: change.new_status for change in gateway.changes}
-        self.assertEqual(desired["MP3"], "Stuck")
-        self.assertEqual(desired["WAV"], "Stuck")
+        self.assertEqual(desired["MP3"], "Blocked")
+        self.assertEqual(desired["WAV"], "Blocked")
 
     @patch("monday_sync.partner_status", return_value="pending")
     def test_post_write_verification_fails_closed(self, _status):

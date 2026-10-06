@@ -61,26 +61,26 @@ SUBITEM_STATUS_COLUMN = "status"
 
 MAIN_FINAL_STATUSES = frozenset({"Done", "Delivered"})
 SUBITEM_FINAL_STATUSES = frozenset({
-    "Complete", "Done", "Not Needed", "API Client - Not Needed",
+    "Complete", "Done", "Not Required", "Managed by API",
 })
-SUBITEM_IGNORE_STATUSES = frozenset({"Not Needed", "API Client - Not Needed"})
+SUBITEM_IGNORE_STATUSES = frozenset({"Not Required", "Managed by API"})
 
 # Labels are verified against the live schema before writes.  The numeric value
 # is the stable Monday label ID (passed in the API's confusingly named `index`
 # field), not its mutable visual order.
 REQUIRED_MAIN_LABELS = {
-    "Prepping Content": 4,
-    "Ready to Close": 8,
-    "Stuck": 2,
+    "Preparing Content": 4,
+    "Ready to Deliver": 8,
+    "Blocked": 2,
     "Delivered": 10,
 }
 REQUIRED_SUBITEM_LABELS = {
-    "Working On It": 0,
+    "In Progress": 0,
     "Scheduled Monthly": 101,
-    "Clear to Send": 3,
-    "Not Needed": 13,
+    "Ready to Deliver": 3,
+    "Not Required": 13,
     "Complete": 18,
-    "Stuck": 2,
+    "Blocked": 2,
 }
 
 CONTENT_PARTNERS = {
@@ -709,7 +709,7 @@ class MondayClient:
                     "name": name,
                     "values": json.dumps({
                         SUBITEM_STATUS_COLUMN: {
-                            "index": REQUIRED_SUBITEM_LABELS["Working On It"]
+                            "index": REQUIRED_SUBITEM_LABELS["In Progress"]
                         }
                     }),
                 },
@@ -805,7 +805,7 @@ class MondayClient:
                 )
             values = json.dumps({
                 "batch": batch,
-                MAIN_STATUS_COLUMN: {"index": REQUIRED_MAIN_LABELS["Prepping Content"]},
+                MAIN_STATUS_COLUMN: {"index": REQUIRED_MAIN_LABELS["Preparing Content"]},
             })
             created = self._request(
                 """
@@ -834,7 +834,7 @@ class MondayClient:
                 GROUP_CONTENT,
                 batch,
                 "",
-                "Prepping Content",
+                "Preparing Content",
                 (),
             )
 
@@ -870,7 +870,7 @@ class MondayClient:
                     "name": name,
                     "values": json.dumps({
                         SUBITEM_STATUS_COLUMN: {
-                            "index": REQUIRED_SUBITEM_LABELS["Working On It"]
+                            "index": REQUIRED_SUBITEM_LABELS["In Progress"]
                         }
                     }),
                 },
@@ -1012,10 +1012,10 @@ def _desired_package_status(
     if partner in MONTHLY_METADATA_PARTNERS:
         if ctx.is_monthly_delivery:
             if gate == "failed":
-                return "Stuck"
+                return "Blocked"
             if gate == "ready":
-                return "Clear to Send"
-            return "Working On It"
+                return "Ready to Deliver"
+            return "In Progress"
         if not getattr(ctx, "monthly_metadata_due", True):
             return MONTHLY_PENDING_STATUS
         if (
@@ -1023,14 +1023,14 @@ def _desired_package_status(
             and not monthly_metadata_delivery_ready(ctx)
         ):
             if gate == "failed":
-                return "Stuck"
+                return "Blocked"
             if gate == "ready":
                 return MONTHLY_PENDING_STATUS
-            return "Working On It"
+            return "In Progress"
     if gate == "failed":
-        return "Stuck"
+        return "Blocked"
     if gate == "ready":
-        return "Clear to Send"
+        return "Ready to Deliver"
     return None
 
 
@@ -1044,7 +1044,7 @@ def _change_if_allowed(
     if not desired or item.status == desired:
         return
     if item.status in SUBITEM_FINAL_STATUSES and not (
-        reopen_monthly_not_needed and item.status == "Not Needed"
+        reopen_monthly_not_needed and item.status == "Not Required"
     ):
         return
     changes.append(StatusChange(
@@ -1072,16 +1072,16 @@ def _main_status(item: BoardItem, changes: list[StatusChange]) -> str | None:
         for child in item.subitems
         if _planned_status(child, changes) not in SUBITEM_IGNORE_STATUSES
     ]
-    if any(status == "Stuck" for status in statuses):
-        return "Stuck"
+    if any(status == "Blocked" for status in statuses):
+        return "Blocked"
     if statuses and all(status in {"Complete", "Done"} for status in statuses):
         return "Delivered"
     if statuses and all(
-        status in {"Clear to Send", "Complete", "Done"} for status in statuses
+        status in {"Ready to Deliver", "Complete", "Done"} for status in statuses
     ):
-        return "Ready to Close"
+        return "Ready to Deliver"
     if changes:
-        return "Prepping Content"
+        return "Preparing Content"
     return None
 
 
@@ -1113,7 +1113,7 @@ def _content_changes(ctx: ReleaseContext, item: BoardItem, results: Any) -> list
         for name in RETIRED_CONTENT_SUBITEMS:
             retired = children.get(name)
             if retired is not None:
-                _change_if_allowed(changes, retired, "Not Needed")
+                _change_if_allowed(changes, retired, "Not Required")
     for name, partner in managed_partners.items():
         gate = _gate_state(results, CONTENT_GATES.get(partner, DEFAULT_CONTENT_GATE))
         desired = _desired_package_status(ctx, partner, gate)
@@ -1137,7 +1137,7 @@ def _hd_changes(ctx: ReleaseContext, item: BoardItem, results: Any) -> list[Stat
     state = partner_status(ctx.specials_dir, "hd_updates")
     gate = _gate_state(results, HD_GATE)
     desired = "Complete" if state == "delivered" else (
-        "Stuck" if gate == "failed" else "Clear to Send" if gate == "ready" else None
+        "Blocked" if gate == "failed" else "Ready to Deliver" if gate == "ready" else None
     )
     changes: list[StatusChange] = []
     for name in ("MP3", "WAV"):
@@ -1170,20 +1170,20 @@ def _soundmouse_changes(
         if phase == "completed":
             _change_if_allowed(changes, children[name], "Complete")
         elif phase == "failed":
-            _change_if_allowed(changes, children[name], "Stuck")
+            _change_if_allowed(changes, children[name], "Blocked")
     if gate == "failed":
-        _change_if_allowed(changes, children["Upload to SoundMouse"], "Stuck")
+        _change_if_allowed(changes, children["Upload to SoundMouse"], "Blocked")
         return changes
     if gate == "ready":
         for name in (
             "Download Media from UniSync", "Export Metadata", "Export Album Covers",
         ):
             _change_if_allowed(changes, children[name], "Complete")
-        _change_if_allowed(changes, children["Upload to SoundMouse"], "Clear to Send")
+        _change_if_allowed(changes, children["Upload to SoundMouse"], "Ready to Deliver")
     if state == "uploaded":
         _change_if_allowed(changes, children["Upload to SoundMouse"], "Complete")
         _change_if_allowed(
-            changes, children["Process Metadata in SoundMouse"], "Clear to Send"
+            changes, children["Process Metadata in SoundMouse"], "Ready to Deliver"
         )
     return changes
 
