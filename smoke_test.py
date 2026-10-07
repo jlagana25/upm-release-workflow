@@ -40,6 +40,8 @@ MODULES = [
     "soundmouse_uploader_delivery", "netmix_portal_delivery",
     "monthly_delivery_workflow",
     "monthly_release_migration",
+    "release_storage_consolidation",
+    "release_archiver",
     "upm_release_workflow", "ai_team_demo",
 ]
 

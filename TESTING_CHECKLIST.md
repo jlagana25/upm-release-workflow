@@ -71,6 +71,7 @@ setting up a new machine, work through Part 2 top to bottom.
 | Initial rolling transition | `python3 upm_release_workflow.py --start-date 2026-09-01 --end-date 2026-09-11` |
 | Exact rolling 14-day delivery | `python3 upm_release_workflow.py --start-date 2026-09-12 --end-date 2026-09-25` |
 | First-of-month NTT/JMD-TSS/Qwire/Scripps build | `python3 monthly_delivery_workflow.py --delivery-date 2026-10-01 --dry-run` |
+| Preview three-calendar-month retention | `python3 release_archiver.py --as-of 2026-10-06` |
 | Previous month (full month), auto from today | `python3 upm_release_workflow.py --previous-month` |
 | Previous month relative to a given month | `python3 upm_release_workflow.py --previous-month --year 2026 --month 6` |
 | Preview the whole run incl. non-maintrack deletions | add `--dry-run` |
@@ -84,6 +85,14 @@ content dates September 1–30. It must export only the four monthly cards, run 
 Japan UniSync, and leave every ordinary rolling partner unbuilt. The later
 September 26–October 9 full run must merge the baseline around these packages,
 clear the early-phase marker, and preserve their exact files and statuses.
+
+For every new run, confirm `ctx.specials_dir`, `ctx.soundmouse_release_dir`,
+`ctx.hd_staging_dir`, and `ctx.hd_final_dir` all resolve beneath the same
+Pegasus 1 `UPM-YYYY-MM-DD` root. Pegasus 2 is source-only for shared baselines
+and caches. Before executing retention, preview `release_archiver.py`, verify
+the cutoff keeps the current and previous two calendar months, and require the
+exact release confirmation. Never accept an archive unless every extracted
+file size and SHA-256 matches the expanded release manifest.
 
 ## What runs, and in what order
 

@@ -23,8 +23,10 @@ units or valid selector tokens.
   starts September 12 and resumes the normal 14-day cadence.
 - August Part 2 and exact-date runs use compact start-date IDs
   (`UPMYYYYMMDD`); August keeps its established client-facing Part 2 label.
-- Compact batch IDs do not control mounted-volume folder spelling. Specials and
-  Hard Drive Updates roots retain `UPM-YYYY-MM-DD` for date-based runs.
+- Compact batch IDs do not control mounted-volume folder spelling. Every
+  generated release component now lives beneath one Pegasus 1
+  `UPM-YYYY-MM-DD` root: partner packages, `SoundMouse/`, and
+  `Hard Drive Updates/{2-STAGING,3-FINAL PACKAGING}`.
 - Rolling Final Packaging partner folders abbreviate month names while keeping
   the full inclusive range, e.g.
   `Universal Production Music Sep 29–Oct 12 2026 Releases - SynchTank`;
@@ -97,8 +99,9 @@ validation signal:
   GUI session, the apps installed, and per-machine reference screenshots. None
   exist here.
 - **Mounted storage** — every real input/output path is on two Thunderbolt
-  volumes, `/Volumes/Pegasus32 R8 - 1` (Specials) and `/Volumes/Pegasus32 R8 - 2`
-  (Hard Drive Updates). They are not present in the sandbox.
+  volumes, `/Volumes/Pegasus32 R8 - 1` (consolidated release roots) and
+  `/Volumes/Pegasus32 R8 - 2` (shared HD baselines/caches and legacy output).
+  They are not present in the sandbox.
 - **Domo exports** — Step 1, Step 16, and BMAT use explicit public Data API
   projections with the separate workflow-owned API Keychain pair and fail
   closed on API errors. The retained authenticated browser is used only for
@@ -250,6 +253,10 @@ helpers), `unisync_prefs.py` (writes UniSync's XML prefs), `remote_runner.py`
 `post_packaging_delivery.py` (unified guarded endpoint runner),
 `monthly_release_migration.py` (one-time fail-closed adoption of completed
 standalone monthly artifacts and receipts into their rolling owner),
+`release_storage_consolidation.py` (copy/hash/verify migration of legacy
+SoundMouse and HD output into the main Pegasus 1 release root),
+`release_archiver.py` (same-volume `.tar.zst` retention with full manifest
+verification; keeps the current and previous two calendar months),
 `delivery_common.py` (manifest/checkpoint/receipt safety primitives),
 `espn_delivery.py` (Media Shuttle folder delivery),
 `soundexchange_delivery.py` (two-registrant portal submission),
@@ -342,6 +349,21 @@ inline or are submitted to HDF1's login-session agent.
   `--no-auto-mount`, `UPM_DISABLE_AUTO_MOUNT=1`, or the private
   `~/.upm_release_workflow/disable_auto_mount` sentinel. Required Pegasus
   failures remain fail-closed; optional Documents/UPM Builds failures warn.
+- **One release means one physical root.** Generated SoundMouse and Hard Drive
+  output may not be restored to the legacy Pegasus 2 output folders. Shared HD
+  baselines and UPM caches remain on Pegasus 2, but every new release writes
+  `SoundMouse/` and `Hard Drive Updates/` beneath its Pegasus 1 Specials root.
+  Legacy moves use `release_storage_consolidation.py`: copy to a hidden sibling,
+  hash every source/destination file, atomically publish the component, rewrite
+  private path references, and only then remove the old folder.
+- **Retention is three calendar months on the same Pegasus disk.** The current
+  month and previous two calendar months stay expanded. A release whose end
+  date predates that window may be archived only when its newest real report is
+  completed and every recorded delivery state is delivered. The archive is a
+  verified `.tar.zst` plus a private full-file manifest under `_ARCHIVE`; the
+  expanded source is removed only after every archived file hashes identically.
+  Baselines, caches, audit/recovery folders, active or incomplete releases,
+  correction work, and unrecognized legacy folders are never auto-selected.
 - **Release CSVs/tracklists** — the Domo exports live under
   `~/Documents/UPM Tracklists/Release Lists/` **per machine**, not in git.
 - **Reference screenshots** — GUI matching reads crops from

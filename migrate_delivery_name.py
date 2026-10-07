@@ -12,14 +12,14 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from config import HD_FINAL_BASE, HD_STAGING_BASE, SPECIALS_BASE, is_retired_partner_name
+from config import SPECIALS_BASE, is_retired_partner_name
 
 
 def build_operations(release_id: str, old_label: str, new_label: str) -> list[tuple[Path, Path]]:
     specials = SPECIALS_BASE / release_id
     final = specials / "3-FINAL PACKAGING"
-    staging = HD_STAGING_BASE / release_id
-    hd_final = HD_FINAL_BASE / release_id
+    staging = specials / "Hard Drive Updates" / "2-STAGING"
+    hd_final = specials / "Hard Drive Updates" / "3-FINAL PACKAGING"
     operations: list[tuple[Path, Path]] = []
 
     # Display-name files are shallow by design; avoid walking the many-terabyte

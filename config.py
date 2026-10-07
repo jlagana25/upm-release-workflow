@@ -51,14 +51,18 @@ BASELINE_HD_FINAL = Path(
 # ---------------------------------------------------------------------------
 
 SPECIALS_BASE = Path("/Volumes/Pegasus32 R8 - 1/_Specials/UPM")
-HD_STAGING_BASE = Path("/Volumes/Pegasus32 R8 - 2/Hard Drive Updates/2-STAGING")
-HD_FINAL_BASE = Path(
+LEGACY_HD_STAGING_BASE = Path("/Volumes/Pegasus32 R8 - 2/Hard Drive Updates/2-STAGING")
+LEGACY_HD_FINAL_BASE = Path(
     "/Volumes/Pegasus32 R8 - 2/Hard Drive Updates/3-FINAL PACKAGING/UPM-US"
 )
 MASTERS_COVERS_DIR = Path("/Volumes/Pegasus32 R8 - 1/UPM-US-Masters/Covers")
 UPM_CACHE_MP3 = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/MP3")
 UPM_CACHE_WAV = Path("/Volumes/Pegasus32 R8 - 2/UPM-US-Cache/WAV")
-SOUNDMOUSE_BASE = Path("/Volumes/Pegasus32 R8 - 2/SoundMouse")
+LEGACY_SOUNDMOUSE_BASE = Path("/Volumes/Pegasus32 R8 - 2/SoundMouse")
+# Backward-compatible names for maintenance tools that inspect the old layout.
+HD_STAGING_BASE = LEGACY_HD_STAGING_BASE
+HD_FINAL_BASE = LEGACY_HD_FINAL_BASE
+SOUNDMOUSE_BASE = LEGACY_SOUNDMOUSE_BASE
 BMAT_BASE = Path("/Volumes/Pegasus32 R8 - 1/_Specials/BMAT")
 
 # Retired partner folders can remain in the shared Specials baseline for
@@ -698,8 +702,15 @@ class ReleaseContext:
 
         # ---- Top-level directories ------------------------------------------
         self.specials_dir   = SPECIALS_BASE / self.specials_root
-        self.hd_staging_dir = HD_STAGING_BASE / self.hd_folder
-        self.hd_final_dir   = HD_FINAL_BASE / self.hd_folder
+        # Every release now owns one physical root on Pegasus 1. Baselines and
+        # caches may remain on Pegasus 2, but generated HD and SoundMouse output
+        # must stay inside this release tree so retention is atomic by release.
+        self.hd_staging_dir = (
+            self.specials_dir / "Hard Drive Updates" / "2-STAGING"
+        )
+        self.hd_final_dir = (
+            self.specials_dir / "Hard Drive Updates" / "3-FINAL PACKAGING"
+        )
 
         # ---- Tracklist / metadata CSVs --------------------------------------
         self.us_tracklist_csv = (
@@ -739,9 +750,7 @@ class ReleaseContext:
         self.soundmouse_activation_range = (
             f"{self.release_start}_to_{self.release_end}"
         )
-        self.soundmouse_release_dir = (
-            SOUNDMOUSE_BASE / self.soundmouse_activation_range
-        )
+        self.soundmouse_release_dir = self.specials_dir / "SoundMouse"
         self.soundmouse_validation_report = (
             EXPORTS_DIR
             / f"SoundMouse {self.soundmouse_activation_range}_Missing.csv"

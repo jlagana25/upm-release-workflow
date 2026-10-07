@@ -28,7 +28,6 @@ from typing import Callable
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from config import (
-    SOUNDMOUSE_BASE,
     SOUNDMOUSE_DOMO_CARDS,
     SOUNDMOUSE_DOMO_PAGE_ID,
     UPM_CACHE_WAV,
@@ -1561,7 +1560,7 @@ def run_soundmouse_step(
     progress_callback: Callable[[str], None] | None = None,
 ) -> bool:
     logger.info(f"  Tracklist: {ctx.soundmouse_tracklist_csv}")
-    logger.info(f"  Release base: {SOUNDMOUSE_BASE}")
+    logger.info(f"  Release base: {ctx.soundmouse_release_dir}")
     from delivery_state import partner_needs_correction_package, partner_status
 
     status = partner_status(ctx.specials_dir, "soundmouse")
