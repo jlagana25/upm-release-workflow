@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Move legacy SoundMouse and HD output into the Pegasus 1 release root."""
+"""Move legacy SoundMouse and HD output into canonical Pegasus 1 stage trees."""
 
 from __future__ import annotations
 
@@ -160,6 +160,10 @@ def _rewrite_json_roots(roots: tuple[Path, ...], old: Path, new: Path) -> int:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*.json")):
+            # This file is immutable migration evidence; rewriting its source
+            # fields would erase the history of where a component came from.
+            if path.name == "storage_consolidation.json":
+                continue
             try:
                 original = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
@@ -178,15 +182,35 @@ def _rewrite_json_roots(roots: tuple[Path, ...], old: Path, new: Path) -> int:
     return changed
 
 
-def component_operations(ctx: ReleaseContext) -> tuple[tuple[str, Path, Path], ...]:
+def component_operations(
+    ctx: ReleaseContext,
+) -> tuple[tuple[str, tuple[Path, ...], Path], ...]:
+    """Return legacy and first-pass consolidation sources for each component."""
     return (
         (
             "SoundMouse",
-            LEGACY_SOUNDMOUSE_BASE / ctx.soundmouse_activation_range,
+            (
+                ctx.specials_dir / "SoundMouse",
+                LEGACY_SOUNDMOUSE_BASE / ctx.soundmouse_activation_range,
+            ),
             ctx.soundmouse_release_dir,
         ),
-        ("HD Staging", LEGACY_HD_STAGING_BASE / ctx.hd_folder, ctx.hd_staging_dir),
-        ("HD Final", LEGACY_HD_FINAL_BASE / ctx.hd_folder, ctx.hd_final_dir),
+        (
+            "HD Staging",
+            (
+                ctx.specials_dir / "Hard Drive Updates" / "2-STAGING",
+                LEGACY_HD_STAGING_BASE / ctx.hd_folder,
+            ),
+            ctx.hd_staging_dir,
+        ),
+        (
+            "HD Final",
+            (
+                ctx.specials_dir / "Hard Drive Updates" / "3-FINAL PACKAGING",
+                LEGACY_HD_FINAL_BASE / ctx.hd_folder,
+            ),
+            ctx.hd_final_dir,
+        ),
     )
 
 
@@ -207,10 +231,19 @@ def consolidate_release(
     results: dict[str, str] = {}
     audit_entries: list[dict[str, object]] = []
     report_root = Path(logs_dir) / "reports" / ctx.release_id
-    for label, source, target in component_operations(ctx):
-        if not source.exists() and target.is_dir():
-            rewritten = _rewrite_json_roots(
-                (ctx.specials_dir / "_WORKFLOW", report_root), source, target
+    for label, sources, target in component_operations(ctx):
+        existing_sources = [source for source in sources if source.exists()]
+        if len(existing_sources) > 1:
+            raise ConsolidationError(
+                f"Multiple source trees exist for {label}: "
+                + ", ".join(str(path) for path in existing_sources)
+            )
+        if not existing_sources and target.is_dir():
+            rewritten = sum(
+                _rewrite_json_roots(
+                    (ctx.specials_dir / "_WORKFLOW", report_root), source, target
+                )
+                for source in sources
             )
             logger.info("  ✓ %s already consolidated: %s", label, target)
             results[label] = "already_consolidated"
@@ -223,16 +256,24 @@ def consolidate_release(
                 "status": "already_consolidated",
             })
             continue
-        if not source.is_dir():
-            logger.info("  - %s has no legacy component to migrate: %s", label, source)
+        if not existing_sources:
+            logger.info(
+                "  - %s has no legacy component to migrate: %s",
+                label,
+                ", ".join(str(path) for path in sources),
+            )
             results[label] = "not_present"
             continue
+        source = existing_sources[0]
+        if not source.is_dir() or source.is_symlink():
+            raise ConsolidationError(f"Component source is unsafe: {source}")
         if target.exists() and not target.is_dir():
             raise ConsolidationError(f"Consolidation target is not a directory: {target}")
         logger.info("  %s\n    %s\n    → %s", label, source, target)
         if not execute:
             results[label] = "would_consolidate"
             continue
+        method = "verified_copy"
         if target.is_dir():
             source_manifest = tree_manifest(source)
             if tree_manifest(target) != source_manifest:
@@ -240,6 +281,12 @@ def consolidate_release(
                     f"Existing target differs from legacy source for {label}: {target}"
                 )
         else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() and source.stat().st_dev == target.parent.stat().st_dev:
+            source.rename(target)
+            source_manifest = tuple()
+            method = "atomic_rename"
+        elif not target.exists():
             staging = target.with_name(f".{target.name}.consolidating")
             source_manifest = _copy_tree_resumable(source, staging, logger)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -247,12 +294,14 @@ def consolidate_release(
         rewritten = _rewrite_json_roots(
             (ctx.specials_dir / "_WORKFLOW", report_root), source, target
         )
-        # Every staged file was hash-verified immediately before the atomic
-        # directory rename above. Re-reading hundreds of gigabytes here would
-        # not add a distinct safety property and would multiply SMB traffic.
+        # Same-volume renames preserve the existing directory entries without
+        # copying bytes. Cross-volume staging was hash-verified before publish.
+        # Re-reading hundreds of gigabytes here would not add a distinct safety
+        # property and would multiply SMB traffic.
         if not target.is_dir():
             raise ConsolidationError(f"Atomic target rename failed for {label}")
-        shutil.rmtree(source)
+        if source.exists():
+            shutil.rmtree(source)
         if source.exists() or not target.is_dir():
             raise ConsolidationError(f"Could not verify source cleanup for {label}")
         results[label] = "consolidated"
@@ -260,9 +309,16 @@ def consolidate_release(
             "component": label,
             "source": str(source),
             "target": str(target),
-            "objects": len(source_manifest),
+            "objects": (
+                None if method == "atomic_rename" else len(source_manifest)
+            ),
             "json_records_rewritten": rewritten,
+            "method": method,
         })
+
+    obsolete_parent = ctx.specials_dir / "Hard Drive Updates"
+    if execute and obsolete_parent.is_dir() and not any(obsolete_parent.iterdir()):
+        obsolete_parent.rmdir()
 
     if execute and audit_entries:
         audit = ctx.specials_dir / "_WORKFLOW" / "storage_consolidation.json"

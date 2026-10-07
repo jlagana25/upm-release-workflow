@@ -18,8 +18,8 @@ from config import SPECIALS_BASE, is_retired_partner_name
 def build_operations(release_id: str, old_label: str, new_label: str) -> list[tuple[Path, Path]]:
     specials = SPECIALS_BASE / release_id
     final = specials / "3-FINAL PACKAGING"
-    staging = specials / "Hard Drive Updates" / "2-STAGING"
-    hd_final = specials / "Hard Drive Updates" / "3-FINAL PACKAGING"
+    staging = specials / "2-STAGING" / "Hard Drive Updates"
+    hd_final = specials / "3-FINAL PACKAGING" / "Hard Drive Updates"
     operations: list[tuple[Path, Path]] = []
 
     # Display-name files are shallow by design; avoid walking the many-terabyte

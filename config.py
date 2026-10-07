@@ -702,14 +702,14 @@ class ReleaseContext:
 
         # ---- Top-level directories ------------------------------------------
         self.specials_dir   = SPECIALS_BASE / self.specials_root
-        # Every release now owns one physical root on Pegasus 1. Baselines and
-        # caches may remain on Pegasus 2, but generated HD and SoundMouse output
-        # must stay inside this release tree so retention is atomic by release.
+        # Every release owns one physical root on Pegasus 1. Keep generated
+        # components in the release's canonical staging/final trees instead of
+        # creating parallel stage hierarchies beside them.
         self.hd_staging_dir = (
-            self.specials_dir / "Hard Drive Updates" / "2-STAGING"
+            self.specials_dir / "2-STAGING" / "Hard Drive Updates"
         )
         self.hd_final_dir = (
-            self.specials_dir / "Hard Drive Updates" / "3-FINAL PACKAGING"
+            self.specials_dir / "3-FINAL PACKAGING" / "Hard Drive Updates"
         )
 
         # ---- Tracklist / metadata CSVs --------------------------------------
@@ -750,7 +750,11 @@ class ReleaseContext:
         self.soundmouse_activation_range = (
             f"{self.release_start}_to_{self.release_end}"
         )
-        self.soundmouse_release_dir = self.specials_dir / "SoundMouse"
+        self.soundmouse_release_dir = (
+            self.specials_dir
+            / "3-FINAL PACKAGING"
+            / self.partner_folder_name("SoundMouse")
+        )
         self.soundmouse_validation_report = (
             EXPORTS_DIR
             / f"SoundMouse {self.soundmouse_activation_range}_Missing.csv"

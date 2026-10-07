@@ -247,7 +247,8 @@ class SoundMouseTests(unittest.TestCase):
             self.assertEqual(len({job["client_path"] for job in jobs}), 1)
             self.assertTrue(
                 jobs[0]["client_path"].endswith(
-                    "UPM-2026-06-FULL/SoundMouse/MEDIA"
+                    "UPM-2026-06-FULL/3-FINAL PACKAGING/"
+                    "Universal Production Music June 2026 Full Release - SoundMouse/MEDIA"
                 )
             )
             self.assertEqual(

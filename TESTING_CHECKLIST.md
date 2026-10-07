@@ -86,8 +86,10 @@ Japan UniSync, and leave every ordinary rolling partner unbuilt. The later
 September 26–October 9 full run must merge the baseline around these packages,
 clear the early-phase marker, and preserve their exact files and statuses.
 
-For every new run, confirm `ctx.specials_dir`, `ctx.soundmouse_release_dir`,
-`ctx.hd_staging_dir`, and `ctx.hd_final_dir` all resolve beneath the same
+For every new run, confirm `ctx.hd_staging_dir` resolves to
+`2-STAGING/Hard Drive Updates`, `ctx.hd_final_dir` resolves to
+`3-FINAL PACKAGING/Hard Drive Updates`, and `ctx.soundmouse_release_dir` is a
+named SoundMouse package under `3-FINAL PACKAGING`, all beneath the same
 Pegasus 1 `UPM-YYYY-MM-DD` root. Pegasus 2 is source-only for shared baselines
 and caches. Before executing retention, preview `release_archiver.py`, verify
 the cutoff keeps the current and previous two calendar months, and require the

@@ -25,8 +25,9 @@ units or valid selector tokens.
   (`UPMYYYYMMDD`); August keeps its established client-facing Part 2 label.
 - Compact batch IDs do not control mounted-volume folder spelling. Every
   generated release component now lives beneath one Pegasus 1
-  `UPM-YYYY-MM-DD` root: partner packages, `SoundMouse/`, and
-  `Hard Drive Updates/{2-STAGING,3-FINAL PACKAGING}`.
+  `UPM-YYYY-MM-DD` root. Hard Drive Updates lives beneath both canonical stage
+  trees, while SoundMouse is a named partner package beneath
+  `3-FINAL PACKAGING`.
 - Rolling Final Packaging partner folders abbreviate month names while keeping
   the full inclusive range, e.g.
   `Universal Production Music Sep 29–Oct 12 2026 Releases - SynchTank`;
@@ -349,13 +350,16 @@ inline or are submitted to HDF1's login-session agent.
   `--no-auto-mount`, `UPM_DISABLE_AUTO_MOUNT=1`, or the private
   `~/.upm_release_workflow/disable_auto_mount` sentinel. Required Pegasus
   failures remain fail-closed; optional Documents/UPM Builds failures warn.
-- **One release means one physical root.** Generated SoundMouse and Hard Drive
-  output may not be restored to the legacy Pegasus 2 output folders. Shared HD
-  baselines and UPM caches remain on Pegasus 2, but every new release writes
-  `SoundMouse/` and `Hard Drive Updates/` beneath its Pegasus 1 Specials root.
-  Legacy moves use `release_storage_consolidation.py`: copy to a hidden sibling,
-  hash every source/destination file, atomically publish the component, rewrite
-  private path references, and only then remove the old folder.
+- **One release means one physical root and one stage hierarchy.** Generated
+  SoundMouse and Hard Drive output may not be restored to the legacy Pegasus 2
+  output folders or placed in parallel stage trees. Shared HD baselines and UPM
+  caches remain on Pegasus 2. Every new release writes Hard Drive Updates to
+  `2-STAGING/Hard Drive Updates` and `3-FINAL PACKAGING/Hard Drive Updates`,
+  and SoundMouse to its named partner package under `3-FINAL PACKAGING`.
+  Legacy moves use `release_storage_consolidation.py`: use a conflict-checked
+  atomic rename on the same volume, or copy to a hidden sibling and hash every
+  source/destination file across volumes; then rewrite private path references
+  and remove the old folder only after the new location is verified.
 - **Retention is three calendar months on the same Pegasus disk.** The current
   month and previous two calendar months stay expanded. A release whose end
   date predates that window may be archived only when its newest real report is
