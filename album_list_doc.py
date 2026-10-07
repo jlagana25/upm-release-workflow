@@ -420,6 +420,10 @@ def _insert_csv_table(
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
+    # Separate the release heading from the table without adding a blank row.
+    if doc.paragraphs:
+        doc.paragraphs[-1].paragraph_format.space_after = Pt(8)
+
     # Insert one or more blank paragraphs to separate the table from the
     # preceding heading text — without these the table butts up against
     # "<Month> Release".
