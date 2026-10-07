@@ -48,7 +48,7 @@ DEFAULT_TABLE_STYLE = "Table Grid"
 # Number of empty paragraphs to insert between the last content paragraph
 # and the table.  One blank line gives the table room to breathe under
 # the "<Month> Release" heading.
-TABLE_TOP_SPACING_PARAGRAPHS = 1
+TABLE_TOP_SPACING_PARAGRAPHS = 0
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +415,10 @@ def _insert_csv_table(
 ) -> None:
     """Append a new Word table at the end of the document with all CSV rows."""
     headers = list(rows[0].keys())
+    from docx.shared import Pt, Twips, RGBColor
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
 
     # Insert one or more blank paragraphs to separate the table from the
     # preceding heading text — without these the table butts up against
@@ -423,6 +427,34 @@ def _insert_csv_table(
         doc.add_paragraph("")
 
     table = doc.add_table(rows=1 + len(rows), cols=len(headers))
+    table.autofit = True
+    section = doc.sections[-1]
+    available = int((section.page_width - section.left_margin - section.right_margin) / 635)
+    # Preferred widths follow content lengths; cap long titles so they wrap
+    # within the printable page. Word/LibreOffice can further autofit the grid.
+    weights = []
+    for header in headers:
+        lengths = [len(str(row.get(header, "") or "")) for row in rows]
+        weights.append(max(len(header), min(max(lengths, default=0), 60)) + 4)
+    widths = [int(available * weight / sum(weights)) for weight in weights]
+    widths[-1] += available - sum(widths)
+    for column, width in zip(table.columns, widths):
+        column.width = Twips(width)
+    properties = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        border = OxmlElement(f"w:{edge}")
+        for key, value in (("val", "single"), ("sz", "4"), ("color", "D9D9D9")):
+            border.set(qn(f"w:{key}"), value)
+        borders.append(border)
+    properties.append(borders)
+    margins = OxmlElement("w:tblCellMar")
+    for edge, size in (("top", 60), ("bottom", 60), ("left", 110), ("right", 110)):
+        margin = OxmlElement(f"w:{edge}")
+        margin.set(qn("w:w"), str(size))
+        margin.set(qn("w:type"), "dxa")
+        margins.append(margin)
+    properties.append(margins)
     try:
         table.style = DEFAULT_TABLE_STYLE
     except KeyError:
@@ -445,6 +477,28 @@ def _insert_csv_table(
             table.rows[row_idx].cells[col_idx].text = str(
                 data_row.get(header, "") or ""
             )
+
+    repeat = OxmlElement("w:tblHeader")
+    table.rows[0]._tr.get_or_add_trPr().append(repeat)
+    for index, row in enumerate(table.rows):
+        row_properties = row._tr.get_or_add_trPr()
+        row_properties.append(OxmlElement("w:cantSplit"))
+        for cell, width in zip(row.cells, widths):
+            cell.width = Twips(width)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            shade = OxmlElement("w:shd")
+            shade.set(qn("w:fill"), "E5EAF0" if index == 0 else ("F5F7FA" if index % 2 == 0 else "FFFFFF"))
+            cell._tc.get_or_add_tcPr().append(shade)
+            for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.space_before = Pt(0)
+                paragraph.paragraph_format.line_spacing = 1.05
+                paragraph.paragraph_format.keep_with_next = index == 0
+                for run in paragraph.runs:
+                    run.font.name = "Arial"
+                    run.font.size = Pt(10)
+                    run.font.color.rgb = RGBColor(0, 0, 0)
+                    run.bold = index == 0
 
     logger.info(
         f"  Inserted table: {len(rows)} row(s) × {len(headers)} column(s)."
