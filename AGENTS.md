@@ -28,6 +28,10 @@ units or valid selector tokens.
   `UPM-YYYY-MM-DD` root. Hard Drive Updates lives beneath both canonical stage
   trees, while SoundMouse is a named partner package beneath
   `3-FINAL PACKAGING`.
+- BMAT Step 17 packages live under the release-labeled BMAT folder in
+  `3-FINAL PACKAGING`, retaining BMAT's required date/sequence subfolder names.
+  Its shared delivery ledger remains under `BMAT_BASE/_WORKFLOW` and records
+  each package's absolute path so resume and duplicate prevention span releases.
 - Rolling Final Packaging partner folders abbreviate month names while keeping
   the full inclusive range, e.g.
   `Universal Production Music Sep 29–Oct 12 2026 Releases - SynchTank`;

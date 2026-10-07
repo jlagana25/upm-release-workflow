@@ -761,6 +761,10 @@ class ReleaseContext:
         )
 
         # ---- Step 17: BMAT custom-content delivery -------------------------
+        self.bmat_final_dir = (
+            self.specials_dir / "3-FINAL PACKAGING"
+            / self.partner_folder_name("BMAT")
+        )
         # The releases card is filtered to this workflow's exact date range.
         # The submission export is an inventory that Step 17 narrows to those
         # catalogues and then reconciles against the persistent local ledger.

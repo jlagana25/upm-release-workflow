@@ -187,7 +187,7 @@ def pending_catalogues(releases_path: Path, ledger: dict) -> list[str]:
 
 def _prepared_from_ledger(root: Path, delivery: dict) -> PreparedDelivery:
     batch_id = str(delivery["batch_id"])
-    package = root / batch_id
+    package = Path(delivery.get("package_dir") or (root / batch_id))
     metadata_matches = sorted(package.glob(f"{batch_id[:8]}_*.xlsx"))
     if len(metadata_matches) != 1:
         raise ValueError(
@@ -350,6 +350,7 @@ def prepare_delivery(
     delivery_date: date | None = None,
     include_catalogues: Iterable[str] = (),
     workflow_id: str | None = None,
+    package_root: Path | None = None,
 ) -> PreparedDelivery | None:
     ledger = load_ledger(ledger_path)
     selected = list(include_catalogues) or pending_catalogues(releases_path, ledger)
@@ -374,7 +375,7 @@ def prepare_delivery(
         return None
     headers, rows = select_and_validate_submission(submission_path, selected)
     batch_id = _next_batch_id(root, ledger, delivery_date or date.today())
-    package = root / batch_id
+    package = (package_root or root) / batch_id
     package.mkdir(parents=True, exist_ok=False)
     metadata = package / f"{batch_id[:8]}_{int(batch_id[-4:]):02d}.xlsx"
     _write_metadata(metadata, headers, rows)
@@ -390,6 +391,7 @@ def prepare_delivery(
         "created_at": _utc_now(),
         "metadata_sha256": hashlib.sha256(metadata.read_bytes()).hexdigest(),
         "workflow_id": workflow_id,
+        "package_dir": str(package),
     })
     save_ledger(ledger_path, ledger)
     logger.info(f"  Prepared BMAT batch {batch_id}: {len(rows)} track(s), {len(selected)} catalogue(s).")
@@ -891,7 +893,7 @@ def run_bmat_step(
     dry_run: bool,
     logger: logging.Logger,
     *,
-    root: Path = BMAT_BASE,
+    root: Path | None = None,
 ) -> bool:
     """Run the date-scoped BMAT delivery as an independent workflow step."""
     from domo_exports import run_domo_exports
@@ -917,6 +919,8 @@ def run_bmat_step(
         logger.error("  ✗ BMAT Domo exports did not both complete; delivery stopped.")
         return False
 
+    package_root = root if root is not None else ctx.bmat_final_dir
+    root = root if root is not None else BMAT_BASE
     ledger_path = root / "_WORKFLOW" / "delivery_ledger.json"
     prepared: PreparedDelivery | None = None
     try:
@@ -927,6 +931,7 @@ def run_bmat_step(
             ledger_path,
             logger,
             workflow_id=ctx.release_id,
+            package_root=package_root,
         )
         if prepared is None:
             return True

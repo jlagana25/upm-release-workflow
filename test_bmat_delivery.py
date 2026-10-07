@@ -128,8 +128,10 @@ class BmatDeliveryTests(unittest.TestCase):
                 self.logger,
                 delivery_date=date(2026, 9, 11),
                 workflow_id="UPM20260901",
+                package_root=Path(tmp) / "release" / "3-FINAL PACKAGING" / "BMAT",
             )
             self.assertIsNotNone(first)
+            self.assertEqual("BMAT", first.package_dir.parent.name)
             ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
             ledger["deliveries"][0]["status"] = "failed"
             ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
@@ -147,6 +149,7 @@ class BmatDeliveryTests(unittest.TestCase):
                 workflow_id="UPM20260901",
             )
             self.assertEqual(first.batch_id, resumed.batch_id)
+            self.assertEqual(first.package_dir, resumed.package_dir)
             self.assertEqual(1, len(json.loads(
                 ledger_path.read_text(encoding="utf-8")
             )["deliveries"]))
